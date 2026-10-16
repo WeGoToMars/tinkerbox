@@ -30,4 +30,5 @@ class CustomBuildHook(BuildHookInterface):
             host.replace(binary)
         build_data["artifacts"].append("src/tinkerbox_ane/d1/fused-host")
         build_data["pure_python"] = False
-        build_data["tag"] = "py3-none-macosx_27_0_arm64"
+        # PyPI does not accept macosx_27 tags yet; the host binary itself still requires macOS 27.
+        build_data["tag"] = "py3-none-macosx_26_0_arm64"
