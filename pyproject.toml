@@ -13,6 +13,10 @@ dependencies = [
     "numpy==2.4.6",
 ]
 
+[project.urls]
+Homepage = "https://github.com/WeGoToMars/tinkerbox"
+Issues = "https://github.com/WeGoToMars/tinkerbox/issues"
+
 [dependency-groups]
 dev = ["coreai-torch==0.4.3", "pytest==9.1.1"]
 
