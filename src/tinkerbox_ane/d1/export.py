@@ -30,14 +30,14 @@ def export(out: Path = SOURCE) -> Path:
             model = FusedBackbone(backbone, capacity).eval()
             program = torch.export.export(model, model.example_inputs()).run_decompositions(get_decomp_table())
             converter.add_exported_program(
-                program, input_names=[INPUT, "cos", "sin", "past_mask", "packed_state"],
+                program, input_names=[INPUT, "cos", "sin", "past_mask", "packed_state", "chunk_mask", "conv_route"],
                 output_names=[OUTPUT, "packed_state_out"], entrypoint_name=f"c{capacity}",
             )
             print(f"staged c{capacity} ({time.monotonic() - started:.1f}s)", flush=True)
     asset = out / "fused.aimodel"
     converter.to_coreai().save_asset(asset)
     manifest = {
-        "kind": "d1ane-fused", "version": 1, "width": CHUNK, "context": CONTEXT,
+        "kind": "d1ane-fused", "version": 2, "width": CHUNK, "context": CONTEXT,
         "hidden": cfg.hidden, "heads": cfg.heads, "kv_heads": cfg.kv_heads,
         "head_dim": cfg.head_dim, "conv_taps": cfg.conv_taps, "tiers": list(TIERS),
         "conv_layers": model.conv_layers, "attention_layers": model.attention_layers,

@@ -23,9 +23,25 @@ with d1.load() as model:
     print(result)
 ```
 
-`load()` downloads the matching Core AI architecture from [wegotomars/d1-3B-CoreAI-ANE](https://huggingface.co/wegotomars/d1-3B-CoreAI-ANE) (`v1.0.0`) into `~/Library/Caches/tinkerbox-ane/d1/models/`. Pass a directory path to `load(path)` to select a local AOT bundle.
+`load()` downloads the matching Core AI architecture from [wegotomars/d1-3B-CoreAI-ANE](https://huggingface.co/wegotomars/d1-3B-CoreAI-ANE) (`v2.0.0`) into `~/Library/Caches/tinkerbox-ane/d1/models/`. Pass a directory path to `load(path)` to select a local AOT bundle. This runtime requires the version 2 packed backbone; older bundles must be re-exported and compiled.
 
-The API exposes `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries. Requests run sequentially. Prompts and images exceeding 32,768 rendered tokens are rejected.
+The API exposes `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries. Multiple decisions share prefix computation and run in packed chunks. Text prompts exceeding 32,768 tokens are rejected; image inputs are unsupported.
+
+## Multiple decisions in one pass
+
+The backbone mirrors upstream Torch: the state is a shared trunk, and each question is an isolated branch. Attention masks prevent questions from seeing each other, convolution windows restart from the trunk history, and RoPE positions restart at the end of the trunk for each branch. Several short decisions can share one ANE invocation; longer trees stream through 128-token chunks.
+
+```python
+with d1.load() as model:
+    result = model.system_one("Hi", {
+        "greeting": {"type": "noul", "instructions": "Is this a greeting?"},
+        "refund": {"type": "noul", "instructions": "Is this a refund request?"},
+    })
+```
+
+Single-question batch requests are packed too. Each logical prompt must fit the 32,768-token context; trees exceeding that physical token budget split into groups. Multi-question usage counts the state once plus all question suffixes, matching upstream.
+
+The bundle keeps nine cache-tier functions with shared weights. Single decisions skip tree planning and reuse cached routing and causal masks in the native host, updating only newly visible history. Packed requests rebuild branch-specific metadata. Both paths execute the same ANE graph.
 
 ## SwiftUI Demo
 
@@ -81,7 +97,7 @@ Use the d1 publishing CLI to build and upload multi-architecture release bundles
 uv run python -m tinkerbox_ane.d1.publish --arch h17s h16g --no-upload
 
 # Publish prepared bundles and create a release tag
-uv run python -m tinkerbox_ane.d1.publish --arch h17s h16g --upload-only --tag v1.0.1
+uv run python -m tinkerbox_ane.d1.publish --arch h17s h16g --upload-only --tag v2.0.0
 ```
 
 Omitting `--arch` targets all supported architectures. The upload synchronizes the remote `macos27` tree with the selected architectures, pruning omitted targets and obsolete files while keeping existing release tags intact.

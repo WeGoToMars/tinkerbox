@@ -52,15 +52,14 @@ def test_public_decisions_batches_and_request_reset(model):
     assert result['answers']['greeting']['noul'] == pytest.approx(0.97966643, abs=0.01)
     assert result['answers']['topic']['choice'] == 'hello'
     assert 0 <= result['answers']['tone']['score'] <= 2
-    assert result['usage'] == {
-        'input_tokens': sum(len(model.tokens(state, q)) for q in questions.values()),
-        'output_tokens': 0,
-    }
+    assert result['usage'] == {'input_tokens': 87, 'output_tokens': 0}
     assert model.system_one_batch([(state, questions), (state, {})]) == [
         result, {'answers': {}, 'usage': {'input_tokens': 0, 'output_tokens': 0}},
     ]
     expected = model.probabilities(state, [GREETING])
-    assert model.probabilities_batch([(state, [GREETING]), (state, [GREETING])]) == [expected, expected]
+    actual = model.probabilities_batch([(state, [GREETING]), (state, [GREETING])])
+    for row in actual:
+        assert row[0] == pytest.approx(expected[0], abs=0.01)
     long = model.probabilities('Hello. ' * 150, [GREETING])[0]
     assert all(math.isfinite(p) and 0 <= p <= 1 for p in long)
     assert sum(long) == pytest.approx(1)
@@ -77,3 +76,32 @@ def test_public_input_limits_and_close(model):
     model.close()
     with pytest.raises(RuntimeError, match='closed'):
         model.probabilities('Hi', [GREETING])
+
+
+def test_parallel_decisions_match_individual_answers(model):
+    questions = [GREETING,
+                 {'type': 'choice', 'instructions': 'Choose a topic.',
+                  'criteria': {'hello': 'A greeting', 'billing': 'A payment dispute'}},
+                 {'type': 'score', 'instructions': 'How friendly is this?',
+                  'criteria': ['Unfriendly', 'Neutral', 'Friendly']},
+                 {'type': 'noul', 'instructions': 'Ignore unrelated notes. ' * 100 + 'Is this a greeting?'}]
+    states = ['Hi', 'Archive note: the customer acknowledged the message. ' * 40 + 'Hi, thanks!']
+    for state in states:
+        individual = [model.probabilities(state, [q])[0] for q in questions]
+        parallel = model.probabilities(state, questions)
+        reordered = model.probabilities(state, list(reversed(questions)))
+        assert len(parallel) == len(reordered) == len(individual)
+        for got, reversed_got, expected in zip(parallel, reversed(reordered), individual):
+            assert got == pytest.approx(expected, abs=0.01)
+            assert reversed_got == pytest.approx(expected, abs=0.01)
+        assert model.probabilities(state, [GREETING])[0] == individual[0]
+
+    requests = [('Hi', [GREETING]), ('Goodbye', [GREETING])]
+    expected = [model.probabilities(state, qs)[0] for state, qs in requests]
+    actual = model.probabilities_batch(requests)
+    assert len(actual) == len(expected)
+    for got, single in zip(actual, expected):
+        assert got[0] == pytest.approx(single, abs=0.01)
+    with pytest.raises(ValueError, match='context limit'):
+        model.probabilities_batch([('Hi', [GREETING]), ('hello ' * model.context, [GREETING])])
+    assert model.probabilities('Hi', [GREETING])[0] == expected[0]

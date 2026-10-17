@@ -5,7 +5,7 @@ from pathlib import Path
 REPO = "LiquidAI/d1-3B"
 REVISION = "051bcc464b01b9f92942b364d9586b0ef5912432"
 ARTIFACT_REPO = "wegotomars/d1-3B-CoreAI-ANE"
-ARTIFACT_REVISION = "v1.0.1"
+ARTIFACT_REVISION = "v2.0.0"
 RESIDUAL_SCALE = 64.0  # Keep ANE residual products above the subnormal threshold.
 CHUNK = 128
 CONTEXT = 32768

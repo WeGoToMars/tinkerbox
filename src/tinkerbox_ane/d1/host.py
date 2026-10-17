@@ -98,6 +98,9 @@ class Host:
                 raise RuntimeError(f"the Core AI host could not load {asset}: {ready['error']}")
             self.hidden_size = ready["hidden"]
             self.width, self.context = ready["width"], ready["context"]
+            if ready.get("version") != 2:
+                raise RuntimeError("the native host does not support this bundle; rebuild or reinstall tinkerbox-ane")
+            self.conv_taps = ready["conv_taps"]
         except BaseException:
             self.close()
             raise
@@ -131,23 +134,34 @@ class Host:
         self._send(b"R" + struct.pack("<II", *cos.shape), memoryview(cos).cast("B"), memoryview(sin).cast("B"))
         self._reply()
 
-    def hidden_chunks(self, chunks, tokens: int):
+    def hidden_chunks(self, chunks, tokens: int, *, plan=None):
         import numpy as np
         if not 0 < tokens <= self.context:
             raise ValueError(f"prompt needs {tokens} tokens; context limit is {self.context}")
+        if plan is not None and (len(plan.ids) != tokens or plan.width != self.width
+                                 or plan.taps != self.conv_taps or plan.context != self.context):
+            raise ValueError("tree plan does not match the request or bundle")
         length = -(-tokens // self.width) * self.width
         producer = iter(chunks)
         try:
-            self._send(b"S" + struct.pack("<I", tokens))
-            for _ in range(length // self.width):
+            if plan is None:
+                self._send(b"S" + struct.pack("<I", tokens))
+            else:
+                self._send(b"T" + struct.pack("<II", tokens, len(plan.leaves)),
+                           struct.pack(f"<{len(plan.leaves)}I", *plan.leaves))
+            for offset in range(0, length, self.width):
                 self._reply()
                 chunk = np.ascontiguousarray(next(producer), dtype=np.float16)
                 if chunk.shape != (self.hidden_size, self.width):
                     raise ValueError(f"embedding chunk must be ({self.hidden_size}, {self.width})")
-                self._send(memoryview(chunk).cast("B"))
+                if plan is not None:
+                    self._send(plan.metadata(offset), memoryview(chunk).cast("B"))
+                else:
+                    self._send(memoryview(chunk).cast("B"))
             self._reply()
-            hidden = np.frombuffer(self._read(2 * self.hidden_size), dtype=np.float16).copy()
-            return hidden
+            count = 1 if plan is None else len(plan.leaves)
+            hidden = np.frombuffer(self._read(2 * self.hidden_size * count), dtype=np.float16).copy()
+            return hidden if plan is None else hidden.reshape(count, self.hidden_size)
         except BaseException:
             # A failed producer cannot leave the native host waiting for a partial chunk.
             if self._process.poll() is None:

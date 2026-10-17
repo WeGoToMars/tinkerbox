@@ -82,10 +82,19 @@ class ShortConv(nn.Module):
         self.conv = nn.Conv2d(cfg.hidden, cfg.hidden, (1, cfg.conv_taps), groups=cfg.hidden, bias=False)
         self.out_proj = conv1x1(cfg.hidden, cfg.hidden)
 
-    def forward(self, x: torch.Tensor, tail: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, tail: torch.Tensor, route) -> tuple[torch.Tensor, torch.Tensor]:
         b, c, u = self.in_proj(x).split(self.dim, dim=1)
         window = torch.cat((tail, b * u), dim=-1)
-        return self.out_proj(c * self.conv(window)), window[..., -(self.taps - 1):]
+        # One-hot FP16 routing stays on ANE; dynamic integer gathers do not.
+        # Keep taps in contiguous planes. Stride-three depthwise convolution
+        # miscomputes channels >=1024 on ANE; contiguous multiply/add is sound.
+        routed = window @ route
+        width = x.shape[-1]
+        terms = [routed[..., j * width:(j + 1) * width]
+                 * self.conv.weight[..., j:j + 1].reshape(1, self.dim, 1, 1)
+                 for j in range(self.taps)]
+        convolved = sum(terms)
+        return self.out_proj(c * convolved), routed[..., width * self.taps:]
 
 
 class MLP(nn.Module):
@@ -116,8 +125,8 @@ class ConvBlock(nn.Module):
         self.operator = ShortConv(cfg)
         self.feed_forward = MLP(cfg, ffn_scale)
 
-    def forward(self, x, tail):
-        h, tail = self.operator(self.operator_norm(x), tail)
+    def forward(self, x, tail, route):
+        h, tail = self.operator(self.operator_norm(x), tail, route)
         x = x + h
         return x + self.feed_forward(self.ffn_norm(x)), tail
 
@@ -161,22 +170,17 @@ class AttentionBlock(nn.Module):
         return x + self.feed_forward(self.ffn_norm(x)), k, v
 
 
-def causal_mask(seq_len: int) -> torch.Tensor:
-    return torch.full((seq_len, seq_len), MASK_MIN).triu(1)[None, None]
-
-
 class CacheAttention(nn.Module):
     """Merge 4096-key SDPA block means by their softmax masses."""
 
-    def __init__(self, cfg: Config, width: int, context: int):
+    def __init__(self, cfg: Config, context: int):
         super().__init__()
         self.context = context
         self.group = cfg.heads // cfg.kv_heads
-        self.causal = nn.Buffer(causal_mask(width).half(), persistent=False)
 
-    def forward(self, q, past_k, past_v, k_new, v_new, past_mask):
+    def forward(self, q, past_k, past_v, k_new, v_new, past_mask, chunk_mask):
         k, v = torch.cat((past_k, k_new), dim=2), torch.cat((past_v, v_new), dim=2)
-        mask = torch.cat((past_mask, self.causal), dim=-1)
+        mask = torch.cat((past_mask, chunk_mask), dim=-1)
         if self.context <= 4096:
             return F.scaled_dot_product_attention(q, k.repeat_interleave(self.group, dim=1),
                                                  v.repeat_interleave(self.group, dim=1),
@@ -224,10 +228,10 @@ class FusedBackbone(nn.Module):
         self.final_norm = backbone.final_norm
         self.cfg = cfg = backbone.cfg
         self.capacity = capacity
-        self.attention = CacheAttention(cfg, CHUNK, capacity)
+        self.attention = CacheAttention(cfg, capacity)
         self.conv_layers = [i for i, kind in enumerate(cfg.layer_types) if kind == "conv"]
         self.attention_layers = [i for i, kind in enumerate(cfg.layer_types) if kind == "full_attention"]
-        self.shapes = ([(1, cfg.hidden, 1, cfg.conv_taps - 1)] * len(self.conv_layers)
+        self.shapes = ([(1, cfg.hidden, 1, 2 * (cfg.conv_taps - 1))] * len(self.conv_layers)
                        + [(1, cfg.kv_heads, capacity - CHUNK, cfg.head_dim)] * (2 * len(self.attention_layers)))
         self.size = sum(math.prod(shape) for shape in self.shapes)
 
@@ -235,10 +239,11 @@ class FusedBackbone(nn.Module):
         cfg = self.cfg
         shapes = [(1, cfg.hidden, 1, CHUNK), (1, 1, cfg.head_dim, CHUNK),
                   (1, 1, cfg.head_dim, CHUNK), (1, 1, CHUNK, self.capacity - CHUNK),
-                  (1, 1, 1, self.size)]
+                  (1, 1, 1, self.size), (1, 1, CHUNK, CHUNK),
+                   (1, 1, CHUNK + 2 * (cfg.conv_taps - 1), CHUNK * cfg.conv_taps + 2 * (cfg.conv_taps - 1))]
         return tuple(torch.zeros(shape, dtype=torch.float16) for shape in shapes)
 
-    def forward(self, x, cos, sin, past_mask, packed_state):
+    def forward(self, x, cos, sin, past_mask, packed_state, chunk_mask, conv_route):
         states, offset = [], 0
         for shape in self.shapes:
             count = math.prod(shape)
@@ -247,12 +252,13 @@ class FusedBackbone(nn.Module):
         tails = iter(states[:len(self.conv_layers)])
         histories = iter(states[len(self.conv_layers):])
         new_tails, new_kv = [], []
+        attention = lambda q, pk, pv, k, v, mask: self.attention(q, pk, pv, k, v, mask, chunk_mask)
         for layer in self.layers:
             if isinstance(layer, ConvBlock):
-                x, tail = layer(x, next(tails))
+                x, tail = layer(x, next(tails), conv_route)
                 new_tails.append(tail)
             else:
-                x, k, v = layer(x, cos, sin, past_mask, next(histories), next(histories), self.attention)
+                x, k, v = layer(x, cos, sin, past_mask, next(histories), next(histories), attention)
                 new_kv.extend((k, v))
         return self.final_norm(x), torch.cat([v.reshape(1, 1, 1, -1) for v in new_tails + new_kv], dim=-1)
 

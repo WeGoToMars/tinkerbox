@@ -34,8 +34,8 @@ def download_bundle() -> Path:
 def read_bundle(root: Path) -> dict:
     root = Path(root)
     spec = json.loads((root / "model.json").read_text())
-    if spec.get("kind") != "d1ane-fused" or spec.get("version") != 1:
-        raise ValueError("unsupported fused bundle manifest")
+    if spec.get("kind") != "d1ane-fused" or spec.get("version") != 2:
+        raise ValueError("unsupported fused bundle manifest; re-export and compile the model")
     width, context, tiers = spec["width"], spec["context"], spec["tiers"]
     if (width <= 0 or context <= width or context % width or not tiers
             or tiers != sorted(set(tiers)) or tiers[-1] != context

@@ -1,5 +1,5 @@
 // Swift releases output buffers that the Python binding retains.
-// Pipe: R = RoPE tables, S = streamed decision, Q = quit; integers are little-endian.
+// Pipe: R = RoPE tables, S = chain, T = packed tree, Q = quit; integers are little-endian.
 
 import CoreAI
 import Darwin
@@ -142,6 +142,7 @@ struct FusedManifest: Decodable {
   let width: Int, context: Int, hidden: Int
   let kv_heads: Int, head_dim: Int, conv_taps: Int
   let asset: String, tiers: [Int], conv_layers: [Int], attention_layers: [Int]
+  let version: Int
 }
 
 final class Model {
@@ -156,11 +157,13 @@ final class Model {
   var inputs: [String: NDArray] = [:]
   var cos: [Float16] = [], sin: [Float16] = [], positions = 0
   var tier = 0, visible = 0
+  var chainInputsValid = false
   var tailCount: Int { convCount * tailElements }
   init(root: URL) throws {
     self.root = root
     let spec = try JSONDecoder().decode(
       FusedManifest.self, from: Data(contentsOf: root.appendingPathComponent("model.json")))
+    guard spec.version == 2 else { throw HostError("unsupported fused bundle manifest") }
     manifest = spec
     width = manifest.width
     context = manifest.context
@@ -170,7 +173,7 @@ final class Model {
     tiers = spec.tiers.map { $0 - spec.width }
     convCount = manifest.conv_layers.count
     cacheCount = manifest.attention_layers.count * 2
-    tailElements = manifest.hidden * (manifest.conv_taps - 1)
+    tailElements = manifest.hidden * (manifest.conv_taps - 1) * 2
   }
   func ensureTier(_ needed: Int, keep: Int) async throws {
     guard let next = tiers.first(where: { $0 >= needed }) else {
@@ -220,7 +223,8 @@ final class Model {
     function = f
     tier = next
     visible = 0
-    for name in [input, "cos", "sin"] where inputs[name] == nil {
+    let names = [input, "cos", "sin", "chunk_mask", "conv_route"]
+    for name in names where inputs[name] == nil {
       inputs[name] = NDArray(
         descriptor: try descriptor(f.descriptor.inputDescriptor(of: name), name))
     }
@@ -244,23 +248,99 @@ final class Model {
     }
     (self.cos, self.sin, self.positions) = (cos, sin, positions)
   }
-  func hidden(tokens: Int) async throws -> [Float16] {
+  func prepareChain() {
+    guard !chainInputsValid else { return }
+    let keep = manifest.conv_taps - 1
+    // A chain's routing is translation invariant: the previous tail followed
+    // by this chunk. Keep the unused trunk snapshot in its separate slots.
+    write4(&inputs["conv_route"]!) { p, shape, s in
+      for r in 0..<shape[2] {
+        for c in 0..<shape[3] { p[r * s[2] + c * s[3]] = 0 }
+      }
+      for tap in 0..<self.manifest.conv_taps {
+        for t in 0..<self.width {
+          let ancestor = t + tap - keep
+          let source = ancestor < 0 ? keep + ancestor : 2 * keep + ancestor
+          p[source * s[2] + (tap * self.width + t) * s[3]] = 1
+        }
+      }
+      let tails = self.width * self.manifest.conv_taps
+      for t in 0..<keep {
+        p[(2 * keep + self.width - keep + t) * s[2] + (tails + t) * s[3]] = 1
+        p[(keep + t) * s[2] + (tails + keep + t) * s[3]] = 1
+      }
+    }
+    write4(&inputs["chunk_mask"]!) { p, shape, s in
+      for r in 0..<shape[2] {
+        for c in 0..<shape[3] { p[r * s[2] + c * s[3]] = c <= r ? 0 : maskMin }
+      }
+    }
+    // Tree masks vary per query row. Reset them before using the chain's
+    // incremental, row-independent visibility updates.
+    write4(&inputs["past_mask"]!) { p, shape, s in
+      for r in 0..<shape[2] { for c in 0..<shape[3] { p[r * s[2] + c * s[3]] = maskMin } }
+    }
+    visible = 0
+    chainInputsValid = true
+  }
+  func treeMetadata(offset: Int) throws -> [Int] {
+    chainInputsValid = false
+    let keep = manifest.conv_taps - 1
+    let routes = width * manifest.conv_taps + 2 * keep
+    guard let bytes = readExact((routes + width * 5) * 4) else {
+      throw HostError("incomplete tree metadata")
+    }
+    let values = stride(from: 0, to: bytes.count, by: 4).map { u32(bytes, $0) }
+    let positions = Array(values[routes..<routes + width])
+    guard values[..<routes].allSatisfy({ $0 < width + 2 * keep }),
+          positions.allSatisfy({ $0 < self.positions }) else {
+      throw HostError("invalid tree routing or positions")
+    }
+    write4(&inputs["conv_route"]!) { p, shape, s in
+      for r in 0..<shape[2] {
+        for c in 0..<shape[3] { p[r * s[2] + c * s[3]] = 0 }
+      }
+      for c in 0..<routes { p[values[c] * s[2] + c * s[3]] = 1 }
+    }
+    for name in ["past_mask", "chunk_mask"] {
+      write4(&inputs[name]!) { p, shape, s in
+        for r in 0..<shape[2] {
+          let at = routes + width + r * 4
+          for c in 0..<shape[3] {
+            let key = name == "past_mask" ? c : offset + c
+            let valid = name != "past_mask" || c < offset
+            let allowed = (values[at]..<values[at + 1]).contains(key)
+                       || (values[at + 2]..<values[at + 3]).contains(key)
+            p[r * s[2] + c * s[3]] = valid && allowed ? 0 : maskMin
+          }
+        }
+      }
+    }
+    return positions
+  }
+  func hidden(tokens: Int, answers: [Int]? = nil) async throws -> [Float16] {
     guard positions > 0, tokens >= 1, tokens <= context
     else { throw HostError("invalid request") }
+    let leaves = answers ?? [tokens - 1]
+    guard !leaves.isEmpty, leaves == leaves.sorted(), Set(leaves).count == leaves.count,
+          leaves.allSatisfy({ $0 >= 0 && $0 < tokens }) else {
+      throw HostError("invalid answer slots")
+    }
     try await ensureTier(0, keep: 0)
+    if answers == nil { prepareChain() }
     write4(&packed!) { p, _, s in
       precondition(s[3] == 1)
       memset(p, 0, self.tailCount * 2)
     }
     let answerChunk = (tokens - 1) / width
-    let answerColumn = (tokens - 1) % width
     var result: [Float16] = []
     for chunk in 0...answerChunk {
       let offset = chunk * width
       let last = chunk == answerChunk
       try await ensureTier(offset + (last ? 0 : width), keep: offset)
-      setVisible(offset)
+      if answers == nil { setVisible(offset) }
       writeAll([0])
+      let ropePositions = answers == nil ? Array(offset..<offset + width) : try treeMetadata(offset: offset)
       guard let values = readHalves(width * hiddenSize) else {
         throw HostError("incomplete embedding chunk")
       }
@@ -269,7 +349,7 @@ final class Model {
         write4(&inputs[name]!) { p, shape, s in
           for i in 0..<shape[2] {
             for t in 0..<shape[3] {
-              p[i * s[2] + t * s[3]] = table[i * self.positions + offset + t]
+              p[i * s[2] + t * s[3]] = table[i * self.positions + ropePositions[t]]
             }
           }
         }
@@ -281,9 +361,10 @@ final class Model {
       guard let hidden = out.remove(output)?.ndArray,
         let state = out.remove("packed_state_out")?.ndArray
       else { throw HostError("missing packed output") }
-      if last {
-        result = column(hidden, answerColumn)
-      } else {
+      for leaf in leaves where leaf / width == chunk {
+        result += column(hidden, leaf % width)
+      }
+      if !last {
         read4(state) { src, shape, ss in
           precondition(
             shape == [
@@ -327,7 +408,8 @@ final class Model {
     let model: Model
     do {
       model = try Model(root: URL(fileURLWithPath: args[1]))
-      sendJSON(["width": model.width, "context": model.context, "hidden": model.hiddenSize])
+      sendJSON(["width": model.width, "context": model.context, "hidden": model.hiddenSize,
+                "version": model.manifest.version, "conv_taps": model.manifest.conv_taps])
     } catch {
       sendJSON(["error": "\(error)"])
       exit(1)
@@ -349,6 +431,18 @@ final class Model {
         let tokens = u32(header, 0)
         do {
           let h = try await model.hidden(tokens: tokens)
+          var reply: [UInt8] = [0]
+          h.withUnsafeBytes { reply += $0 }
+          writeAll(reply)
+        } catch { sendError("\(error)") }
+      case UInt8(ascii: "T"):
+        guard let header = readExact(8) else { exit(1) }
+        let tokens = u32(header, 0), count = u32(header, 4)
+        guard count > 0, count <= tokens, tokens <= model.context,
+              let slots = readExact(count * 4) else { exit(1) }
+        let answers = stride(from: 0, to: slots.count, by: 4).map { u32(slots, $0) }
+        do {
+          let h = try await model.hidden(tokens: tokens, answers: answers)
           var reply: [UInt8] = [0]
           h.withUnsafeBytes { reply += $0 }
           writeAll(reply)

@@ -69,5 +69,5 @@ commit = upload_to_hub(
 python -m tinkerbox_ane.d1.publish --arch h17s h16g --no-upload
 
 # Publish prepared bundles and create a release tag
-python -m tinkerbox_ane.d1.publish --arch h17s h16g --upload-only --tag v1.0.1
+python -m tinkerbox_ane.d1.publish --arch h17s h16g --upload-only --tag v2.0.0
 ```

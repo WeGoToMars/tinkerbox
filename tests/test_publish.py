@@ -20,7 +20,7 @@ def source(tmp_path):
     asset = root / "fused.aimodel"
     asset.mkdir(parents=True)
     (asset / "main.hash").write_bytes(bytes.fromhex("11" * 32))
-    spec = dict(kind="d1ane-fused", version=1, width=128, context=256, tiers=[256],
+    spec = dict(kind="d1ane-fused", version=2, width=128, context=256, tiers=[256],
                 hidden=8, heads=2, kv_heads=1, head_dim=4, conv_taps=2,
                 conv_layers=[0], attention_layers=[1], asset=asset.name,
                 source_hash="11" * 32)
