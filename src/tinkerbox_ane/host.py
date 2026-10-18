@@ -10,8 +10,7 @@ import tempfile
 from functools import lru_cache
 from pathlib import Path
 
-BINARY = Path(__file__).with_name("fused-host")
-BUILD_DIR = Path.home() / "Library/Caches/tinkerbox-ane/d1"
+BINARY = Path(__file__).with_name("tinkerbox-ane-host")
 
 
 SUPPORTED_ARCHITECTURES: dict[str, str] = {
@@ -48,14 +47,14 @@ def validate_architecture(architecture: str) -> None:
         chip = UNSUPPORTED_ARCHITECTURES[architecture]
         supported = ", ".join(SUPPORTED_ARCHITECTURES.values())
         raise RuntimeError(
-            f"{chip} ({architecture}) is not supported. The fused 3B ANE model requires "
+            f"{chip} ({architecture}) is not supported. tinkerbox-ane requires "
             f"Apple Silicon M4 or newer due to Neural Engine hardware and offline compiler constraints "
             f"(supported: {supported})."
         )
     if architecture not in SUPPORTED_ARCHITECTURES:
         supported = ", ".join(f"{name} [{code}]" for code, name in SUPPORTED_ARCHITECTURES.items())
         raise RuntimeError(
-            f"Architecture '{architecture}' is not supported. The fused 3B ANE model requires "
+            f"Architecture '{architecture}' is not supported. tinkerbox-ane requires "
             f"Apple Silicon M4 or newer (supported: {supported})."
         )
 
@@ -66,14 +65,35 @@ def device_architecture() -> str:
     return result.stdout.strip()
 
 
+def check_layout(spec: dict) -> None:
+    """The cache tiers, dimensions, and convolution/attention layers this host allocates state for."""
+    width, context, tiers = spec["width"], spec["context"], spec["tiers"]
+    if (width <= 0 or context <= width or context % width or not tiers
+            or tiers != sorted(set(tiers)) or tiers[-1] != context
+            or any(t <= width or t > context or t % width for t in tiers)):
+        raise ValueError("invalid fused attention capacities")
+    for name in ("hidden", "heads", "kv_heads", "head_dim", "conv_taps"):
+        if not isinstance(spec[name], int) or spec[name] <= 0:
+            raise ValueError(f"invalid {name}")
+    if spec["heads"] % spec["kv_heads"] or spec["conv_taps"] < 2:
+        raise ValueError("inconsistent model dimensions")
+    for name in ("conv_layers", "attention_layers"):
+        layers = spec[name]
+        if not layers or layers != sorted(set(layers)) or any(i < 0 for i in layers):
+            raise ValueError(f"invalid {name}")
+    if set(spec["conv_layers"]) & set(spec["attention_layers"]):
+        raise ValueError("overlapping convolution and attention layers")
+
+
 class Host:
-    def __init__(self, asset: str | Path):
-        from tinkerbox_ane.d1.bundle import read_bundle
+    def __init__(self, asset: str | Path, kind: str):
+        from tinkerbox_ane.bundle import read_bundle
 
         asset = Path(asset).resolve()
-        spec = read_bundle(asset)
+        spec = read_bundle(asset, kind)
+        check_layout(spec)
         if Path(spec["asset"]).suffix != ".aimodelc":
-            raise ValueError("load requires a fused AOT bundle; run python -m tinkerbox_ane.d1.compile first")
+            raise ValueError("load requires a compiled AOT bundle; compile the exported model first")
         current = device_architecture()
         if spec.get("architecture") and spec["architecture"] != current:
             target_chip = chip_name(spec["architecture"])
@@ -85,7 +105,7 @@ class Host:
                 f"Bundle targets {target_chip} ({spec['architecture']}), but this Mac is {current_chip} ({current}).{hint}"
             )
         # Stage on the asset volume: APFS clones must stay on the same filesystem.
-        self._directory = tempfile.TemporaryDirectory(prefix=".d1host-", dir=asset.parent)
+        self._directory = tempfile.TemporaryDirectory(prefix=".host-", dir=asset.parent)
         clones = Path(self._directory.name) / "clones"
         clones.mkdir()
         environment = dict(os.environ, COW_CLIENT_DEST=str(clones),
@@ -126,18 +146,21 @@ class Host:
         except BrokenPipeError as error:
             raise RuntimeError(f"the Core AI host exited (status {self._process.poll()})") from error
 
-    def vision(self, pixel_values, pos_embeds, attn_mask):
+    def vision(self, inputs: dict):
+        """Run the bundle's vision asset on named FP16 inputs, each row-major in its declared shape,
+        and return the `features` output."""
         import numpy as np
-        pv = np.ascontiguousarray(pixel_values, dtype=np.float16)
-        pe = np.ascontiguousarray(pos_embeds, dtype=np.float16)
-        mask = np.ascontiguousarray(attn_mask, dtype=np.float16)
-        if pv.shape != (1024, 768) or pe.shape != (1024, 1152) or mask.shape != (1024,):
-            raise ValueError(f"invalid vision shapes: pv={pv.shape}, pe={pe.shape}, mask={mask.shape}")
-        self._send(b"V", memoryview(pv).cast("B"), memoryview(pe).cast("B"), memoryview(mask).cast("B"))
+        payload = [b"V" + struct.pack("<I", len(inputs))]
+        for name, value in inputs.items():
+            array = np.ascontiguousarray(value, dtype=np.float16)
+            encoded = name.encode()
+            payload += [struct.pack("<I", len(encoded)) + encoded + struct.pack("<I", array.size),
+                        memoryview(array).cast("B")]
+        self._send(*payload)
         self._reply()
-        buf = self._read(1024 * 1152 * 2)
-        return np.frombuffer(buf, dtype=np.float16).reshape(1024, 1152).copy()
-
+        rank = self._u32()
+        shape = struct.unpack(f"<{rank}I", self._read(4 * rank))
+        return np.frombuffer(self._read(2 * int(np.prod(shape))), dtype=np.float16).reshape(shape).copy()
 
     def set_rope(self, cos, sin) -> None:
         import numpy as np

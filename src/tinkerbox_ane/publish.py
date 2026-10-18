@@ -3,6 +3,7 @@
 from collections.abc import Callable, Iterable
 import logging
 from pathlib import Path
+import time
 
 
 def build_architectures(
@@ -15,19 +16,31 @@ def build_architectures(
     continue_on_error: bool = False,
 ) -> dict[str, Path]:
     """Compile a model across target architectures and return paths to successful bundles."""
+    architectures = list(dict.fromkeys(architectures))
+    started = time.monotonic()
+    print(f"Building {len(architectures)} architectures: {', '.join(architectures)}", flush=True)
     bundles = {}
-    for architecture in dict.fromkeys(architectures):
+    for index, architecture in enumerate(architectures, 1):
+        label = f"[{index}/{len(architectures)}] {architecture}"
+        architecture_started = time.monotonic()
+        print(f"{label}: preparing bundle", flush=True)
         try:
             bundles[architecture] = compile_model(
                 source=source, out=Path(out) / architecture,
                 architecture=architecture, force=force,
             )
-        except Exception:
+        except Exception as error:
+            print(f"{label}: failed after {time.monotonic() - architecture_started:.1f}s: {error}", flush=True)
             if not continue_on_error:
                 raise
             logging.exception("Failed to compile %s", architecture)
+        else:
+            print(f"{label}: ready in {time.monotonic() - architecture_started:.1f}s -> {bundles[architecture]}",
+                  flush=True)
     if not bundles:
         raise RuntimeError("no architectures were compiled")
+    print(f"Ready: {len(bundles)}/{len(architectures)} architectures in {time.monotonic() - started:.1f}s; "
+          f"bundles in {out}", flush=True)
     return bundles
 
 

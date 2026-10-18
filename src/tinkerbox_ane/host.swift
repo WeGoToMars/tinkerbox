@@ -1,5 +1,5 @@
 // Swift releases output buffers that the Python binding retains.
-// Pipe: R = RoPE tables, S = chain, T = packed tree, Q = quit; integers are little-endian.
+// Pipe: R = RoPE tables, S = chain, T = packed tree, V = vision, Q = quit; integers are little-endian.
 
 import CoreAI
 import Darwin
@@ -406,52 +406,56 @@ final class Model {
     guard let fn = try model.loadFunction(named: "main") else {
       throw HostError("missing vision function main")
     }
-    visionInputs["pixel_values"] = NDArray(descriptor: try descriptor(fn.descriptor.inputDescriptor(of: "pixel_values"), "pixel_values"))
-    visionInputs["pos_embeds"] = NDArray(descriptor: try descriptor(fn.descriptor.inputDescriptor(of: "pos_embeds"), "pos_embeds"))
-    visionInputs["attn_mask"] = NDArray(descriptor: try descriptor(fn.descriptor.inputDescriptor(of: "attn_mask"), "attn_mask"))
     visionModel = model
     visionFunction = fn
   }
-  func runVision(pixelValues: [Float16], posEmbeds: [Float16], attnMask: [Float16]) async throws -> [Float16] {
+
+  // Inputs and the features output are row-major in the asset's declared shapes.
+  func runVision(_ values: [String: [Float16]]) async throws -> (shape: [Int], features: [Float16]) {
     try await ensureVision()
-    guard pixelValues.count == 1024 * 768,
-          posEmbeds.count == 1024 * 1152,
-          attnMask.count == 1024 else {
-      throw HostError("invalid vision input dimensions")
-    }
-    write4(&visionInputs["pixel_values"]!) { p, shape, s in
-      for i in 0..<shape[1] {
-        for j in 0..<shape[2] {
-          p[i * s[1] + j * s[2]] = pixelValues[i * 768 + j]
-        }
+    for (name, x) in values {
+      if visionInputs[name] == nil {
+        visionInputs[name] = NDArray(
+          descriptor: try descriptor(visionFunction!.descriptor.inputDescriptor(of: name), name))
       }
-    }
-    write4(&visionInputs["pos_embeds"]!) { p, shape, s in
-      for i in 0..<shape[1] {
-        for j in 0..<shape[2] {
-          p[i * s[1] + j * s[2]] = posEmbeds[i * 1152 + j]
-        }
+      var matches = false
+      write4(&visionInputs[name]!) { p, shape, s in
+        matches = shape.reduce(1, *) == x.count
+        if matches { forEachOffset(shape, s) { i, offset in p[offset] = x[i] } }
       }
+      guard matches else { throw HostError("vision input \(name) has the wrong element count") }
     }
-    write4(&visionInputs["attn_mask"]!) { p, shape, s in
-      for t in 0..<shape[3] {
-        p[t * s[3]] = attnMask[t]
-      }
+    guard Set(values.keys) == Set(visionInputs.keys) else {
+      throw HostError("vision inputs differ from the previous call")
     }
     var out = try await visionFunction!.run(inputs: visionInputs)
     guard let features = out.remove("features")?.ndArray else {
       throw HostError("missing vision features output")
     }
-    var result = [Float16](repeating: 0, count: 1024 * 1152)
-    read4(features) { src, shape, s in
-      precondition(shape == [1, 1024, 1152])
-      for i in 0..<shape[1] {
-        for j in 0..<shape[2] {
-          result[i * 1152 + j] = src[i * s[1] + j * s[2]]
-        }
-      }
+    return read4(features) { src, shape, s in
+      var result = [Float16](repeating: 0, count: shape.reduce(1, *))
+      forEachOffset(shape, s) { i, offset in result[i] = src[offset] }
+      return (shape, result)
     }
-    return result
+  }
+}
+
+// Visit every element of a strided array in row-major order.
+func forEachOffset(_ shape: [Int], _ strides: [Int], _ body: (Int, Int) -> Void) {
+  let count = shape.reduce(1, *)
+  var index = [Int](repeating: 0, count: shape.count)
+  var offset = 0
+  for linear in 0..<count {
+    body(linear, offset)
+    var axis = shape.count - 1
+    while axis >= 0 {
+      index[axis] += 1
+      offset += strides[axis]
+      if index[axis] < shape[axis] { break }
+      offset -= strides[axis] * shape[axis]
+      index[axis] = 0
+      axis -= 1
+    }
   }
 }
 
@@ -463,7 +467,7 @@ final class Model {
       exit(0)
     }
     guard args.count == 2 else {
-      FileHandle.standardError.write("usage: d1host <bundle>\n".data(using: .utf8)!)
+      FileHandle.standardError.write("usage: tinkerbox-ane-host <bundle>\n".data(using: .utf8)!)
       exit(2)
     }
     protectReplies()
@@ -511,13 +515,18 @@ final class Model {
           writeAll(reply)
         } catch { sendError("\(error)") }
       case UInt8(ascii: "V"):
-        guard let pv = readHalves(1024 * 768),
-              let pe = readHalves(1024 * 1152),
-              let mask = readHalves(1024) else { exit(1) }
+        // Read every named input before validating, so an error leaves the pipe in sync.
+        guard let header = readExact(4) else { exit(1) }
+        var values: [String: [Float16]] = [:]
+        for _ in 0..<u32(header, 0) {
+          guard let length = readExact(4), let name = readExact(u32(length, 0)),
+                let count = readExact(4), let x = readHalves(u32(count, 0)) else { exit(1) }
+          values[String(decoding: name, as: UTF8.self)] = x
+        }
         do {
-          let feat = try await model.runVision(pixelValues: pv, posEmbeds: pe, attnMask: mask)
-          var reply: [UInt8] = [0]
-          feat.withUnsafeBytes { reply += $0 }
+          let (shape, features) = try await model.runVision(values)
+          var reply: [UInt8] = [0] + le32(shape.count) + shape.flatMap(le32)
+          features.withUnsafeBytes { reply += $0 }
           writeAll(reply)
         } catch { sendError("\(error)") }
       case UInt8(ascii: "Q"):
@@ -530,4 +539,3 @@ final class Model {
     exit(0)
   }
 }
-

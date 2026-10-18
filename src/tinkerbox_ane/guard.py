@@ -62,7 +62,7 @@ def run(command, output, timeout=1500):
               file=sys.stderr, flush=True)
     before, started = disk_written(), time.monotonic()
     report = {"command": command, "abort": None}
-    written, refresh_at, exited_at = 0, 30, None
+    written, refresh_at, progress_at, exited_at = 0, 30, 30, None
     tail = ""
     with (
         output.with_suffix(".log").open("w") as sink,
@@ -74,18 +74,24 @@ def run(command, output, timeout=1500):
                 returncode = process.poll()
                 elapsed = time.monotonic() - started
                 written = disk_written() - before
+                free = shutil.disk_usage(output.parent).free
                 text = tail + diagnostics.read()
                 tail = text[-64:]
                 if "ANECCompileOffline() failed" in text or "CompilationFailure" in text:
                     report["abort"] = "required ANE compilation failed; refusing GPU fallback"
                 elif written > 100_000_000_000:
                     report["abort"] = "SSD write budget exceeded"
-                elif shutil.disk_usage(output.parent).free < 15 * 1024**3:
+                elif free < 15 * 1024**3:
                     report["abort"] = "free disk below 15 GiB"
                 elif elapsed > timeout:
                     report["abort"] = "deadline exceeded"
                 if report["abort"]:
                     break
+                if elapsed >= progress_at:
+                    print(f"    {output.name}: still running after {elapsed:.0f}s; "
+                          f"system writes {written / 1_000_000_000:.1f} GB; "
+                          f"free disk {free / 1024**3:.1f} GiB", flush=True)
+                    progress_at = elapsed + 30
                 if privileged and elapsed >= refresh_at:
                     privileged = subprocess.run(["sudo", "-n", "-v"], capture_output=True).returncode == 0
                     refresh_at = elapsed + 30

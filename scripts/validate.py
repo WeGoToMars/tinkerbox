@@ -7,8 +7,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tinkerbox_ane.d1 import DEFAULT_ASSET, load
-from tinkerbox_ane.d1.bundle import read_bundle
+from tinkerbox_ane.bundle import read_bundle
+from tinkerbox_ane.d1 import DEFAULT_ASSET, KIND, load
 from tinkerbox_ane.d1.validation import evaluate, load_reference
 
 
@@ -18,7 +18,7 @@ def main() -> int:
     args = parser.parse_args()
     reference_path = Path("artifacts/reference.json")
     reference = load_reference(reference_path)
-    spec = read_bundle(args.asset)
+    spec = read_bundle(args.asset, KIND)
     tiers, width = spec["tiers"], spec["width"]
 
     def tier_for(tokens):

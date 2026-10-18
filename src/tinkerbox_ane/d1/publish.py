@@ -9,10 +9,10 @@ from pathlib import Path
 import shutil
 
 from tinkerbox_ane import publish
-from tinkerbox_ane.d1 import ARTIFACT_REPO, ARTIFACT_REVISION, SOURCE
-from tinkerbox_ane.d1.bundle import read_bundle
+from tinkerbox_ane.bundle import read_bundle
+from tinkerbox_ane.d1 import ARTIFACT_REPO, ARTIFACT_REVISION, KIND, SOURCE
 from tinkerbox_ane.d1.compile import compile_model
-from tinkerbox_ane.d1.host import SUPPORTED_ARCHITECTURES
+from tinkerbox_ane.host import SUPPORTED_ARCHITECTURES
 
 DEFAULT_ARCHITECTURES = tuple(SUPPORTED_ARCHITECTURES)
 DEFAULT_STAGING = Path("artifacts/huggingface/d1-3B-CoreAI-ANE")
@@ -52,7 +52,7 @@ def upload_to_hub(
     identities = set()
     for architecture in architectures:
         directory = staging / "macos27" / architecture
-        spec = read_bundle(directory)
+        spec = read_bundle(directory, KIND)
         if (spec.get("architecture") != architecture
                 or spec["asset"] != f"fused.{architecture}.aimodelc"):
             raise ValueError(f"{directory}: bundle does not target {architecture}")
@@ -62,7 +62,6 @@ def upload_to_hub(
         if spec.get("vision_asset"):
             patterns.append(f"macos27/{architecture}/{spec['vision_asset']}/**")
     if len(identities) != 1:
-
         raise ValueError("release requires bundles with the same source identity")
     fallback_root = Path(metadata_dir) if metadata_dir is not None else Path(".")
     for name in ("LICENSE", "NOTICE", "README.md"):

@@ -9,6 +9,7 @@ import plistlib
 import shutil
 import subprocess
 import tempfile
+import time
 
 from tinkerbox_ane.guard import run
 
@@ -49,12 +50,13 @@ def compile_asset(
     expected_functions: Iterable[str] | None = None,
     timeout: int = 600,
     force: bool = False,
+    report: str = "compile",
 ) -> Path:
     """Compile a .aimodel package for Apple Neural Engine with AOT verification.
 
     Validates source identity, ANE placement, architecture, and deployment
     targets before updating the destination. Watchdog logs and reports are
-    written to target.parent/compile.{json,log}. Set force=True to recompile
+    written to target.parent/{report}.{json,log}. Set force=True to recompile
     an existing target.
     """
     source, target = Path(source).resolve(), Path(target).resolve()
@@ -87,26 +89,33 @@ def compile_asset(
         if expected is not None and functions != expected:
             raise ValueError(f"compiled function set differs: {functions}")
 
-    if force or not target.exists():
+    started = time.monotonic()
+    needs_compile = force or not target.exists()
+    action = "Compiling" if needs_compile else "Verifying existing"
+    print(f"  [{architecture}] {action} {target.name}", flush=True)
+    if needs_compile:
         with tempfile.TemporaryDirectory(prefix=".compile-", dir=target.parent) as temporary:
             produced = Path(temporary) / target.name
             command = ["xcrun", "coreai-build", "compile", str(source), "--architecture", architecture,
                        "--platform", platform, "--min-deployment-version", min_deployment_version,
                        "--preferred-compute", "neural-engine", "--output", str(produced)]
-            report = Path(temporary) / "compile"
+            watchdog = Path(temporary) / report
+            print(f"    Compiler log: {watchdog.with_suffix('.log')}", flush=True)
             try:
-                check = run(command, report, timeout=timeout)
+                check = run(command, watchdog, timeout=timeout)
             finally:
                 for suffix in (".json", ".log"):
-                    if report.with_suffix(suffix).exists():
-                        report.with_suffix(suffix).replace(target.parent / f"compile{suffix}")
+                    if watchdog.with_suffix(suffix).exists():
+                        watchdog.with_suffix(suffix).replace(target.parent / f"{report}{suffix}")
             if not check["passed"]:
                 reason = check.get("abort") or f"exit code {check.get('returncode')}"
-                raise RuntimeError(f"AOT compilation failed ({reason}); see compile.json and compile.log")
+                raise RuntimeError(f"AOT compilation failed ({reason}); see {report}.json and {report}.log")
+            print(f"  [{architecture}] Verifying {target.name}", flush=True)
             inspect_target(produced)
             if target.exists():
                 shutil.rmtree(target)
             produced.rename(target)
     else:
         inspect_target(target)
+    print(f"  [{architecture}] {target.name}: verified in {time.monotonic() - started:.1f}s", flush=True)
     return target

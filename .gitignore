@@ -8,5 +8,5 @@ dist/
 *.aimodel
 *.aimodelc
 artifacts/
-src/tinkerbox_ane/d1/fused-host
-src/tinkerbox_ane/d1/.host-*/
+src/tinkerbox_ane/**/tinkerbox-ane-host
+src/tinkerbox_ane/.host-*/

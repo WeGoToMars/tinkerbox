@@ -10,8 +10,8 @@ import time
 import torch
 from coreai_torch import TorchConverter, get_decomp_table
 
-from tinkerbox_ane.d1 import CHUNK, CONTEXT, INPUT, OUTPUT, REPO, REVISION, SOURCE, TIERS, checkpoint
-from tinkerbox_ane.d1.bundle import source_hash
+from tinkerbox_ane.coreai import source_hash
+from tinkerbox_ane.d1 import CHUNK, CONTEXT, INPUT, KIND, OUTPUT, REPO, REVISION, SOURCE, TIERS, checkpoint
 from tinkerbox_ane.d1.model import FusedBackbone, load_weights
 from tinkerbox_ane.d1.vision import export_vision_asset, load_vision_tower
 
@@ -27,7 +27,7 @@ def export_vision(out: Path = SOURCE) -> Path:
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text())
     else:
-        manifest = {"kind": "d1ane-fused", "version": 2}
+        manifest = {"kind": KIND, "version": 2}
     manifest.update(
         vision_asset=vision_asset.name,
         vision_source_hash=vhash,
@@ -60,7 +60,7 @@ def export(out: Path = SOURCE, include_vision: bool = True) -> Path:
     asset = out / "fused.aimodel"
     converter.to_coreai().save_asset(asset)
     manifest = {
-        "kind": "d1ane-fused", "version": 2, "width": CHUNK, "context": CONTEXT,
+        "kind": KIND, "version": 2, "width": CHUNK, "context": CONTEXT,
         "hidden": cfg.hidden, "heads": cfg.heads, "kv_heads": cfg.kv_heads,
         "head_dim": cfg.head_dim, "conv_taps": cfg.conv_taps, "tiers": list(TIERS),
         "conv_layers": model.conv_layers, "attention_layers": model.attention_layers,
@@ -95,4 +95,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

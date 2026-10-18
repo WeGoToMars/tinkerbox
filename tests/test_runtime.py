@@ -5,8 +5,9 @@ import sys
 import pytest
 from huggingface_hub import try_to_load_from_cache
 
-from tinkerbox_ane.d1 import DEFAULT_ASSET, REPO, REVISION, load
-from tinkerbox_ane.d1.host import (
+import tinkerbox_ane
+from tinkerbox_ane.d1 import DEFAULT_ASSET, MODEL, REPO, REVISION
+from tinkerbox_ane.host import (
     BINARY,
     SUPPORTED_ARCHITECTURES,
     UNSUPPORTED_ARCHITECTURES,
@@ -14,9 +15,9 @@ from tinkerbox_ane.d1.host import (
 )
 
 
-@pytest.mark.skipif(sys.platform != 'darwin', reason='fused-host is only built for macOS')
+@pytest.mark.skipif(sys.platform != 'darwin', reason='tinkerbox-ane-host is only built for macOS')
 def test_host_binary_architecture_handshake():
-    """Verify native fused-host binary exists, executes, and returns a recognized architecture."""
+    """Verify the native ANE host exists, executes, and returns a recognized architecture."""
     assert BINARY.is_file(), f"native host binary missing: {BINARY}"
     result = subprocess.run([str(BINARY), "--architecture"], capture_output=True, text=True, check=True)
     arch = result.stdout.strip()
@@ -35,7 +36,7 @@ def model(monkeypatch):
     if not isinstance(try_to_load_from_cache(REPO, 'model.safetensors', revision=REVISION), str):
         pytest.skip('requires the pinned checkpoint in the local cache')
     monkeypatch.setenv('HF_HUB_OFFLINE', '1')
-    with load(DEFAULT_ASSET) as model:
+    with tinkerbox_ane.load(MODEL, DEFAULT_ASSET) as model:
         yield model
 
 
@@ -149,4 +150,3 @@ def test_multimodal_decisions_trees_and_batches(model):
     assert batch[0]['answers']['blue']['noul'] > 0.95
     assert batch[1]['answers']['greeting']['noul'] == pytest.approx(0.9797, abs=0.01)
     assert batch[2]['answers']['color']['choice'] == 'red'
-

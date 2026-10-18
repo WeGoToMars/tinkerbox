@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from safetensors.torch import load_file
+from safetensors import safe_open
 from transformers import AutoConfig, AutoModel, AutoProcessor
 from transformers.models.lfm2_vl.modeling_lfm2_vl import Lfm2VlMultiModalProjector
 
@@ -57,18 +56,18 @@ class VisionTower(nn.Module):
         return self.post_layernorm(h)
 
 
+def checkpoint_tensors(checkpoint_dir: Path, prefix: str) -> dict[str, torch.Tensor]:
+    """The checkpoint tensors under `prefix`, without reading the rest of the weights."""
+    with safe_open(Path(checkpoint_dir) / "model.safetensors", "pt") as f:
+        return {k.removeprefix(prefix): f.get_tensor(k) for k in f.keys() if k.startswith(prefix)}
+
+
 def load_vision_tower(checkpoint_dir: Path) -> VisionTower:
     """Load vision tower weights from safetensors checkpoint."""
     checkpoint_dir = Path(checkpoint_dir)
     config = AutoConfig.from_pretrained(checkpoint_dir, trust_remote_code=True)
-    state = load_file(checkpoint_dir / "model.safetensors")
-    vt_state = {
-        k.replace("model.vision_tower.vision_model.", ""): v
-        for k, v in state.items()
-        if k.startswith("model.vision_tower.vision_model.")
-    }
     vt = AutoModel.from_config(config.vision_config)
-    vt.load_state_dict(vt_state)
+    vt.load_state_dict(checkpoint_tensors(checkpoint_dir, "model.vision_tower.vision_model."))
     tower = VisionTower(
         vt.embeddings.patch_embedding,
         vt.encoder,
@@ -81,14 +80,8 @@ def load_projector(checkpoint_dir: Path) -> Lfm2VlMultiModalProjector:
     """Load multimodal projector weights from safetensors checkpoint."""
     checkpoint_dir = Path(checkpoint_dir)
     config = AutoConfig.from_pretrained(checkpoint_dir, trust_remote_code=True)
-    state = load_file(checkpoint_dir / "model.safetensors")
-    proj_state = {
-        k.replace("model.multi_modal_projector.", ""): v
-        for k, v in state.items()
-        if k.startswith("model.multi_modal_projector.")
-    }
     proj = Lfm2VlMultiModalProjector(config)
-    proj.load_state_dict(proj_state)
+    proj.load_state_dict(checkpoint_tensors(checkpoint_dir, "model.multi_modal_projector."))
     return proj.eval().to(torch.float16)
 
 
@@ -121,8 +114,8 @@ class VisionPipeline:
         self.processor = AutoProcessor.from_pretrained(checkpoint_dir, trust_remote_code=True)
         self.projector = load_projector(checkpoint_dir)
         self.host = host
-        state = load_file(checkpoint_dir / "model.safetensors")
-        self.pos_weight = state["model.vision_tower.vision_model.embeddings.position_embedding.weight"].to(torch.float32)
+        self.pos_weight = checkpoint_tensors(
+            checkpoint_dir, "model.vision_tower.vision_model.embeddings.position_embedding.")["weight"].float()
 
     def image_markup(self, count: int) -> str:
         """Chat template markup for `count` images."""
@@ -162,12 +155,8 @@ class VisionPipeline:
         mask[0, 0, 0, :num_patches] = 0.0
 
         # Execute vision tower on ANE
-        ane_out = self.host.vision(
-            pv[0].numpy(),
-            pe[0].numpy(),
-            mask[0, 0, 0].numpy(),
-        )  # numpy [1024, 1152]
-        hidden_state = torch.from_numpy(ane_out).to(torch.float16)
+        ane_out = self.host.vision({"pixel_values": pv, "pos_embeds": pe, "attn_mask": mask})
+        hidden_state = torch.from_numpy(ane_out[0])  # [1024, 1152]
 
         # Unpad active tokens and reshape to [1, H, W, 1152]
         active = hidden_state[:num_patches].reshape(1, int(spatial[0]), int(spatial[1]), VISION_HIDDEN)

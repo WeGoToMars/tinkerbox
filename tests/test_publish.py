@@ -9,9 +9,10 @@ from unittest.mock import Mock
 import pytest
 
 from tinkerbox_ane import coreai
+from tinkerbox_ane.bundle import read_bundle
+from tinkerbox_ane.d1 import KIND
 from tinkerbox_ane.d1 import compile as compiler
 from tinkerbox_ane.d1 import publish
-from tinkerbox_ane.d1.bundle import read_bundle
 
 
 @pytest.fixture
@@ -67,7 +68,7 @@ def test_force_rebuilds_and_reuses_directory(source, tmp_path, native_tools):
     assert marker.exists()
     compiler.compile_model(source, out, architecture="h17s", force=True)
     assert not marker.exists()
-    assert read_bundle(out)["architecture"] == "h17s"
+    assert read_bundle(out, KIND)["architecture"] == "h17s"
 
 
 def test_failed_compilation_can_be_retried(source, tmp_path, native_tools):
@@ -86,7 +87,7 @@ def test_failed_compilation_can_be_retried(source, tmp_path, native_tools):
     assert not json.loads((out / "compile.json").read_text())["passed"]
     build.side_effect = success
     compiler.compile_model(source, out, architecture="h17s")
-    assert read_bundle(out)["architecture"] == "h17s"
+    assert read_bundle(out, KIND)["architecture"] == "h17s"
     assert json.loads((out / "compile.json").read_text())["passed"]
 
 
@@ -104,7 +105,7 @@ def test_failed_rebuild_preserves_previous_bundle(source, tmp_path, native_tools
         compiler.compile_model(source, out, architecture="h17s", force=True)
     assert marker.exists()
     assert (out / "model.json").read_bytes() == before
-    read_bundle(out)
+    read_bundle(out, KIND)
 
 
 @pytest.fixture

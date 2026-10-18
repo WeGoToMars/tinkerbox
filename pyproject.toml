@@ -40,8 +40,8 @@ packages = ["src/tinkerbox_ane"]
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "hatch_build.py" },
-    { file = "src/tinkerbox_ane/d1/host.swift" },
-    { file = "src/tinkerbox_ane/d1/cow-staging.m" },
+    { file = "src/tinkerbox_ane/host.swift" },
+    { file = "src/tinkerbox_ane/cow-staging.m" },
 ]
 
 [tool.pytest.ini_options]
