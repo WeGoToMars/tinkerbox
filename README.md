@@ -23,9 +23,23 @@ with d1.load() as model:
     print(result)
 ```
 
-`load()` downloads the matching Core AI architecture from [wegotomars/d1-3B-CoreAI-ANE](https://huggingface.co/wegotomars/d1-3B-CoreAI-ANE) (`v2.0.0`) into `~/Library/Caches/tinkerbox-ane/d1/models/`. Pass a directory path to `load(path)` to select a local AOT bundle. This runtime requires the version 2 packed backbone; older bundles must be re-exported and compiled.
+`load()` downloads the matching Core AI architecture from [wegotomars/d1-3B-CoreAI-ANE](https://huggingface.co/wegotomars/d1-3B-CoreAI-ANE) (`v2.0.0`) into `~/Library/Caches/tinkerbox-ane/models/d1-3b/`. Pass a directory path to `load(path)` to select a local AOT bundle. This runtime requires the version 2 packed backbone; older bundles must be re-exported and compiled. Models can also be loaded by catalog ID: `tinkerbox_ane.load("d1-3b")`.
 
-The API exposes `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries. Multiple decisions share prefix computation and run in packed chunks. Text prompts exceeding 32,768 tokens are rejected; image inputs are unsupported.
+The API exposes `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries. Multiple decisions share prefix computation and run in packed chunks. Prompts exceeding 32,768 tokens are rejected.
+
+## Images
+
+Pass Pillow images with any request. The SigLIP2 vision tower runs on the Neural Engine as a separate Core AI asset; pictures above one megapixel are downscaled. The state may be `None` when the pictures carry the input.
+
+```python
+from PIL import Image
+
+with d1.load() as model:
+    result = model.system_one(None, {"receipt": {"type": "noul", "instructions": "Is this a receipt?"}},
+                              images=[Image.open("photo.jpg")])
+```
+
+Image tokens join the shared trunk, so several questions about the same pictures encode them once.
 
 ## Multiple decisions in one pass
 
@@ -58,6 +72,19 @@ Pass `--build-only` to create `artifacts/swiftui/Tinkerbox.app` and the release 
 The Swift host manages recurrent state and allocates attention cache buffers dynamically. Initial execution compiles and specializes the AOT asset for the local ANE hardware, after which Core AI reuses its persistent cache.
 
 Weight staging uses an [APFS copy-on-write workaround](docs/cow-staging.md) to eliminate redundant disk writes during specialization.
+
+## Adding a Model
+
+Model-independent pieces live at the package top level and are shared by every model:
+
+| Module | Role |
+| --- | --- |
+| `host.py`, `host.swift` | Native Core AI host: tiered caches, packed chains and trees, RoPE tables, and a vision asset with named inputs |
+| `bundle.py` | Bundle manifest kind and asset identity checks, per-architecture download with progress, AOT compilation; each runtime validates the manifest fields it uses |
+| `coreai.py`, `guard.py`, `publish.py` | Compiler watchdog, ANE placement verification, Hugging Face releases |
+| `models.json`, `models.py` | The model catalog read by `tinkerbox_ane.load()` and the app |
+
+A model package such as `tinkerbox_ane.d1` supplies the rest: the fused FP16 graph (`model.py`), its export (`export.py`), tokenization and answer readout (`runtime.py`), decision-tree planning over LFM convolution routing (`tree.py`), and optionally a vision tower (`vision.py`). It exposes `load(asset=None)` and a bundle `KIND`; its `compile` and `publish` CLIs are thin wrappers over the shared modules. Add a catalog entry with the model's artifact repository, revision, inputs, and the first `min_version` that ships it. Older apps list the entry but keep it disabled until updated.
 
 ## Building from Source
 
@@ -108,7 +135,15 @@ Common publishing options:
 - `--source`, `--staging`, `--repo`: Source export directory, local staging path, and Hugging Face repository.
 - `--metadata`: Directory containing release metadata files (`LICENSE`, `NOTICE`, `README.md`).
 
-When releasing a new version, update `ARTIFACT_REVISION` in `src/tinkerbox_ane/d1/__init__.py` so `d1.load()` resolves the new tag by default. (The legacy script `scripts/publish_all_chips.py` forwards to this CLI.)
+When publishing new bundles, update the model's `revision` in `src/tinkerbox_ane/models.json` so `load()` resolves the new tag by default. (The legacy script `scripts/publish_all_chips.py` forwards to this CLI.)
+
+### Releasing the Package
+
+```sh
+uv run python scripts/release.py
+```
+
+From a clean tree, the script checks that every catalog model shipped by this version has its Hugging Face tag, runs the tests, builds the wheel and app ZIP, and creates a local annotated tag. It pushes and uploads nothing; it prints the `git push`, `uv publish`, and `gh release create` commands to run after review.
 
 ## Validation
 
