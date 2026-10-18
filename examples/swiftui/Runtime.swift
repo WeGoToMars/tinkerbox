@@ -1,0 +1,226 @@
+import Foundation
+
+enum QuestionType: String, CaseIterable, Codable, Sendable {
+    case noul, choice, score
+
+    var example: String {
+        switch self {
+        case .noul: "Is this a refund request?"
+        case .choice: "What is the topic of this message?"
+        case .score: "How urgent is this request?"
+        }
+    }
+}
+
+struct Request: Encodable, Sendable {
+    let state: String
+    let type: QuestionType
+    let instructions: String
+    let criteria: [String]
+
+    func validate() throws {
+        func isBlank(_ text: String) -> Bool {
+            text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if isBlank(state) { throw DecisionError.invalid("Input text must not be empty.") }
+        if isBlank(instructions) { throw DecisionError.invalid("Question / instructions must not be empty.") }
+        if type == .choice && (criteria.count < 2 || Set(criteria).count != criteria.count) {
+            throw DecisionError.invalid("Add at least two unique options.")
+        }
+        if type == .score && !(2...10).contains(criteria.count) {
+            throw DecisionError.invalid("Add 2–10 levels, ordered from lowest to highest.")
+        }
+        if type != .noul && criteria.contains(where: isBlank) {
+            throw DecisionError.invalid("Options and levels must not be empty.")
+        }
+    }
+}
+
+enum DecisionError: LocalizedError {
+    case invalid(String)
+    case invalidReply
+
+    var errorDescription: String? {
+        switch self {
+        case .invalid(let message): message
+        case .invalidReply: "The model returned an incomplete response."
+        }
+    }
+}
+
+struct Answer: Decodable, Sendable {
+    let type: QuestionType
+    let noul: Double?
+    let choice: String?
+    let score: Double?
+    let confidence: Double?
+}
+
+struct Probability: Decodable, Sendable {
+    let label: String
+    let value: Double
+}
+
+struct Reply: Decodable, Sendable {
+    let status: String?
+    let ready: Bool?
+    let setupMs: Double?
+    let modelName: String?
+    let cpuModel: String?
+    let architecture: String?
+    let answer: Answer?
+    let probabilities: [Probability]?
+    let tokens: Int?
+    let elapsedMs: Double?
+    let error: String?
+}
+
+actor Runtime {
+    static let shared = Runtime()
+    @MainActor static var setupProcess: Process?
+    static let logURL = FileManager.default.homeDirectoryForCurrentUser
+        .appending(path: "Library/Logs/tinkerbox-ane/demo.log")
+    private var process: Process?
+    private var input: Pipe?
+    private var output: Pipe?
+    private var replies: AsyncLineSequence<FileHandle.AsyncBytes>.AsyncIterator?
+    private var readyReply: Reply?
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    private init() {
+        // A dead worker should fail the next write, not kill the app.
+        signal(SIGPIPE, SIG_IGN)
+    }
+
+    var isConnected: Bool { readyReply != nil && process?.isRunning == true && replies != nil }
+
+    // Actors are reentrant at awaits. Hold the queue across startup AND a full
+    // request/reply exchange so UI and Shortcuts calls cannot read each other's replies.
+    private func acquire() async {
+        if busy {
+            await withCheckedContinuation { waiters.append($0) }
+        } else {
+            busy = true
+        }
+    }
+
+    private func release() {
+        if waiters.isEmpty { busy = false } else { waiters.removeFirst().resume() }
+    }
+
+    func start(status: @MainActor @Sendable (String) -> Void = { _ in }) async throws -> Reply {
+        await acquire()
+        defer { release() }
+        try Task.checkCancellation()
+        return try await prepare(status: status)
+    }
+
+    private func prepare(status: @MainActor @Sendable (String) -> Void) async throws -> Reply {
+        if let readyReply, process?.isRunning == true, replies != nil { return readyReply }
+        readyReply = nil
+        do {
+            return try await launch(status: status)
+        } catch {
+            disconnect()
+            await MainActor.run { Runtime.setupProcess = nil }
+            throw error
+        }
+    }
+
+    private func launch(status: @MainActor @Sendable (String) -> Void) async throws -> Reply {
+        if let process, process.isRunning { process.terminate() }
+        input?.fileHandleForWriting.closeFile()
+        output?.fileHandleForReading.closeFile()
+        let process = Process(), input = Pipe(), output = Pipe()
+        self.process = process
+        self.input = input
+        self.output = output
+        replies = output.fileHandleForReading.bytes.lines.makeAsyncIterator()
+        let resources = Bundle.main.resourceURL!
+        process.executableURL = Bundle.main.executableURL!.deletingLastPathComponent().appending(path: "uv")
+        process.arguments = [
+            "run", "--no-project", "--no-config", "--isolated", "--managed-python",
+            "--python", "3.12", "--no-build", "--with-requirements",
+            resources.appending(path: "requirements.txt").path,
+            "python", "-u", resources.appending(path: "worker.py").path,
+        ]
+        var environment = ProcessInfo.processInfo.environment
+        for name in ["PYTHONPATH", "PYTHONHOME", "UV_INTERNAL__PARENT_INTERPRETER"] {
+            environment.removeValue(forKey: name)
+        }
+        process.environment = environment
+        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        try FileManager.default.createDirectory(at: Self.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: Self.logURL.path, contents: nil)
+        let log = try FileHandle(forWritingTo: Self.logURL)
+        defer { log.closeFile() }
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = log
+        try await MainActor.run {
+            try process.run()
+            Runtime.setupProcess = process
+        }
+        // Let the child see EOF when the app closes its writer or exits.
+        input.fileHandleForReading.closeFile()
+        output.fileHandleForWriting.closeFile()
+        while true {
+            let reply = try await readReply()
+            if let message = reply.status {
+                await status(message)
+            } else {
+                guard reply.ready == true else { throw DecisionError.invalidReply }
+                await MainActor.run { Runtime.setupProcess = nil }
+                readyReply = reply
+                return reply
+            }
+        }
+    }
+
+    func decide(_ request: Request) async throws -> Reply {
+        try request.validate()
+        await acquire()
+        defer { release() }
+        try Task.checkCancellation()
+        _ = try await prepare(status: { _ in })
+        var data = try JSONEncoder().encode(request)
+        data.append(10)
+        do { try input!.fileHandleForWriting.write(contentsOf: data) } catch {
+            disconnect()
+            throw Self.stopped()
+        }
+        return try await readReply()
+    }
+
+    private func readReply() async throws -> Reply {
+        let reply: Reply
+        do {
+            guard var replies, let line = try await replies.next() else { throw Self.stopped() }
+            self.replies = replies
+            reply = try JSONDecoder().decode(Reply.self, from: Data(line.utf8))
+        } catch {
+            disconnect()
+            throw error
+        }
+        if let error = reply.error {
+            throw NSError(domain: "Tinkerbox", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
+        }
+        return reply
+    }
+
+    private func disconnect() {
+        replies = nil
+        readyReply = nil
+        input?.fileHandleForWriting.closeFile()
+        output?.fileHandleForReading.closeFile()
+        if let process, process.isRunning { process.terminate() }
+    }
+
+    private static func stopped() -> NSError {
+        let details = (try? String(contentsOf: logURL, encoding: .utf8))?.suffix(2000) ?? ""
+        return NSError(domain: "Tinkerbox", code: 2,
+                       userInfo: [NSLocalizedDescriptionKey: "The runtime stopped.\n\(details)"])
+    }
+}
+

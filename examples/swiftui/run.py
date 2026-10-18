@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -60,10 +61,35 @@ with tempfile.TemporaryDirectory(prefix=".app-", dir=out) as temporary:
         "--no-emit-project", "--no-hashes", "--no-header", "--no-annotate",
     ], text=True)
     (resources / "requirements.txt").write_text(f"tinkerbox-ane=={version}\n" + requirements)
+    swift_sources = [source / name for name in ("Demo.swift", "Runtime.swift", "Shortcuts.swift")]
+    toolchain = Path(subprocess.check_output(["xcrun", "--find", "swiftc"], text=True).strip()).parents[1]
+    sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
+    const_values = Path(temporary) / "TinkerboxDemo.swiftconstvalues"
+    protocols = Path(temporary) / "const-protocols.json"
+    protocols.write_text(json.dumps(json.loads(
+        (toolchain / "share/swift/SwiftConstantValues/AppIntents.json").read_text()
+    )["constValueProtocols"]))
     subprocess.run([
         "xcrun", "--sdk", "macosx", "swiftc", "-O", "-parse-as-library",
-        "-target", "arm64-apple-macos27.0", str(source / "Demo.swift"),
+        "-whole-module-optimization", "-module-name", "TinkerboxDemo",
+        "-target", "arm64-apple-macos27.0", *map(str, swift_sources),
+        "-emit-const-values-path", str(const_values),
+        "-const-gather-protocols-list", str(protocols),
         "-o", str(binaries / "TinkerboxDemo"),
+    ], check=True)
+    # swiftc alone does not package the metadata Shortcuts uses to discover actions.
+    source_list = Path(temporary) / "sources.txt"
+    source_list.write_text("\n".join(map(str, swift_sources)) + "\n")
+    const_list = Path(temporary) / "const-values.txt"
+    const_list.write_text(str(const_values) + "\n")
+    xcode_version = subprocess.check_output(["xcodebuild", "-version"], text=True).split()[-1]
+    subprocess.run([
+        "xcrun", "appintentsmetadataprocessor", "--module-name", "TinkerboxDemo",
+        "--toolchain-dir", str(toolchain), "--sdk-root", sdk,
+        "--xcode-version", xcode_version, "--platform-family", "macOS",
+        "--deployment-target", "27.0", "--target-triple", "arm64-apple-macos27.0",
+        "--source-file-list", str(source_list), "--swift-const-vals-list", str(const_list),
+        "--output", str(resources),
     ], check=True)
     info = {
         "CFBundleIdentifier": "dev.tinkerbox.ane.demo",

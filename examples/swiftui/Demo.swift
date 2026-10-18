@@ -1,136 +1,6 @@
 import AppKit
 import SwiftUI
 
-enum QuestionType: String, CaseIterable, Codable, Sendable {
-    case noul, choice, score
-
-    var example: String {
-        switch self {
-        case .noul: "Is this a refund request?"
-        case .choice: "What is the topic of this message?"
-        case .score: "How urgent is this request?"
-        }
-    }
-}
-
-struct Request: Encodable, Sendable {
-    let state: String
-    let type: QuestionType
-    let instructions: String
-    let criteria: [String]
-}
-
-struct Answer: Decodable, Sendable {
-    let type: QuestionType
-    let noul: Double?
-    let choice: String?
-    let score: Double?
-}
-
-struct Probability: Decodable, Sendable {
-    let label: String
-    let value: Double
-}
-
-struct Reply: Decodable, Sendable {
-    let status: String?
-    let ready: Bool?
-    let setupMs: Double?
-    let modelName: String?
-    let cpuModel: String?
-    let architecture: String?
-    let answer: Answer?
-    let probabilities: [Probability]?
-    let tokens: Int?
-    let elapsedMs: Double?
-    let error: String?
-}
-
-actor Runtime {
-    static let logURL = FileManager.default.homeDirectoryForCurrentUser
-        .appending(path: "Library/Logs/tinkerbox-ane/demo.log")
-    private var process: Process?
-    private var input: Pipe?
-    private var output: Pipe?
-    private var replies: AsyncLineSequence<FileHandle.AsyncBytes>.AsyncIterator?
-
-    var isConnected: Bool { replies != nil }
-
-    func start(status: @MainActor @Sendable (String) -> Void) async throws -> Reply {
-        if let process, process.isRunning { process.terminate() }
-        input?.fileHandleForWriting.closeFile()
-        output?.fileHandleForReading.closeFile()
-        let process = Process(), input = Pipe(), output = Pipe()
-        self.process = process
-        self.input = input
-        self.output = output
-        replies = output.fileHandleForReading.bytes.lines.makeAsyncIterator()
-        let resources = Bundle.main.resourceURL!
-        process.executableURL = Bundle.main.executableURL!.deletingLastPathComponent().appending(path: "uv")
-        process.arguments = [
-            "run", "--no-project", "--no-config", "--isolated", "--managed-python",
-            "--python", "3.12", "--no-build", "--with-requirements",
-            resources.appending(path: "requirements.txt").path,
-            "python", "-u", resources.appending(path: "worker.py").path,
-        ]
-        var environment = ProcessInfo.processInfo.environment
-        for name in ["PYTHONPATH", "PYTHONHOME", "UV_INTERNAL__PARENT_INTERPRETER"] {
-            environment.removeValue(forKey: name)
-        }
-        process.environment = environment
-        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
-        try FileManager.default.createDirectory(at: Self.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: Self.logURL.path, contents: nil)
-        let log = try FileHandle(forWritingTo: Self.logURL)
-        defer { log.closeFile() }
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = log
-        try await MainActor.run {
-            try process.run()
-            AppDelegate.setupProcess = process
-        }
-        // Let the child see EOF when the app closes its writer or exits.
-        input.fileHandleForReading.closeFile()
-        output.fileHandleForWriting.closeFile()
-        while true {
-            let reply = try await readReply()
-            if let message = reply.status {
-                await status(message)
-            } else {
-                await MainActor.run { AppDelegate.setupProcess = nil }
-                return reply
-            }
-        }
-    }
-
-    func decide(_ request: Request) async throws -> Reply {
-        var data = try JSONEncoder().encode(request)
-        data.append(10)
-        do { try input!.fileHandleForWriting.write(contentsOf: data) } catch { replies = nil; throw Self.stopped() }
-        return try await readReply()
-    }
-
-    private func readReply() async throws -> Reply {
-        guard var replies, let line = try await replies.next() else {
-            self.replies = nil
-            throw Self.stopped()
-        }
-        self.replies = replies
-        let reply = try JSONDecoder().decode(Reply.self, from: Data(line.utf8))
-        if let error = reply.error {
-            throw NSError(domain: "Tinkerbox", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
-        }
-        return reply
-    }
-
-    private static func stopped() -> NSError {
-        let details = (try? String(contentsOf: logURL, encoding: .utf8))?.suffix(2000) ?? ""
-        return NSError(domain: "Tinkerbox", code: 2,
-                       userInfo: [NSLocalizedDescriptionKey: "The runtime stopped.\n\(details)"])
-    }
-}
-
 @MainActor @Observable final class Demo {
     var state = "I was charged twice this month. Please refund the duplicate payment."
     var question = "Is this a refund request?"
@@ -148,7 +18,7 @@ actor Runtime {
     var cpuModel: String?
     var architecture: String?
     var times: [Double] = []
-    let runtime = Runtime()
+    let runtime = Runtime.shared
 
     var criteria: [String] {
         guard type != .noul else { return [] }
@@ -423,19 +293,10 @@ struct SystemFooter: View {
 }
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
-    static var setupProcess: Process?
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        // A dead worker should fail the next write, not kill the app.
-        signal(SIGPIPE, SIG_IGN)
-        NSApplication.shared.setActivationPolicy(.regular)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let process = Self.setupProcess, process.isRunning { process.terminate() }
+        if let process = Runtime.setupProcess, process.isRunning { process.terminate() }
     }
 }
 
