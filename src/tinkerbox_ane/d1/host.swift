@@ -326,13 +326,14 @@ final class Model {
           leaves.allSatisfy({ $0 >= 0 && $0 < tokens }) else {
       throw HostError("invalid answer slots")
     }
-    try await ensureTier(0, keep: 0)
+    let answerChunk = (tokens - 1) / width
+    let initialNeeded = min(answerChunk * width, 4096 - width)
+    try await ensureTier(initialNeeded, keep: 0)
     if answers == nil { prepareChain() }
     write4(&packed!) { p, _, s in
       precondition(s[3] == 1)
       memset(p, 0, self.tailCount * 2)
     }
-    let answerChunk = (tokens - 1) / width
     var result: [Float16] = []
     for chunk in 0...answerChunk {
       let offset = chunk * width
@@ -387,7 +388,6 @@ final class Model {
         }
       }
     }
-    try await ensureTier(0, keep: 0)
     return result
   }
 }

@@ -86,14 +86,12 @@ class ShortConv(nn.Module):
         b, c, u = self.in_proj(x).split(self.dim, dim=1)
         window = torch.cat((tail, b * u), dim=-1)
         # One-hot FP16 routing stays on ANE; dynamic integer gathers do not.
-        # Keep taps in contiguous planes. Stride-three depthwise convolution
-        # miscomputes channels >=1024 on ANE; contiguous multiply/add is sound.
+        # Keep taps in contiguous planes; a vertical kernel avoids the
+        # stride-three depthwise width convolution's ANE channel failure.
         routed = window @ route
         width = x.shape[-1]
-        terms = [routed[..., j * width:(j + 1) * width]
-                 * self.conv.weight[..., j:j + 1].reshape(1, self.dim, 1, 1)
-                 for j in range(self.taps)]
-        convolved = sum(terms)
+        planes = routed[..., :width * self.taps].reshape(1, self.dim, self.taps, width)
+        convolved = F.conv2d(planes, self.conv.weight.transpose(2, 3), groups=self.dim)
         return self.out_proj(c * convolved), routed[..., width * self.taps:]
 
 
@@ -182,9 +180,11 @@ class CacheAttention(nn.Module):
         k, v = torch.cat((past_k, k_new), dim=2), torch.cat((past_v, v_new), dim=2)
         mask = torch.cat((past_mask, chunk_mask), dim=-1)
         if self.context <= 4096:
-            return F.scaled_dot_product_attention(q, k.repeat_interleave(self.group, dim=1),
-                                                 v.repeat_interleave(self.group, dim=1),
-                                                 attn_mask=mask, scale=1.0)
+            return F.scaled_dot_product_attention(
+                q, k.repeat_interleave(self.group, dim=1),
+                v.repeat_interleave(self.group, dim=1),
+                attn_mask=mask, scale=1.0
+            )
         maxima, masses, means = [], [], []
         for start in range(0, self.context, 4096):
             kb = k[:, :, start:start + 4096].repeat_interleave(self.group, dim=1)
