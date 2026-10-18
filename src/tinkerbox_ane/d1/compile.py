@@ -38,10 +38,18 @@ def compile_model(
     compile_asset(src, target, architecture=architecture, min_deployment_version="27.0",
                   expected_functions=(f"c{capacity}" for capacity in spec["tiers"]), force=force)
     spec.update(asset=target.name, architecture=architecture, min_os="27.0", deployment="aot-fused")
+    vision_src_name = spec.get("vision_asset") or ("vision.aimodel" if (source / "vision.aimodel").is_dir() else None)
+    if vision_src_name and (source / vision_src_name).exists():
+        vision_src = source / vision_src_name
+        vision_target = out / f"vision.{architecture}.aimodelc"
+        compile_asset(vision_src, vision_target, architecture=architecture, min_deployment_version="27.0",
+                      expected_functions=("main",), force=force)
+        spec.update(vision_asset=vision_target.name)
     manifest = out / ".model.json"
     manifest.write_text(json.dumps(spec, indent=2) + "\n")
     manifest.replace(out / "model.json")
     return out
+
 
 
 def main() -> None:

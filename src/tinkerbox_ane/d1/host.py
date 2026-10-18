@@ -89,7 +89,7 @@ class Host:
         clones = Path(self._directory.name) / "clones"
         clones.mkdir()
         environment = dict(os.environ, COW_CLIENT_DEST=str(clones),
-                           COW_ASSET_PREFIX=str((asset / spec["asset"]).resolve()))
+                           COW_ASSET_PREFIX=str(asset.resolve()))
         try:
             self._process = subprocess.Popen([str(BINARY), str(asset)],
                                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment)
@@ -125,6 +125,19 @@ class Host:
             self._process.stdin.flush()
         except BrokenPipeError as error:
             raise RuntimeError(f"the Core AI host exited (status {self._process.poll()})") from error
+
+    def vision(self, pixel_values, pos_embeds, attn_mask):
+        import numpy as np
+        pv = np.ascontiguousarray(pixel_values, dtype=np.float16)
+        pe = np.ascontiguousarray(pos_embeds, dtype=np.float16)
+        mask = np.ascontiguousarray(attn_mask, dtype=np.float16)
+        if pv.shape != (1024, 768) or pe.shape != (1024, 1152) or mask.shape != (1024,):
+            raise ValueError(f"invalid vision shapes: pv={pv.shape}, pe={pe.shape}, mask={mask.shape}")
+        self._send(b"V", memoryview(pv).cast("B"), memoryview(pe).cast("B"), memoryview(mask).cast("B"))
+        self._reply()
+        buf = self._read(1024 * 1152 * 2)
+        return np.frombuffer(buf, dtype=np.float16).reshape(1024, 1152).copy()
+
 
     def set_rope(self, cos, sin) -> None:
         import numpy as np

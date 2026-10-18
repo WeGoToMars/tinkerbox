@@ -62,4 +62,16 @@ def read_bundle(root: Path) -> dict:
         raise ValueError("bundle source identity mismatch")
     if Path(name).suffix == ".aimodelc":
         verify_aot(root / name, expected)
+    vision_name = spec.get("vision_asset")
+    if vision_name:
+        if (not vision_name or vision_name != Path(vision_name).name or "\\" in vision_name or vision_name in {".", ".."}
+                or Path(vision_name).suffix not in {".aimodel", ".aimodelc"}):
+            raise ValueError(f"unsafe or unsupported vision asset path: {vision_name!r}")
+        expected_vision = spec.get("vision_source_hash")
+        if expected_vision:
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_vision) or source_hash(root / vision_name) != expected_vision:
+                raise ValueError("vision bundle source identity mismatch")
+            if Path(vision_name).suffix == ".aimodelc":
+                verify_aot(root / vision_name, expected_vision)
     return spec
+

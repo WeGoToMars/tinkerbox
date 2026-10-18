@@ -105,3 +105,48 @@ def test_parallel_decisions_match_individual_answers(model):
     with pytest.raises(ValueError, match='context limit'):
         model.probabilities_batch([('Hi', [GREETING]), ('hello ' * model.context, [GREETING])])
     assert model.probabilities('Hi', [GREETING])[0] == expected[0]
+
+
+def test_multimodal_decisions_trees_and_batches(model):
+    from PIL import Image
+
+    blue_img = Image.new('RGB', (100, 100), color='blue')
+    red_img = Image.new('RGB', (100, 100), color='red')
+    q_blue = {'type': 'noul', 'instructions': 'Is this image blue?'}
+    q_color = {
+        'type': 'choice',
+        'instructions': 'What color is this image?',
+        'criteria': {'blue': 'Blue', 'red': 'Red', 'green': 'Green'},
+    }
+
+    # Single-question image decision
+    result = model.system_one(None, {'blue': q_blue}, images=[blue_img])
+    assert result['answers']['blue']['noul'] > 0.95
+    assert result['usage']['input_tokens'] == 87
+    assert result['usage']['output_tokens'] == 0
+
+    # Decision tree sharing image representation in trunk
+    multi = model.system_one('Color check', {'blue': q_blue, 'color': q_color}, images=[blue_img])
+    assert multi['answers']['blue']['noul'] > 0.95
+    assert multi['answers']['color']['choice'] == 'blue'
+    assert multi['answers']['color']['confidence'] > 0.95
+    assert multi['usage']['input_tokens'] == 121
+
+    # Request isolation and answer discrimination across images
+    p_blue = model.probabilities(None, [q_blue], images=[blue_img])[0]
+    p_red = model.probabilities(None, [q_blue], images=[red_img])[0]
+    assert p_blue[0] > 0.95
+    assert p_red[0] < 0.05
+
+    # Batched execution mixing image and text-only requests
+    requests = [
+        (None, {'blue': q_blue}, [blue_img]),
+        ('Hi', {'greeting': GREETING}, None),
+        (None, {'color': q_color}, [red_img]),
+    ]
+    batch = model.system_one_batch(requests)
+    assert len(batch) == 3
+    assert batch[0]['answers']['blue']['noul'] > 0.95
+    assert batch[1]['answers']['greeting']['noul'] == pytest.approx(0.9797, abs=0.01)
+    assert batch[2]['answers']['color']['choice'] == 'red'
+

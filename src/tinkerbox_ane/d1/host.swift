@@ -143,6 +143,7 @@ struct FusedManifest: Decodable {
   let kv_heads: Int, head_dim: Int, conv_taps: Int
   let asset: String, tiers: [Int], conv_layers: [Int], attention_layers: [Int]
   let version: Int
+  let vision_asset: String?
 }
 
 final class Model {
@@ -155,10 +156,14 @@ final class Model {
   var function: InferenceFunction?
   var packed: NDArray?
   var inputs: [String: NDArray] = [:]
+  var visionModel: AIModel?
+  var visionFunction: InferenceFunction?
+  var visionInputs: [String: NDArray] = [:]
   var cos: [Float16] = [], sin: [Float16] = [], positions = 0
   var tier = 0, visible = 0
   var chainInputsValid = false
   var tailCount: Int { convCount * tailElements }
+
   init(root: URL) throws {
     self.root = root
     let spec = try JSONDecoder().decode(
@@ -390,6 +395,64 @@ final class Model {
     }
     return result
   }
+  func ensureVision() async throws {
+    guard visionFunction == nil else { return }
+    let assetName = manifest.vision_asset ?? "vision.\(AIModel.deviceArchitectureName).aimodelc"
+    let url = root.appendingPathComponent(assetName)
+    guard FileManager.default.fileExists(atPath: url.path) else {
+      throw HostError("missing vision asset at \(url.path)")
+    }
+    let model = try await loadAsset(url)
+    guard let fn = try model.loadFunction(named: "main") else {
+      throw HostError("missing vision function main")
+    }
+    visionInputs["pixel_values"] = NDArray(descriptor: try descriptor(fn.descriptor.inputDescriptor(of: "pixel_values"), "pixel_values"))
+    visionInputs["pos_embeds"] = NDArray(descriptor: try descriptor(fn.descriptor.inputDescriptor(of: "pos_embeds"), "pos_embeds"))
+    visionInputs["attn_mask"] = NDArray(descriptor: try descriptor(fn.descriptor.inputDescriptor(of: "attn_mask"), "attn_mask"))
+    visionModel = model
+    visionFunction = fn
+  }
+  func runVision(pixelValues: [Float16], posEmbeds: [Float16], attnMask: [Float16]) async throws -> [Float16] {
+    try await ensureVision()
+    guard pixelValues.count == 1024 * 768,
+          posEmbeds.count == 1024 * 1152,
+          attnMask.count == 1024 else {
+      throw HostError("invalid vision input dimensions")
+    }
+    write4(&visionInputs["pixel_values"]!) { p, shape, s in
+      for i in 0..<shape[1] {
+        for j in 0..<shape[2] {
+          p[i * s[1] + j * s[2]] = pixelValues[i * 768 + j]
+        }
+      }
+    }
+    write4(&visionInputs["pos_embeds"]!) { p, shape, s in
+      for i in 0..<shape[1] {
+        for j in 0..<shape[2] {
+          p[i * s[1] + j * s[2]] = posEmbeds[i * 1152 + j]
+        }
+      }
+    }
+    write4(&visionInputs["attn_mask"]!) { p, shape, s in
+      for t in 0..<shape[3] {
+        p[t * s[3]] = attnMask[t]
+      }
+    }
+    var out = try await visionFunction!.run(inputs: visionInputs)
+    guard let features = out.remove("features")?.ndArray else {
+      throw HostError("missing vision features output")
+    }
+    var result = [Float16](repeating: 0, count: 1024 * 1152)
+    read4(features) { src, shape, s in
+      precondition(shape == [1, 1024, 1152])
+      for i in 0..<shape[1] {
+        for j in 0..<shape[2] {
+          result[i * 1152 + j] = src[i * s[1] + j * s[2]]
+        }
+      }
+    }
+    return result
+  }
 }
 
 @main struct Host {
@@ -447,6 +510,16 @@ final class Model {
           h.withUnsafeBytes { reply += $0 }
           writeAll(reply)
         } catch { sendError("\(error)") }
+      case UInt8(ascii: "V"):
+        guard let pv = readHalves(1024 * 768),
+              let pe = readHalves(1024 * 1152),
+              let mask = readHalves(1024) else { exit(1) }
+        do {
+          let feat = try await model.runVision(pixelValues: pv, posEmbeds: pe, attnMask: mask)
+          var reply: [UInt8] = [0]
+          feat.withUnsafeBytes { reply += $0 }
+          writeAll(reply)
+        } catch { sendError("\(error)") }
       case UInt8(ascii: "Q"):
         exit(0)
       default:
@@ -457,3 +530,4 @@ final class Model {
     exit(0)
   }
 }
+

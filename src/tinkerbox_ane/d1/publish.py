@@ -59,7 +59,10 @@ def upload_to_hub(
         identities.add(spec["source_hash"])
         patterns.extend((f"macos27/{architecture}/model.json",
                          f"macos27/{architecture}/{spec['asset']}/**"))
+        if spec.get("vision_asset"):
+            patterns.append(f"macos27/{architecture}/{spec['vision_asset']}/**")
     if len(identities) != 1:
+
         raise ValueError("release requires bundles with the same source identity")
     fallback_root = Path(metadata_dir) if metadata_dir is not None else Path(".")
     for name in ("LICENSE", "NOTICE", "README.md"):
