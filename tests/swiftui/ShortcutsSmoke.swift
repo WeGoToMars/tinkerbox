@@ -1,5 +1,16 @@
 import AppIntents
+import AppKit
 import Foundation
+
+func solidImage(_ color: NSColor) -> IntentFile {
+    let image = NSImage(size: NSSize(width: 100, height: 100), flipped: false) { rect in
+        color.setFill()
+        rect.fill()
+        return true
+    }
+    let png = NSBitmapImageRep(data: image.tiffRepresentation!)!.representation(using: .png, properties: [:])!
+    return IntentFile(data: png, filename: "solid.png", type: .png)
+}
 
 func require(_ condition: Bool, _ message: String) throws {
     if !condition { throw NSError(domain: "ShortcutsSmoke", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
@@ -65,7 +76,7 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         async let choiceCall = choice.perform()
         async let scoreCall = score.perform()
         async let uiCall = Runtime.shared.decide(
-            Request(state: yes.text, type: .noul, instructions: yes.question, criteria: [])
+            Request(state: yes.text!, type: .noul, instructions: yes.question, criteria: [])
         )
         async let setupCall = Runtime.shared.start()
         let (yesReply, noReply, choiceReply, scoreReply, uiReply, setupReply) =
@@ -89,6 +100,18 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
             .allSatisfy { $0.isFinite && $0 >= 0 }, "Missing inference timing")
         try require(abs(uiReply.answer!.noul! - affirmative.yesProbability) < 0.01, "UI and Shortcut answers differ")
 
+        // Image-only decisions: Shortcuts file data reaches the vision tower and changes the answer.
+        let blue = YesNoDecisionIntent()
+        blue.question = "Is this image blue?"
+        blue.images = [solidImage(.blue)]
+        let red = YesNoDecisionIntent()
+        red.question = blue.question
+        red.images = [solidImage(.red)]
+        let blueAnswer = try await blue.perform().value!
+        let redAnswer = try await red.perform().value!
+        try require(blueAnswer.answer && blueAnswer.yesProbability > 0.9, "Expected a blue image")
+        try require(!redAnswer.answer && redAnswer.yesProbability < 0.1, "Expected a non-blue image")
+
         let oversized = YesNoDecisionIntent()
         oversized.text = String(repeating: "hello ", count: 40_000)
         oversized.question = yes.question
@@ -101,6 +124,6 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         let repeated = try await yes.perform().value!
         try require(repeated.answer && abs(repeated.yesProbability - affirmative.yesProbability) < 0.01,
                     "A failed request affected the next decision")
-        print("PASS: typed answers, probabilities, usage, cold startup, concurrent UI/Shortcuts calls, validation, and error recovery")
+        print("PASS: typed answers, probabilities, usage, images, cold startup, concurrent UI/Shortcuts calls, validation, and error recovery")
     }
 }

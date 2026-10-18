@@ -1,5 +1,20 @@
 import AppIntents
 import Foundation
+import UniformTypeIdentifiers
+
+// Shortcuts hands over file data; the worker opens images by path.
+func decide(_ request: Request, images: [IntentFile]?) async throws -> Reply {
+    let folder = FileManager.default.temporaryDirectory.appending(path: "tinkerbox-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    var request = request
+    request.images = try (images ?? []).enumerated().map { index, file in
+        let url = folder.appending(path: "\(index)")  // Pillow detects the format from the contents.
+        try file.data.write(to: url)
+        return url.path
+    }
+    return try await Runtime.shared.decide(request)
+}
 
 struct DecisionProbability: TransientAppEntity {
     static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Decision Probability")
@@ -95,20 +110,22 @@ struct ScoreDecision: TransientAppEntity {
 struct YesNoDecisionIntent: AppIntent {
     static let title: LocalizedStringResource = "Yes/No Decision"
     static let description = IntentDescription(
-        "Ask a yes/no question about text using the on-device decision model. Returns a Boolean answer, the probability of Yes (0–1), all probabilities, input tokens, and inference time. First run may download the runtime and model; open Tinkerbox once to finish setup."
+        "Ask a yes/no question about text, images, or both, using the model selected in Tinkerbox. Returns a Boolean answer, the probability of Yes (0–1), all probabilities, input tokens, and inference time. First run may download the runtime and model; open Tinkerbox once to finish setup."
     )
     static var supportedModes: IntentModes { .background }
 
-    @Parameter(title: "Input Text") var text: String
+    @Parameter(title: "Input Text") var text: String?
     @Parameter(title: "Question", description: "For example: Is this a refund request?") var question: String
+    @Parameter(title: "Images", description: "Optional pictures to decide about, if the model selected in Tinkerbox accepts images.",
+               supportedContentTypes: [.image]) var images: [IntentFile]?
 
     static var parameterSummary: some ParameterSummary {
-        Summary("Decide \(\.$question) about \(\.$text)")
+        Summary("Decide \(\.$question) about \(\.$text)") { \.$images }
     }
 
     func perform() async throws -> some IntentResult & ReturnsValue<YesNoDecision> {
-        let reply = try await Runtime.shared.decide(
-            Request(state: text, type: .noul, instructions: question, criteria: [])
+        let reply = try await decide(
+            Request(state: text ?? "", type: .noul, instructions: question, criteria: []), images: images
         )
         return .result(value: try YesNoDecision(reply))
     }
@@ -117,21 +134,26 @@ struct YesNoDecisionIntent: AppIntent {
 struct ChooseOptionIntent: AppIntent {
     static let title: LocalizedStringResource = "Choose Option"
     static let description = IntentDescription(
-        "Choose among at least two unique options using the on-device decision model. Supply a List of option names. Returns the chosen option, confidence (0–1), all probabilities, input tokens, and inference time. First run may download the runtime and model; open Tinkerbox once to finish setup."
+        "Choose among at least two unique options for text, images, or both, using the model selected in Tinkerbox. Supply a List of option names. Returns the chosen option, confidence (0–1), all probabilities, input tokens, and inference time. First run may download the runtime and model; open Tinkerbox once to finish setup."
     )
     static var supportedModes: IntentModes { .background }
 
-    @Parameter(title: "Input Text") var text: String
+    @Parameter(title: "Input Text") var text: String?
     @Parameter(title: "Question", description: "For example: What is the topic of this message?") var question: String
     @Parameter(title: "Options", description: "A list of at least two unique, nonempty option names.") var options: [String]
+    @Parameter(title: "Images", description: "Optional pictures to decide about, if the model selected in Tinkerbox accepts images.",
+               supportedContentTypes: [.image]) var images: [IntentFile]?
 
     static var parameterSummary: some ParameterSummary {
-        Summary("Choose from \(\.$options) for \(\.$text)") { \.$question }
+        Summary("Choose from \(\.$options) for \(\.$text)") {
+            \.$question
+            \.$images
+        }
     }
 
     func perform() async throws -> some IntentResult & ReturnsValue<ChoiceDecision> {
-        let reply = try await Runtime.shared.decide(
-            Request(state: text, type: .choice, instructions: question, criteria: options)
+        let reply = try await decide(
+            Request(state: text ?? "", type: .choice, instructions: question, criteria: options), images: images
         )
         return .result(value: try ChoiceDecision(reply))
     }
@@ -140,21 +162,26 @@ struct ChooseOptionIntent: AppIntent {
 struct ScoreTextIntent: AppIntent {
     static let title: LocalizedStringResource = "Score Text"
     static let description = IntentDescription(
-        "Evaluate text across 2–10 ordered levels, lowest to highest, using the on-device decision model. Supply a List of levels. Returns the expected score from 0 to the number of levels minus one (may be fractional), all probabilities, input tokens, and inference time. First run may download the runtime and model; open Tinkerbox once to finish setup."
+        "Evaluate text, images, or both across 2–10 ordered levels, lowest to highest, using the model selected in Tinkerbox. Supply a List of levels. Returns the expected score from 0 to the number of levels minus one (may be fractional), all probabilities, input tokens, and inference time. First run may download the runtime and model; open Tinkerbox once to finish setup."
     )
     static var supportedModes: IntentModes { .background }
 
-    @Parameter(title: "Input Text") var text: String
+    @Parameter(title: "Input Text") var text: String?
     @Parameter(title: "Question", description: "For example: How urgent is this request?") var question: String
     @Parameter(title: "Levels", description: "A list of 2–10 nonempty levels, ordered from lowest to highest.") var levels: [String]
+    @Parameter(title: "Images", description: "Optional pictures to decide about, if the model selected in Tinkerbox accepts images.",
+               supportedContentTypes: [.image]) var images: [IntentFile]?
 
     static var parameterSummary: some ParameterSummary {
-        Summary("Score \(\.$text) using \(\.$levels)") { \.$question }
+        Summary("Score \(\.$text) using \(\.$levels)") {
+            \.$question
+            \.$images
+        }
     }
 
     func perform() async throws -> some IntentResult & ReturnsValue<ScoreDecision> {
-        let reply = try await Runtime.shared.decide(
-            Request(state: text, type: .score, instructions: question, criteria: levels)
+        let reply = try await decide(
+            Request(state: text ?? "", type: .score, instructions: question, criteria: levels), images: images
         )
         return .result(value: try ScoreDecision(reply))
     }

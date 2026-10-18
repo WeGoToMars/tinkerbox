@@ -20,15 +20,17 @@ with tempfile.TemporaryDirectory(prefix="shortcuts-", dir=root / "artifacts/swif
     shutil.copytree(app / "Contents/Resources", bundle / "Resources")
     shutil.copyfile(app / "Contents/MacOS/uv", binaries / "uv")
     (binaries / "uv").chmod(0o755)
+    version = plistlib.loads((app / "Contents/Info.plist").read_bytes())["CFBundleShortVersionString"]
     (bundle / "Info.plist").write_bytes(plistlib.dumps({
         "CFBundleIdentifier": "dev.tinkerbox.ane.shortcuts-smoke",
         "CFBundleExecutable": "ShortcutsSmoke",
         "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": version,
     }))
     executable = binaries / "ShortcutsSmoke"
     subprocess.run([
         "xcrun", "swiftc", "-O", "-parse-as-library", "-target", "arm64-apple-macos27.0",
-        str(source / "Runtime.swift"), str(source / "Shortcuts.swift"),
+        str(source / "Catalog.swift"), str(source / "Runtime.swift"), str(source / "Shortcuts.swift"),
         str(root / "tests/swiftui/ShortcutsSmoke.swift"), "-o", str(executable),
     ], check=True)
     subprocess.run([str(executable)], check=True, timeout=600)

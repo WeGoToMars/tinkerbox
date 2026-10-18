@@ -15,6 +15,8 @@ import urllib.request
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--build-only", action="store_true")
+parser.add_argument("--wheel", type=Path,
+                    help="bundle this tinkerbox-ane wheel instead of installing the release from PyPI")
 args = parser.parse_args()
 
 source = Path(__file__).resolve().parent
@@ -50,6 +52,8 @@ with tempfile.TemporaryDirectory(prefix=".app-", dir=out) as temporary:
     uv.chmod(0o755)
     shutil.copyfile(source / "LICENSE-uv.txt", resources / "LICENSE-uv.txt")
     shutil.copyfile(source / "worker.py", resources / "worker.py")
+    # The offline model catalog: exactly the models this package version can run.
+    shutil.copyfile(root / "src/tinkerbox_ane/models.json", resources / "models.json")
     icon_plist = Path(temporary) / "icon.plist"
     subprocess.run([
         "xcrun", "actool", str(source / "Tinkerbox.icon"), "--compile", str(resources),
@@ -60,8 +64,13 @@ with tempfile.TemporaryDirectory(prefix=".app-", dir=out) as temporary:
         str(uv), "export", "--project", str(root), "--locked", "--no-dev",
         "--no-emit-project", "--no-hashes", "--no-header", "--no-annotate",
     ], text=True)
-    (resources / "requirements.txt").write_text(f"tinkerbox-ane=={version}\n" + requirements)
-    swift_sources = [source / name for name in ("Demo.swift", "Runtime.swift", "Shortcuts.swift")]
+    package = f"tinkerbox-ane=={version}"
+    if args.wheel:
+        # Development builds reference the wheel inside the final app location.
+        shutil.copyfile(args.wheel, resources / args.wheel.name)
+        package = f"tinkerbox-ane @ {(app / 'Contents/Resources' / args.wheel.name).as_uri()}"
+    (resources / "requirements.txt").write_text(f"{package}\n" + requirements)
+    swift_sources = [source / name for name in ("Demo.swift", "Catalog.swift", "Runtime.swift", "Shortcuts.swift")]
     toolchain = Path(subprocess.check_output(["xcrun", "--find", "swiftc"], text=True).strip()).parents[1]
     sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
     const_values = Path(temporary) / "TinkerboxDemo.swiftconstvalues"

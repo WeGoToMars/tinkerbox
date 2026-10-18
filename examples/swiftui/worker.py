@@ -16,44 +16,56 @@ def send(reply):
     output.flush()
 
 
+def question(request):
+    kind = request["type"]
+    result = {"type": kind, "instructions": request["instructions"]}
+    if kind == "choice":
+        criteria = request["criteria"]
+        if len(criteria) < 2 or len(set(criteria)) != len(criteria):
+            raise ValueError("Choice needs at least two unique options.")
+        result["criteria"] = dict.fromkeys(criteria)
+    elif kind == "score":
+        criteria = request["criteria"]
+        if not 2 <= len(criteria) <= 10:
+            raise ValueError("Score needs 2–10 ordered levels.")
+        result["criteria"] = criteria
+    elif kind != "noul":
+        raise ValueError(f"Unknown question type: {kind}")
+    return result
+
+
 def main():
     started = time.perf_counter()
-    from tinkerbox_ane import d1
-    from tinkerbox_ane.d1.bundle import download_bundle, read_bundle
-    from tinkerbox_ane.d1.host import device_architecture
+    from PIL import Image, ImageOps
 
+    from tinkerbox_ane import models
+    from tinkerbox_ane.host import device_architecture
+
+    model_id = os.environ.get("TINKERBOX_MODEL") or models.CATALOG[0]["id"]
+    entry = models.entry(model_id)
     local = os.environ.get("TINKERBOX_ASSET")
     if local:
         asset = Path(local)
     else:
         send({"status": "Fetching model files…"})
-        asset = download_bundle()
+        asset = models.download(model_id, lambda done, total: send(
+            {"status": "Downloading model…", "progress": min(done / total, 1.0) if total else None}))
     send({"status": "Loading model…"})
-    metadata = read_bundle(asset)
     cpu = subprocess.check_output(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"], text=True).strip()
-    with d1.load(asset) as model:
-        send({"ready": True, "modelName": metadata["source"]["repo"],
+    with models.load(model_id, asset) as model:
+        send({"ready": True, "modelId": model_id, "modelName": f"{entry['publisher']} {entry['name']}",
               "cpuModel": cpu, "architecture": device_architecture(),
               "setupMs": (time.perf_counter() - started) * 1000})
         for line in sys.stdin:
             try:
                 request = json.loads(line)
                 kind = request["type"]
-                question = {"type": kind, "instructions": request["instructions"]}
-                if kind == "choice":
-                    criteria = request["criteria"]
-                    if len(criteria) < 2 or len(set(criteria)) != len(criteria):
-                        raise ValueError("Choice needs at least two unique options.")
-                    question["criteria"] = dict.fromkeys(criteria)
-                elif kind == "score":
-                    criteria = request["criteria"]
-                    if not 2 <= len(criteria) <= 10:
-                        raise ValueError("Score needs 2–10 ordered levels.")
-                    question["criteria"] = criteria
-                elif kind != "noul":
-                    raise ValueError(f"Unknown question type: {kind}")
+                images = [ImageOps.exif_transpose(Image.open(path)) for path in request.get("images", [])]
+                if images and "image" not in entry["inputs"]:
+                    raise ValueError(f"{entry['name']} does not accept images.")
+                state = request["state"] if request["state"].strip() or not images else None
                 started = time.perf_counter()
-                result = model.system_one(request["state"], {"decision": question})
+                result = model.system_one(state, {"decision": question(request)}, images=images)
                 elapsed = (time.perf_counter() - started) * 1000
                 answer = result["answers"]["decision"]
                 if kind == "noul":

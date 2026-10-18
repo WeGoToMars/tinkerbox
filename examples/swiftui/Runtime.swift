@@ -17,12 +17,15 @@ struct Request: Encodable, Sendable {
     let type: QuestionType
     let instructions: String
     let criteria: [String]
+    var images: [String] = []  // file paths
 
     func validate() throws {
         func isBlank(_ text: String) -> Bool {
             text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-        if isBlank(state) { throw DecisionError.invalid("Input text must not be empty.") }
+        if isBlank(state) && images.isEmpty {
+            throw DecisionError.invalid("Input text must not be empty unless you add an image.")
+        }
         if isBlank(instructions) { throw DecisionError.invalid("Question / instructions must not be empty.") }
         if type == .choice && (criteria.count < 2 || Set(criteria).count != criteria.count) {
             throw DecisionError.invalid("Add at least two unique options.")
@@ -63,7 +66,9 @@ struct Probability: Decodable, Sendable {
 
 struct Reply: Decodable, Sendable {
     let status: String?
+    let progress: Double?
     let ready: Bool?
+    let modelId: String?
     let setupMs: Double?
     let modelName: String?
     let cpuModel: String?
@@ -80,6 +85,7 @@ actor Runtime {
     @MainActor static var setupProcess: Process?
     static let logURL = FileManager.default.homeDirectoryForCurrentUser
         .appending(path: "Library/Logs/tinkerbox-ane/demo.log")
+    private static let modelKey = "model"
     private var process: Process?
     private var input: Pipe?
     private var output: Pipe?
@@ -95,6 +101,21 @@ actor Runtime {
 
     var isConnected: Bool { readyReply != nil && process?.isRunning == true && replies != nil }
 
+    // The UI and Shortcuts both use the model chosen in the app.
+    nonisolated static var selectedModel: String {
+        let runnable = Catalog.bundled.filter(\.isSupported).map(\.id)
+        let stored = UserDefaults.standard.string(forKey: modelKey)
+        return stored.flatMap { runnable.contains($0) ? $0 : nil } ?? runnable.first ?? ""
+    }
+
+    // Takes effect on the next start or decision. Stopping the worker also cancels a download or
+    // load in progress; the queued caller then fails and the next one launches the new model.
+    func select(model: String) {
+        guard model != Self.selectedModel || readyReply?.modelId != model else { return }
+        UserDefaults.standard.set(model, forKey: Self.modelKey)
+        disconnect()
+    }
+
     // Actors are reentrant at awaits. Hold the queue across startup AND a full
     // request/reply exchange so UI and Shortcuts calls cannot read each other's replies.
     private func acquire() async {
@@ -109,14 +130,14 @@ actor Runtime {
         if waiters.isEmpty { busy = false } else { waiters.removeFirst().resume() }
     }
 
-    func start(status: @MainActor @Sendable (String) -> Void = { _ in }) async throws -> Reply {
+    func start(status: @MainActor @Sendable (String, Double?) -> Void = { _, _ in }) async throws -> Reply {
         await acquire()
         defer { release() }
         try Task.checkCancellation()
         return try await prepare(status: status)
     }
 
-    private func prepare(status: @MainActor @Sendable (String) -> Void) async throws -> Reply {
+    private func prepare(status: @MainActor @Sendable (String, Double?) -> Void) async throws -> Reply {
         if let readyReply, process?.isRunning == true, replies != nil { return readyReply }
         readyReply = nil
         do {
@@ -128,7 +149,7 @@ actor Runtime {
         }
     }
 
-    private func launch(status: @MainActor @Sendable (String) -> Void) async throws -> Reply {
+    private func launch(status: @MainActor @Sendable (String, Double?) -> Void) async throws -> Reply {
         if let process, process.isRunning { process.terminate() }
         input?.fileHandleForWriting.closeFile()
         output?.fileHandleForReading.closeFile()
@@ -149,6 +170,7 @@ actor Runtime {
         for name in ["PYTHONPATH", "PYTHONHOME", "UV_INTERNAL__PARENT_INTERPRETER"] {
             environment.removeValue(forKey: name)
         }
+        environment["TINKERBOX_MODEL"] = Self.selectedModel
         process.environment = environment
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         try FileManager.default.createDirectory(at: Self.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -168,7 +190,7 @@ actor Runtime {
         while true {
             let reply = try await readReply()
             if let message = reply.status {
-                await status(message)
+                await status(message, reply.progress)
             } else {
                 guard reply.ready == true else { throw DecisionError.invalidReply }
                 await MainActor.run { Runtime.setupProcess = nil }
@@ -183,7 +205,7 @@ actor Runtime {
         await acquire()
         defer { release() }
         try Task.checkCancellation()
-        _ = try await prepare(status: { _ in })
+        _ = try await prepare(status: { _, _ in })
         var data = try JSONEncoder().encode(request)
         data.append(10)
         do { try input!.fileHandleForWriting.write(contentsOf: data) } catch {
@@ -223,4 +245,3 @@ actor Runtime {
                        userInfo: [NSLocalizedDescriptionKey: "The runtime stopped.\n\(details)"])
     }
 }
-

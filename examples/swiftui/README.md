@@ -9,7 +9,7 @@ Requires macOS 27 on Apple Silicon.
 1. Download and extract the latest `Tinkerbox-ANE-*-macos-arm64.zip` from the GitHub releases page.
 2. Launch **Tinkerbox.app**. The app is ad-hoc signed, so macOS blocks the first launch: allow it under **System Settings → Privacy & Security → Open Anyway**, or run `xattr -dr com.apple.quarantine Tinkerbox.app`.
 
-The app bundles a standalone `uv` binary. On first run, it configures an isolated Python 3.12 environment, installs the precompiled `tinkerbox-ane` wheel, and fetches the required model weights from Hugging Face. Subsequent launches reuse the cached environment.
+The app bundles a standalone `uv` binary. On first run, it configures an isolated Python 3.12 environment, installs the precompiled `tinkerbox-ane` wheel, and fetches the selected model's weights from Hugging Face. Subsequent launches reuse the cached environment.
 
 The default model bundle targets `h17s` (M5-family) Neural Engine cores. Setup progress and error logs are written to `~/Library/Logs/tinkerbox-ane/demo.log`.
 
@@ -23,6 +23,13 @@ uv run --no-project --python 3.12 python examples/swiftui/run.py --build-only
 
 This generates `artifacts/swiftui/Tinkerbox.app` and a distributable ZIP archive. Omit `--build-only` to launch the application immediately after building.
 
+Until the matching `tinkerbox-ane` version is on PyPI, bundle a locally built wheel; the app then installs it from inside the bundle:
+
+```sh
+uv build --wheel
+uv run --no-project --python 3.12 python examples/swiftui/run.py --wheel dist/tinkerbox_ane-*.whl
+```
+
 To test against a local model bundle instead of downloading from Hugging Face:
 
 ```sh
@@ -35,6 +42,16 @@ TINKERBOX_ASSET="$PWD/artifacts/d1_fp16_fused128_ctx32768" uv run --no-project -
 - `choice`: Selection across two or more discrete options.
 - `score`: Ranked evaluation across 2–10 ordered levels.
 
+## Models
+
+The model button in the window header opens the catalog. The app fetches [`models.json`](../../src/tinkerbox_ane/models.json) from the repository's `main` branch and falls back to the copy bundled with the app when offline. **Download** fetches a model with byte progress and switches to it; **Use** switches to a model already on disk, and the trash button removes one. Entries newer than the installed app are listed with the version they require. The choice persists across launches and also applies to Shortcuts; switching cancels a download in progress.
+
+Downloaded bundles live in `~/Library/Caches/tinkerbox-ane/models/<model>/`.
+
+## Images
+
+When the selected model accepts images, an **Images** strip appears above the input text. Drop pictures onto it or click **Add**; text becomes optional while an image is attached. Photos are rotated by their EXIF orientation and downscaled to one megapixel.
+
 Displayed decision latencies measure synchronous inference time (prompt formatting, tokenization, embeddings, and ANE execution). They exclude one-time model initialization and UI IPC overhead, but the session median and p95 include first-use warm-up of each context tier.
 
 ## Shortcuts
@@ -43,9 +60,11 @@ Build and launch **Tinkerbox.app** once, and let model setup finish. In Shortcut
 
 | Action | Inputs | Result properties |
 | --- | --- | --- |
-| **Yes/No Decision** | Input Text, Question | **Answer** (Boolean; Yes when its probability is at least 0.5), **Yes Probability** (0–1) |
-| **Choose Option** | Input Text, Question, Options (List of at least two unique names) | **Chosen Option** (text), **Confidence** (0–1) |
-| **Score Text** | Input Text, Question, Levels (List of 2–10 labels, lowest to highest) | **Score** (fractional expected value from 0 to N−1), **Maximum Score** |
+| **Yes/No Decision** | Input Text, Question, Images | **Answer** (Boolean; Yes when its probability is at least 0.5), **Yes Probability** (0–1) |
+| **Choose Option** | Input Text, Question, Options (List of at least two unique names), Images | **Chosen Option** (text), **Confidence** (0–1) |
+| **Score Text** | Input Text, Question, Levels (List of 2–10 labels, lowest to highest), Images | **Score** (fractional expected value from 0 to N−1), **Maximum Score** |
+
+**Images** is optional and accepts any image files, such as the output of **Take Screenshot** or **Select Photos**; **Input Text** may be left empty when images are supplied. Actions use the model selected in the app, and report an error if it does not accept images.
 
 Every result also includes **Probabilities** (a list of Label/Probability values), **Input Tokens**, and **Inference Time (ms)**. Select a property from the action's result variable, or use **Get Details of** on the result. Probabilities are normalized across the supplied options or levels; they are not guarantees of correctness. Score probability labels include the zero-based level number and its label.
 

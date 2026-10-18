@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor @Observable final class Demo {
     var state = "I was charged twice this month. Please refund the duplicate payment."
@@ -7,9 +8,13 @@ import SwiftUI
     var type = QuestionType.noul
     var choices = "Refund request\nTechnical support\nOther"
     var levels = "Not urgent\nSomewhat urgent\nVery urgent"
+    var images: [URL] = []
+    var catalog = Catalog()
+    var model = Runtime.selectedModel
     var ready = false
     var loading = true
     var status = "Preparing runtime…"
+    var progress: Double?
     var busy = false
     var error: String?
     var result: Reply?
@@ -19,6 +24,15 @@ import SwiftUI
     var architecture: String?
     var times: [Double] = []
     let runtime = Runtime.shared
+    private var generation = 0
+
+    var current: CatalogModel? { catalog.models.first { $0.id == model } }
+
+    var canRun: Bool {
+        ready && !busy && validation == nil
+            && !(state.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty)
+            && !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var criteria: [String] {
         guard type != .noul else { return [] }
@@ -37,22 +51,55 @@ import SwiftUI
     }
 
     func load() async {
+        // A model switch supersedes an earlier load; ignore that load's outcome.
+        generation += 1
+        let current = generation
         loading = true
+        ready = false
         error = nil
         status = "Preparing runtime…"
+        progress = nil
         modelName = nil
         cpuModel = nil
         architecture = nil
-        defer { loading = false }
+        defer {
+            if current == generation {
+                loading = false
+                progress = nil
+                catalog.scanDownloads()
+            }
+        }
         do {
-            let reply = try await runtime.start { [weak self] message in self?.status = message }
+            let reply = try await runtime.start { [weak self] message, progress in
+                guard let self, current == self.generation else { return }
+                self.status = message
+                self.progress = progress
+            }
+            guard current == generation else { return }
             setupMs = reply.setupMs
             modelName = reply.modelName
             cpuModel = reply.cpuModel
             architecture = reply.architecture
             ready = reply.ready == true
         } catch {
-            self.error = error.localizedDescription
+            if current == generation { self.error = error.localizedDescription }
+        }
+    }
+
+    func choose(_ choice: CatalogModel) async {
+        guard choice.isSupported, choice.id != model || !ready else { return }
+        await runtime.select(model: choice.id)
+        model = choice.id
+        result = nil
+        times = []
+        setupMs = nil
+        if !choice.acceptsImages { images = [] }
+        await load()
+    }
+
+    func add(_ urls: [URL]) {
+        images += urls.filter { url in
+            UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true && !images.contains(url)
         }
     }
 
@@ -61,8 +108,8 @@ import SwiftUI
         error = nil
         defer { busy = false }
         do {
-            let reply = try await runtime.decide(Request(state: state, type: type,
-                                                         instructions: question, criteria: criteria))
+            let reply = try await runtime.decide(Request(state: state, type: type, instructions: question,
+                                                         criteria: criteria, images: images.map(\.path)))
             result = reply
             if let elapsed = reply.elapsedMs { times.append(elapsed) }
         } catch {
@@ -90,6 +137,8 @@ func duration(_ milliseconds: Double?) -> String {
 
 struct ContentView: View {
     @State private var demo = Demo()
+    @State private var showingModels = false
+    @State private var importingImages = false
 
     var body: some View {
         ScrollView {
@@ -103,11 +152,23 @@ struct ContentView: View {
                     }
                     Spacer()
                     if demo.loading {
-                        ProgressView().controlSize(.small)
-                        Text(demo.status).foregroundStyle(.secondary)
+                        if let progress = demo.progress {
+                            ProgressView(value: progress).frame(width: 120)
+                            Text("\(demo.status) \(Int(progress * 100))%").foregroundStyle(.secondary).monospacedDigit()
+                        } else {
+                            ProgressView().controlSize(.small)
+                            Text(demo.status).foregroundStyle(.secondary)
+                        }
                     } else if demo.ready {
                         Label("Model ready", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                     }
+                    Button {
+                        showingModels = true
+                    } label: {
+                        Label(demo.current?.name ?? "Models", systemImage: "square.stack.3d.up")
+                    }
+                    .disabled(demo.busy)
+                    .help("Choose or download a model")
                 }
 
                 if !demo.ready {
@@ -123,7 +184,10 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Input text").font(.headline)
+                    if demo.current?.acceptsImages == true {
+                        imageInput
+                    }
+                    Text(demo.images.isEmpty ? "Input text" : "Input text · optional with images").font(.headline)
                     TextEditor(text: $demo.state)
                         .font(.body)
                         .scrollContentBackground(.hidden)
@@ -174,9 +238,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!demo.ready || demo.busy || demo.validation != nil
-                              || demo.state.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                              || demo.question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!demo.canRun)
                     if demo.busy { ProgressView().controlSize(.small) }
                     Spacer()
                     if let setup = demo.setupMs {
@@ -235,6 +297,66 @@ struct ContentView: View {
         .background(.background.secondary)
         .safeAreaInset(edge: .bottom, spacing: 0) { SystemFooter() }
         .task { await demo.load() }
+        .task { await demo.catalog.refresh() }
+        .sheet(isPresented: $showingModels) { ModelsView(demo: demo) }
+        .fileImporter(isPresented: $importingImages, allowedContentTypes: [.image], allowsMultipleSelection: true) {
+            if case .success(let urls) = $0 { demo.add(urls) }
+        }
+    }
+
+    private var imageInput: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Images").font(.headline)
+            ScrollView(.horizontal) {
+                HStack(spacing: 10) {
+                    ForEach(demo.images, id: \.self) { url in
+                        ZStack(alignment: .topTrailing) {
+                            Group {
+                                if let image = NSImage(contentsOf: url) {
+                                    Image(nsImage: image).resizable().scaledToFill()
+                                } else {
+                                    Image(systemName: "photo").foregroundStyle(.secondary)
+                                }
+                            }
+                            .frame(width: 72, height: 72)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .help(url.lastPathComponent)
+                            Button {
+                                demo.images.removeAll { $0 == url }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill").symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, .black.opacity(0.6))
+                            }
+                            .buttonStyle(.plain)
+                            .padding(4)
+                            .accessibilityLabel("Remove \(url.lastPathComponent)")
+                        }
+                    }
+                    Button {
+                        importingImages = true
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: "photo.badge.plus").font(.title3)
+                            Text("Add").font(.caption)
+                        }
+                        .frame(width: 72, height: 72)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Add images")
+                    .background(.background, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, style: StrokeStyle(dash: [4])))
+                }
+            }
+            .scrollIndicators(.never)
+            .dropDestination(for: URL.self) { urls, _ in
+                demo.add(urls)
+                return true
+            }
+            Text("Drop or add pictures. Large images are downscaled to one megapixel.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.bottom, 6)
     }
 
     private func probabilityRow(_ probability: Probability) -> some View {
@@ -250,6 +372,78 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Text(duration(value)).font(.title3.monospacedDigit())
+        }
+    }
+}
+
+struct ModelsView: View {
+    let demo: Demo
+    @Environment(\.dismiss) private var dismiss
+    @State private var removalError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Models").font(.title2.bold())
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(20)
+            Divider()
+            List(demo.catalog.models) { model in
+                row(model).padding(.vertical, 6)
+            }
+            Divider()
+            HStack {
+                Text(removalError ?? (demo.catalog.isRemote
+                     ? "Catalog from github.com/WeGoToMars/tinkerbox"
+                     : "Offline · showing the models included with this app"))
+                    .font(.caption).foregroundStyle(removalError == nil ? Color.secondary : .red)
+                Spacer()
+                Button("Refresh") { Task { await demo.catalog.refresh() } }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+        }
+        .frame(width: 600, height: 440)
+        .task { await demo.catalog.refresh() }
+    }
+
+    private func row(_ model: CatalogModel) -> some View {
+        let downloaded = demo.catalog.downloaded.contains(model.id)
+        let inputs = model.inputs.map { $0 == "image" ? "Images" : $0.capitalized }.joined(separator: " + ")
+        let details = [inputs, "\(model.context / 1024)K context",
+                       ByteCountFormatter.string(fromByteCount: model.downloadBytes, countStyle: .file), model.license]
+        return HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(model.name).font(.headline)
+                    Text(model.publisher).foregroundStyle(.secondary)
+                }
+                Text(model.summary)
+                Text(details.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if !model.isSupported {
+                Text("Requires Tinkerbox \(model.minVersion)").font(.caption).foregroundStyle(.secondary)
+            } else if model.id == demo.model {
+                Label(demo.ready ? "In use" : demo.loading ? "Loading…" : "Selected", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(demo.ready ? .green : .secondary)
+            } else {
+                if downloaded {
+                    Button(role: .destructive) {
+                        do { try demo.catalog.removeDownload(model) } catch { removalError = error.localizedDescription }
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove downloaded files")
+                }
+                Button(downloaded ? "Use" : "Download") {
+                    Task { await demo.choose(model) }
+                    dismiss()
+                }
+            }
         }
     }
 }
