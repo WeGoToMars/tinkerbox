@@ -1,4 +1,4 @@
-"""One loaded model, one JSON reply per decision."""
+"""One loaded model, one JSON reply per request."""
 
 import json
 import os
@@ -34,6 +34,19 @@ def question(request):
     return result
 
 
+def labeled(answer):
+    """The answer with its probabilities as an ordered list of labels and values."""
+    kind = answer["type"]
+    if kind == "noul":
+        probabilities = [("Yes", answer["noul"]), ("No", 1 - answer["noul"])]
+    else:
+        probabilities = [(f"{key} · {answer['legend'][key]}" if kind == "score" else key, value)
+                         for key, value in answer["probabilities"].items()]
+    answer = {key: value for key, value in answer.items() if key != "legend"}
+    answer["probabilities"] = [{"label": label, "value": value} for label, value in probabilities]
+    return answer
+
+
 def main():
     started = time.perf_counter()
     from PIL import Image, ImageOps
@@ -56,28 +69,27 @@ def main():
         send({"ready": True, "modelId": model_id, "modelName": f"{entry['publisher']} {entry['name']}",
               "cpuModel": cpu, "architecture": device_architecture(),
               "setupMs": (time.perf_counter() - started) * 1000})
+        # A request asks every question about every item: one input and several questions share a
+        # single tree pass, and one question over many inputs is packed into one batch.
         for line in sys.stdin:
             try:
                 request = json.loads(line)
-                kind = request["type"]
-                images = [ImageOps.exif_transpose(Image.open(path)) for path in request.get("images", [])]
-                if images and "image" not in entry["inputs"]:
-                    raise ValueError(f"{entry['name']} does not accept images.")
-                state = request["state"] if request["state"].strip() or not images else None
+                questions = {str(index): question(item) for index, item in enumerate(request["questions"])}
+                if not questions or not request["items"]:
+                    raise ValueError("Ask at least one question about at least one input.")
+                batch = []
+                for item in request["items"]:
+                    images = [ImageOps.exif_transpose(Image.open(path)) for path in item.get("images", [])]
+                    if images and "image" not in entry["inputs"]:
+                        raise ValueError(f"{entry['name']} does not accept images.")
+                    state = item["state"] if item["state"].strip() or not images else None
+                    batch.append((state, questions, images))
                 started = time.perf_counter()
-                result = model.system_one(state, {"decision": question(request)}, images=images)
+                results = model.system_one_batch(batch)
                 elapsed = (time.perf_counter() - started) * 1000
-                answer = result["answers"]["decision"]
-                if kind == "noul":
-                    probabilities = [("Yes", answer["noul"]), ("No", 1 - answer["noul"])]
-                else:
-                    probabilities = [
-                        (f"{key} · {answer['legend'][key]}" if kind == "score" else key, value)
-                        for key, value in answer["probabilities"].items()
-                    ]
-                send({"answer": answer,
-                      "probabilities": [{"label": label, "value": value} for label, value in probabilities],
-                      "tokens": result["usage"]["input_tokens"], "elapsedMs": elapsed})
+                send({"results": [{"answers": [labeled(result["answers"][name]) for name in questions],
+                                   "tokens": result["usage"]["input_tokens"]} for result in results],
+                      "elapsedMs": elapsed})
             except Exception as error:
                 send({"error": str(error)})
 

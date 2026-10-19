@@ -76,7 +76,7 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         async let choiceCall = choice.perform()
         async let scoreCall = score.perform()
         async let uiCall = Runtime.shared.decide(
-            Request(state: yes.text!, type: .noul, instructions: yes.question, criteria: [])
+            Request(items: [Item(state: yes.text!)], questions: [Question(type: .noul, instructions: yes.question)])
         )
         async let setupCall = Runtime.shared.start()
         let (yesReply, noReply, choiceReply, scoreReply, uiReply, setupReply) =
@@ -98,7 +98,9 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
                     "Missing input-token usage")
         try require([affirmative.inferenceTime, negative.inferenceTime, chosen.inferenceTime, scored.inferenceTime]
             .allSatisfy { $0.isFinite && $0 >= 0 }, "Missing inference timing")
-        try require(abs(uiReply.answer!.noul! - affirmative.yesProbability) < 0.01, "UI and Shortcut answers differ")
+        try require(abs(uiReply.results[0].answers[0].noul! - affirmative.yesProbability) < 0.01, "UI and Shortcut answers differ")
+        try require(String(localized: affirmative.displayRepresentation.title).hasPrefix("Yes ("),
+                    "The text form should state the answer and its probability")
 
         // Image-only decisions: Shortcuts file data reaches the vision tower and changes the answer.
         let blue = YesNoDecisionIntent()
@@ -112,6 +114,28 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         try require(blueAnswer.answer && blueAnswer.yesProbability > 0.9, "Expected a blue image")
         try require(!redAnswer.answer && redAnswer.yesProbability < 0.1, "Expected a non-blue image")
 
+        // Several questions over one input keep their order and answer independently.
+        let several = AskQuestionsIntent()
+        several.text = "Hi! I was charged twice, please refund me."
+        several.questions = ["Is this a greeting?", "Is this a refund request?", "Is this about the weather?"]
+        let tags = try await several.perform().value!
+        try require(tags.map(\.question) == several.questions, "Questions lost their order")
+        try require(tags.map(\.answer) == [true, true, false], "Expected greeting and refund tags only")
+
+        // List actions: one question over every item, dropping blank lines.
+        let messages = ["Hello there, friend!", "", "Your invoice is overdue.", "Good morning! Hope you are well."]
+        let filter = FilterListIntent()
+        filter.items = messages
+        filter.question = yes.question
+        try require(try await filter.perform().value! == [messages[0], messages[3]], "Expected only the greetings")
+        let sort = SortListIntent()
+        sort.items = ["Pay now or we will sue.", "", "Thanks so much, you are wonderful!"]
+        sort.question = score.question
+        sort.levels = score.levels
+        let ranked = try await sort.perform().value!
+        try require(ranked.map(\.item) == [sort.items[2], sort.items[0]], "Expected the friendliest message first")
+        try require(ranked[0].score > ranked[1].score && ranked[0].level == "Friendly", "Expected descending scores")
+
         let oversized = YesNoDecisionIntent()
         oversized.text = String(repeating: "hello ", count: 40_000)
         oversized.question = yes.question
@@ -124,6 +148,6 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         let repeated = try await yes.perform().value!
         try require(repeated.answer && abs(repeated.yesProbability - affirmative.yesProbability) < 0.01,
                     "A failed request affected the next decision")
-        print("PASS: typed answers, probabilities, usage, images, cold startup, concurrent UI/Shortcuts calls, validation, and error recovery")
+        print("PASS: typed answers, probabilities, usage, images, several questions, list filter and sort, cold startup, concurrent UI/Shortcuts calls, validation, and error recovery")
     }
 }

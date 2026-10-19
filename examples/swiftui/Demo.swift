@@ -17,7 +17,7 @@ import UniformTypeIdentifiers
     var progress: Double?
     var busy = false
     var error: String?
-    var result: Reply?
+    var result: Decisions?
     var setupMs: Double?
     var modelName: String?
     var cpuModel: String?
@@ -27,6 +27,7 @@ import UniformTypeIdentifiers
     private var generation = 0
 
     var current: CatalogModel? { catalog.models.first { $0.id == model } }
+    var answer: Answer? { result?.results.first?.answers.first }
 
     var canRun: Bool {
         ready && !busy && validation == nil
@@ -108,10 +109,12 @@ import UniformTypeIdentifiers
         error = nil
         defer { busy = false }
         do {
-            let reply = try await runtime.decide(Request(state: state, type: type, instructions: question,
-                                                         criteria: criteria, images: images.map(\.path)))
-            result = reply
-            if let elapsed = reply.elapsedMs { times.append(elapsed) }
+            let decisions = try await runtime.decide(Request(
+                items: [Item(state: state, images: images.map(\.path))],
+                questions: [Question(type: type, instructions: question, criteria: criteria)]
+            ))
+            result = decisions
+            times.append(decisions.elapsedMs)
         } catch {
             self.error = error.localizedDescription
             if await !runtime.isConnected { ready = false }
@@ -254,25 +257,25 @@ struct ContentView: View {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
-                            Text(demo.result?.answer?.type == .score ? "Expected score" : "Decision").font(.headline)
+                            Text(demo.answer?.type == .score ? "Expected score" : "Decision").font(.headline)
                             Spacer()
-                            if let score = demo.result?.answer?.score {
-                                Text(String(format: "%.2f / %d", score, (demo.result?.probabilities?.count ?? 1) - 1))
+                            if let answer = demo.answer, let score = answer.score {
+                                Text(String(format: "%.2f / %d", score, answer.probabilities.count - 1))
                                     .font(.title2.bold())
-                            } else if let choice = demo.result?.answer?.choice {
+                            } else if let choice = demo.answer?.choice {
                                 Text(choice).font(.title2.bold()).textSelection(.enabled)
-                            } else if let probability = demo.result?.answer?.noul {
+                            } else if let probability = demo.answer?.noul {
                                 Text(probability >= 0.5 ? "Yes" : "No").font(.title2.bold())
                             } else {
                                 Text("Ready for your first question").foregroundStyle(.secondary)
                             }
                         }
-                        if let probabilities = demo.result?.probabilities {
+                        if let probabilities = demo.answer?.probabilities {
                             ForEach(probabilities.indices, id: \.self) { index in
                                 probabilityRow(probabilities[index])
                             }
                         }
-                        if let tokens = demo.result?.tokens {
+                        if let tokens = demo.result?.results.first?.tokens {
                             Text("\(tokens) rendered input tokens").font(.caption).foregroundStyle(.secondary)
                         }
                     }

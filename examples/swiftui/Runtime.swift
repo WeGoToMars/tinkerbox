@@ -12,29 +12,46 @@ enum QuestionType: String, CaseIterable, Codable, Sendable {
     }
 }
 
-struct Request: Encodable, Sendable {
-    let state: String
+func isBlank(_ text: String) -> Bool {
+    text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+}
+
+struct Question: Encodable, Sendable {
     let type: QuestionType
     let instructions: String
-    let criteria: [String]
+    var criteria: [String] = []
+}
+
+struct Item: Encodable, Sendable {
+    let state: String
     var images: [String] = []  // file paths
+}
+
+// Every question is asked about every item. Several questions about one item share a single tree
+// pass; one question about many items is packed into one batch.
+struct Request: Encodable, Sendable {
+    let items: [Item]
+    let questions: [Question]
 
     func validate() throws {
-        func isBlank(_ text: String) -> Bool {
-            text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if items.isEmpty || questions.isEmpty {
+            throw DecisionError.invalid("Ask at least one question about at least one input.")
         }
-        if isBlank(state) && images.isEmpty {
+        if items.contains(where: { isBlank($0.state) && $0.images.isEmpty }) {
             throw DecisionError.invalid("Input text must not be empty unless you add an image.")
         }
-        if isBlank(instructions) { throw DecisionError.invalid("Question / instructions must not be empty.") }
-        if type == .choice && (criteria.count < 2 || Set(criteria).count != criteria.count) {
-            throw DecisionError.invalid("Add at least two unique options.")
-        }
-        if type == .score && !(2...10).contains(criteria.count) {
-            throw DecisionError.invalid("Add 2–10 levels, ordered from lowest to highest.")
-        }
-        if type != .noul && criteria.contains(where: isBlank) {
-            throw DecisionError.invalid("Options and levels must not be empty.")
+        for question in questions {
+            let (type, criteria) = (question.type, question.criteria)
+            if isBlank(question.instructions) { throw DecisionError.invalid("Questions must not be empty.") }
+            if type == .choice && (criteria.count < 2 || Set(criteria).count != criteria.count) {
+                throw DecisionError.invalid("Add at least two unique options.")
+            }
+            if type == .score && !(2...10).contains(criteria.count) {
+                throw DecisionError.invalid("Add 2–10 levels, ordered from lowest to highest.")
+            }
+            if type != .noul && criteria.contains(where: isBlank) {
+                throw DecisionError.invalid("Options and levels must not be empty.")
+            }
         }
     }
 }
@@ -57,11 +74,23 @@ struct Answer: Decodable, Sendable {
     let choice: String?
     let score: Double?
     let confidence: Double?
+    let probabilities: [Probability]  // in option order: Yes/No, the options, or the levels
 }
 
 struct Probability: Decodable, Sendable {
     let label: String
     let value: Double
+}
+
+// One item's answers, in the request's question order, and the tokens it read.
+struct ItemResult: Decodable, Sendable {
+    let answers: [Answer]
+    let tokens: Int
+}
+
+struct Decisions: Sendable {
+    let results: [ItemResult]  // in the request's item order
+    let elapsedMs: Double
 }
 
 struct Reply: Decodable, Sendable {
@@ -73,9 +102,7 @@ struct Reply: Decodable, Sendable {
     let modelName: String?
     let cpuModel: String?
     let architecture: String?
-    let answer: Answer?
-    let probabilities: [Probability]?
-    let tokens: Int?
+    let results: [ItemResult]?
     let elapsedMs: Double?
     let error: String?
 }
@@ -200,7 +227,7 @@ actor Runtime {
         }
     }
 
-    func decide(_ request: Request) async throws -> Reply {
+    func decide(_ request: Request) async throws -> Decisions {
         try request.validate()
         await acquire()
         defer { release() }
@@ -212,7 +239,12 @@ actor Runtime {
             disconnect()
             throw Self.stopped()
         }
-        return try await readReply()
+        let reply = try await readReply()
+        guard let results = reply.results, let elapsed = reply.elapsedMs, results.count == request.items.count,
+              results.allSatisfy({ $0.answers.count == request.questions.count }) else {
+            throw DecisionError.invalidReply
+        }
+        return Decisions(results: results, elapsedMs: elapsed)
     }
 
     private func readReply() async throws -> Reply {
