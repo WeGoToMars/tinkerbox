@@ -78,7 +78,7 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         async let uiCall = Runtime.shared.decide(
             Request(items: [Item(state: yes.text!)], questions: [Question(type: .noul, instructions: yes.question)])
         )
-        async let setupCall = Runtime.shared.start()
+        async let setupCall = Runtime.shared.start(model: Runtime.selectedModel(for: .decision))
         let (yesReply, noReply, choiceReply, scoreReply, uiReply, setupReply) =
             try await (yesCall, noCall, choiceCall, scoreCall, uiCall, setupCall)
         let affirmative = yesReply.value!

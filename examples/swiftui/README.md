@@ -48,17 +48,25 @@ TINKERBOX_ASSET="$PWD/artifacts/d1_fp16_fused128_ctx32768" uv run --no-project -
 - `choice`: Selection across two or more discrete options.
 - `score`: Ranked evaluation across 2–10 ordered levels.
 
+Each question is a card with its own type, instructions and options; **Add question** asks several about the same input, and each answer appears in its card. With more than one question, models that support decision trees offer two modes: **Parallel** answers every question in one shared pass over the input, while **Sequential** gives each question its own pass and shows its time as it finishes. Other models always run sequentially.
+
 ## Models
 
-The model button in the window header opens the catalog. The app fetches [`models.json`](../../src/tinkerbox_ane/models.json) from the repository's `main` branch and falls back to the copy bundled with the app when offline. **Download** fetches a model with byte progress and switches to it; **Use** switches to a model already on disk, and the trash button removes one. Entries newer than the installed app are listed with the version they require. The choice persists across launches and also applies to Shortcuts; switching cancels a download in progress.
+The sidebar lists a page per task, and **Models** lists the catalog grouped by task. The app fetches [`models.json`](../../src/tinkerbox_ane/models.json) from the repository's `main` branch and falls back to the copy bundled with the app when offline. **Download** fetches a model with byte progress in its row and switches to it; **Use** switches to a model already on disk, and the trash button removes one. The arrow menu opens a model's Hugging Face pages: the **base model** it was fine-tuned from, the **original model** that was converted, and the **converted model** with its Core AI bundles. The model menu in a task page's toolbar switches between that task's downloaded models. Entries newer than the installed app, or of tasks it does not run, are listed with the version they require. Each task remembers its own model across launches, which Shortcuts also use; one model is loaded at a time, and switching cancels a download in progress.
+
+The sidebar button at the right of a task page's toolbar opens **Model Settings**: values the loaded model lets you change, such as d1's **Image tiles**, with its fixed properties below. Values are kept per model, also apply to Shortcuts, and **Reset to Defaults** clears them. The model's Python package declares them, so they match the installed version.
 
 Downloaded bundles live in `~/Library/Caches/tinkerbox-ane/models/<model>/`.
 
 ## Images
 
-When the selected model accepts images, an **Images** strip appears above the input text. Drop pictures onto it or click **Add**; text becomes optional while an image is attached. Photos are rotated by their EXIF orientation and downscaled to one megapixel.
+When the selected model accepts images, an **Images** strip appears above the input text. Drop pictures onto it, paste them, or click **Add**; text becomes optional while an image is attached. Photos are rotated by their EXIF orientation, and large ones are split into tiles up to the model's **Image tiles** setting. Each picture shows its tile grid and, below it, the grid size and how much of its resolution the model keeps. Click a picture to see what the model sees: the picture resized to fill its tiles, at their real pixel size when they fit, and the overview it gets of the whole picture, with the sizes, any stretching, vision passes and tokens.
 
-Displayed decision latencies measure synchronous inference time (prompt formatting, tokenization, embeddings, and ANE execution). They exclude one-time model initialization and UI IPC overhead, but the session median and p95 include first-use warm-up of each context tier.
+Pasting with ⌘V anywhere on the Decide page adds copied pictures or image files to the strip and copied text to the input text; a focused text field pastes text as usual.
+
+Next to **Run**, the app shows how many tokens and image tiles the next run will read, counted by the model's own tokenizer and image processor as you edit; a prompt over the context limit is reported there before running.
+
+Displayed run latencies measure synchronous inference time (prompt formatting, tokenization, embeddings, and ANE execution). They exclude one-time model initialization and UI IPC overhead, but the session median and p95 include first-use warm-up of each context tier. A run covers every question, so a sequential run adds up its passes. Throughput divides the last run's rendered input tokens by its latency; a shared pass reads the input once. Switching modes, question count or a model setting resets the median and p95.
 
 ## Shortcuts
 

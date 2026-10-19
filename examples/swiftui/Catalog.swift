@@ -1,19 +1,50 @@
 import Foundation
 
+// What a model does. Each task has its own page in the app and its own selected model.
+enum ModelTask: String, CaseIterable, Sendable {
+    case decision
+
+    var title: String {
+        switch self {
+        case .decision: "Decision (System One)"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .decision: "arrow.triangle.branch"
+        }
+    }
+
+    // Its section in the Models library.
+    var heading: String {
+        switch self {
+        case .decision: "Decision"
+        }
+    }
+}
+
 // One entry of tinkerbox_ane/models.json.
 struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     let id: String
     let name: String
     let publisher: String
     let summary: String
+    let task: String  // a ModelTask; the remote catalog may list tasks newer than this app
+    // Hugging Face repositories: the foundation it was fine-tuned from, the model that was
+    // converted, and the converted Core AI bundles.
+    let baseModel: String?
+    let originalModel: String?
+    let repo: String
     let inputs: [String]
     let context: Int
     let downloadBytes: Int64
     let license: String
     let minVersion: String
 
+    var kind: ModelTask? { ModelTask(rawValue: task) }
     var acceptsImages: Bool { inputs.contains("image") }
-    var isSupported: Bool { !Catalog.isNewer(minVersion, than: Catalog.appVersion) }
+    var isSupported: Bool { kind != nil && !Catalog.isNewer(minVersion, than: Catalog.appVersion) }
 }
 
 @MainActor @Observable final class Catalog {

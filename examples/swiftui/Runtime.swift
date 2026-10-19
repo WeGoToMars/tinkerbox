@@ -16,13 +16,13 @@ func isBlank(_ text: String) -> Bool {
     text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 }
 
-struct Question: Encodable, Sendable {
+struct Question: Encodable, Hashable, Sendable {
     let type: QuestionType
     let instructions: String
     var criteria: [String] = []
 }
 
-struct Item: Encodable, Sendable {
+struct Item: Encodable, Hashable, Sendable {
     let state: String
     var images: [String] = []  // file paths
 }
@@ -32,6 +32,8 @@ struct Item: Encodable, Sendable {
 struct Request: Encodable, Sendable {
     let items: [Item]
     let questions: [Question]
+    var settings: [String: Int] = [:]  // filled in by Runtime from the model's saved values
+    var count = false  // report tokens and image tiles instead of answering
 
     func validate() throws {
         if items.isEmpty || questions.isEmpty {
@@ -93,6 +95,51 @@ struct Decisions: Sendable {
     let elapsedMs: Double
 }
 
+// What one item of a request reads: input tokens and image tiles, each tile one vision pass.
+struct TokenCount: Decodable, Equatable, Sendable {
+    var tokens = 0
+    var tiles = 0
+    var images: [ImageLayout] = []  // in the item's image order
+
+    // Several passes over the same item: they add up, and its pictures are laid out alike in each.
+    static func + (a: Self, b: Self) -> Self {
+        Self(tokens: a.tokens + b.tokens, tiles: a.tiles + b.tiles, images: a.images.isEmpty ? b.images : a.images)
+    }
+}
+
+// How one picture reaches the model, as its image processor reports it. Sizes are width, height.
+struct ImageLayout: Decodable, Equatable, Sendable {
+    let source: [Int]  // upright, as given
+    let cols: Int
+    let rows: Int
+    let size: [Int]  // resized to fill its tiles, or its single view
+    let overview: [Int]?  // the whole picture at a single view's size, for split pictures
+    let passes: Int
+    let tokens: Int
+}
+
+// A value the model lets the user change, declared by its Python package.
+struct ModelSetting: Decodable, Identifiable, Sendable {
+    let key: String
+    let title: String
+    let help: String
+    let min: Int
+    let max: Int
+    let defaultValue: Int
+
+    var id: String { key }
+
+    enum CodingKeys: String, CodingKey {
+        case key, title, help, min, max, defaultValue = "default"
+    }
+}
+
+// A fixed property of the model, shown beside its settings.
+struct ModelInfo: Decodable, Sendable {
+    let label: String
+    let value: String
+}
+
 struct Reply: Decodable, Sendable {
     let status: String?
     let progress: Double?
@@ -102,7 +149,11 @@ struct Reply: Decodable, Sendable {
     let modelName: String?
     let cpuModel: String?
     let architecture: String?
+    let questionTrees: Bool?  // several questions can share one pass
+    let settings: [ModelSetting]?
+    let info: [ModelInfo]?
     let results: [ItemResult]?
+    let counts: [TokenCount]?  // in the request's item order
     let elapsedMs: Double?
     let error: String?
 }
@@ -112,7 +163,6 @@ actor Runtime {
     @MainActor static var setupProcess: Process?
     static let logURL = FileManager.default.homeDirectoryForCurrentUser
         .appending(path: "Library/Logs/tinkerbox-ane/demo.log")
-    private static let modelKey = "model"
     private var process: Process?
     private var input: Pipe?
     private var output: Pipe?
@@ -128,19 +178,27 @@ actor Runtime {
 
     var isConnected: Bool { readyReply != nil && process?.isRunning == true && replies != nil }
 
-    // The UI and Shortcuts both use the model chosen in the app.
-    nonisolated static var selectedModel: String {
-        let runnable = Catalog.bundled.filter(\.isSupported).map(\.id)
-        let stored = UserDefaults.standard.string(forKey: modelKey)
+    // Each task remembers its own model; the UI and Shortcuts both use the one chosen in the app.
+    nonisolated static func selectedModel(for task: ModelTask) -> String {
+        let runnable = Catalog.bundled.filter { $0.isSupported && $0.kind == task }.map(\.id)
+        let stored = UserDefaults.standard.string(forKey: "model.\(task.rawValue)")
         return stored.flatMap { runnable.contains($0) ? $0 : nil } ?? runnable.first ?? ""
     }
 
-    // Takes effect on the next start or decision. Stopping the worker also cancels a download or
+    // Values changed in the app, per model; the UI and Shortcuts send them with every request.
+    nonisolated static func settings(for model: String) -> [String: Int] {
+        UserDefaults.standard.dictionary(forKey: "settings.\(model)") as? [String: Int] ?? [:]
+    }
+
+    nonisolated static func store(settings: [String: Int], for model: String) {
+        UserDefaults.standard.set(settings, forKey: "settings.\(model)")
+    }
+
+    // Takes effect on the next start or request. Stopping the worker also cancels a download or
     // load in progress; the queued caller then fails and the next one launches the new model.
-    func select(model: String) {
-        guard model != Self.selectedModel || readyReply?.modelId != model else { return }
-        UserDefaults.standard.set(model, forKey: Self.modelKey)
-        disconnect()
+    func select(model: String, for task: ModelTask) {
+        UserDefaults.standard.set(model, forKey: "model.\(task.rawValue)")
+        if readyReply?.modelId != model { disconnect() }
     }
 
     // Actors are reentrant at awaits. Hold the queue across startup AND a full
@@ -157,18 +215,19 @@ actor Runtime {
         if waiters.isEmpty { busy = false } else { waiters.removeFirst().resume() }
     }
 
-    func start(status: @MainActor @Sendable (String, Double?) -> Void = { _, _ in }) async throws -> Reply {
+    func start(model: String, status: @MainActor @Sendable (String, Double?) -> Void = { _, _ in }) async throws -> Reply {
         await acquire()
         defer { release() }
         try Task.checkCancellation()
-        return try await prepare(status: status)
+        return try await prepare(model: model, status: status)
     }
 
-    private func prepare(status: @MainActor @Sendable (String, Double?) -> Void) async throws -> Reply {
-        if let readyReply, process?.isRunning == true, replies != nil { return readyReply }
+    // One model is loaded at a time; a request for another one replaces it.
+    private func prepare(model: String, status: @MainActor @Sendable (String, Double?) -> Void) async throws -> Reply {
+        if let readyReply, readyReply.modelId == model, process?.isRunning == true, replies != nil { return readyReply }
         readyReply = nil
         do {
-            return try await launch(status: status)
+            return try await launch(model: model, status: status)
         } catch {
             disconnect()
             await MainActor.run { Runtime.setupProcess = nil }
@@ -176,7 +235,7 @@ actor Runtime {
         }
     }
 
-    private func launch(status: @MainActor @Sendable (String, Double?) -> Void) async throws -> Reply {
+    private func launch(model: String, status: @MainActor @Sendable (String, Double?) -> Void) async throws -> Reply {
         if let process, process.isRunning { process.terminate() }
         input?.fileHandleForWriting.closeFile()
         output?.fileHandleForReading.closeFile()
@@ -197,7 +256,7 @@ actor Runtime {
         for name in ["PYTHONPATH", "PYTHONHOME", "UV_INTERNAL__PARENT_INTERPRETER"] {
             environment.removeValue(forKey: name)
         }
-        environment["TINKERBOX_MODEL"] = Self.selectedModel
+        environment["TINKERBOX_MODEL"] = model
         process.environment = environment
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         try FileManager.default.createDirectory(at: Self.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -228,23 +287,40 @@ actor Runtime {
     }
 
     func decide(_ request: Request) async throws -> Decisions {
+        let reply = try await exchange(request)
+        guard let results = reply.results, let elapsed = reply.elapsedMs, results.count == request.items.count,
+              results.allSatisfy({ $0.answers.count == request.questions.count }) else {
+            throw DecisionError.invalidReply
+        }
+        return Decisions(results: results, elapsedMs: elapsed)
+    }
+
+    // What each item would read, from the same prompt and settings as a run, without running the model.
+    func count(_ request: Request) async throws -> [TokenCount] {
+        var request = request
+        request.count = true
+        let reply = try await exchange(request)
+        guard let counts = reply.counts, counts.count == request.items.count else { throw DecisionError.invalidReply }
+        return counts
+    }
+
+    // Sends one request to the decision model, with its saved settings, and reads its reply.
+    private func exchange(_ request: Request) async throws -> Reply {
         try request.validate()
         await acquire()
         defer { release() }
         try Task.checkCancellation()
-        _ = try await prepare(status: { _, _ in })
+        let model = Self.selectedModel(for: .decision)
+        _ = try await prepare(model: model, status: { _, _ in })
+        var request = request
+        request.settings = Self.settings(for: model)
         var data = try JSONEncoder().encode(request)
         data.append(10)
         do { try input!.fileHandleForWriting.write(contentsOf: data) } catch {
             disconnect()
             throw Self.stopped()
         }
-        let reply = try await readReply()
-        guard let results = reply.results, let elapsed = reply.elapsedMs, results.count == request.items.count,
-              results.allSatisfy({ $0.answers.count == request.questions.count }) else {
-            throw DecisionError.invalidReply
-        }
-        return Decisions(results: results, elapsedMs: elapsed)
+        return try await readReply()
     }
 
     private func readReply() async throws -> Reply {

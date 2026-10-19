@@ -1,5 +1,6 @@
 """One loaded model, one JSON reply per request."""
 
+import importlib
 import json
 import os
 from pathlib import Path
@@ -56,6 +57,7 @@ def main():
 
     model_id = os.environ.get("TINKERBOX_MODEL") or models.CATALOG[0]["id"]
     entry = models.entry(model_id)
+    package = importlib.import_module(entry["module"])
     local = os.environ.get("TINKERBOX_ASSET")
     if local:
         asset = Path(local)
@@ -68,6 +70,8 @@ def main():
     with models.load(model_id, asset) as model:
         send({"ready": True, "modelId": model_id, "modelName": f"{entry['publisher']} {entry['name']}",
               "cpuModel": cpu, "architecture": device_architecture(),
+              "questionTrees": entry.get("question_trees", False),
+              "settings": package.SETTINGS, "info": package.INFO,
               "setupMs": (time.perf_counter() - started) * 1000})
         # A request asks every question about every item: one input and several questions share a
         # single tree pass, and one question over many inputs is packed into one batch.
@@ -75,6 +79,9 @@ def main():
             try:
                 request = json.loads(line)
                 questions = {str(index): question(item) for index, item in enumerate(request["questions"])}
+                # Every request carries its settings; missing ones fall back to their defaults.
+                for setting in package.SETTINGS:
+                    setattr(model, setting["key"], request.get("settings", {}).get(setting["key"], setting["default"]))
                 if not questions or not request["items"]:
                     raise ValueError("Ask at least one question about at least one input.")
                 batch = []
@@ -84,6 +91,12 @@ def main():
                         raise ValueError(f"{entry['name']} does not accept images.")
                     state = item["state"] if item["state"].strip() or not images else None
                     batch.append((state, questions, images))
+                if request.get("count"):
+                    # What a run would read, without running the model.
+                    counts = [model.count_tokens(*item) for item in batch]
+                    send({"counts": [{"tokens": count["input_tokens"], "tiles": count["image_tiles"],
+                                      "images": count["images"]} for count in counts]})
+                    continue
                 started = time.perf_counter()
                 results = model.system_one_batch(batch)
                 elapsed = (time.perf_counter() - started) * 1000
