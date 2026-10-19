@@ -1,6 +1,7 @@
-"""Prepare a release locally: preflight checks, tests, wheel, app, and an annotated tag.
+"""Prepare a release locally: preflight checks, tests on the Neural Engine, and an annotated tag.
 
-Nothing is pushed or uploaded; the script prints the publishing commands to run after review.
+Pushing the tag starts the Release workflow, which builds the wheel and the signed app, drafts the
+GitHub release, and publishes to PyPI. `--verify TAG` runs only the preflight checks, as CI does.
 """
 
 from __future__ import annotations
@@ -33,24 +34,8 @@ def released(version: str, minimum: str) -> bool:
     return tuple(map(int, minimum.split("."))) <= tuple(map(int, version.split(".")))
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--skip-tests", action="store_true")
-    parser.add_argument("--no-app", action="store_true", help="Skip the SwiftUI app ZIP")
-    parser.add_argument("--sign", metavar="IDENTITY", help="code signing identity for the app (required unless --no-app)")
-    args = parser.parse_args(argv)
-
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
-    tag = f"v{version}"
-    branch = output("git", "branch", "--show-current")
-    print(f"=== Preparing {tag} from {branch} ===")
-
-    if not args.no_app and not args.sign:
-        fail("pass --sign IDENTITY; Shortcuts cannot run actions from an ad-hoc signed app")
-    if output("git", "status", "--porcelain"):
-        fail("commit or stash changes before releasing")
-    if output("git", "tag", "--list", tag):
-        fail(f"tag {tag} already exists")
+def check_catalog(version: str) -> None:
+    """Every catalog model this version ships must have its bundles tagged on Hugging Face."""
     from huggingface_hub import HfApi
 
     catalog = json.loads((ROOT / "src/tinkerbox_ane/models.json").read_text())["models"]
@@ -62,28 +47,39 @@ def main(argv: list[str] | None = None) -> int:
             fail(f"{model['repo']} has no tag {model['revision']} for {model['id']}; publish its bundles first")
         print(f"✓ {model['id']}: {model['repo']}@{model['revision']}")
 
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--skip-tests", action="store_true")
+    parser.add_argument("--verify", metavar="TAG", help="only check that TAG matches the version and the catalog")
+    args = parser.parse_args(argv)
+
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    tag = f"v{version}"
+    if args.verify:
+        if args.verify != tag:
+            fail(f"tag {args.verify} does not match version {version}")
+        check_catalog(version)
+        return 0
+
+    branch = output("git", "branch", "--show-current")
+    print(f"=== Preparing {tag} from {branch} ===")
+    if output("git", "status", "--porcelain"):
+        fail("commit or stash changes before releasing")
+    if output("git", "tag", "--list", tag):
+        fail(f"tag {tag} already exists")
+    check_catalog(version)
     if not args.skip_tests:
         run("uv", "run", "pytest", "-q")
-    run("uv", "build", "--clear")
-    assets = list((ROOT / "dist").glob(f"tinkerbox_ane-{version}-*.whl"))
-    if len(assets) != 1:
-        fail(f"expected one {version} wheel in dist/")
-    if not args.no_app:
-        run("uv", "run", "--no-project", "--python", "3.12", "python", "examples/swiftui/run.py", "--build-only",
-            "--sign", args.sign)
-        assets.append(ROOT / f"artifacts/swiftui/Tinkerbox-ANE-{version}-macos-arm64.zip")
     run("git", "tag", "-a", tag, "-m", f"Release {tag}")
 
-    paths = " ".join(str(path.relative_to(ROOT)) for path in assets)
     print(f"""
-Prepared {tag}. After review, publish with:
+Prepared {tag}. After review, push it; the Release workflow builds the wheel and the signed app,
+publishes to PyPI through trusted publishing, and drafts the GitHub release:
 
   git push origin {branch} {tag}
-  uv publish {assets[0].relative_to(ROOT)}
-  gh release create {tag} {paths} --verify-tag --title {tag} --generate-notes
 """)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

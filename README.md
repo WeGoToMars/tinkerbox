@@ -74,7 +74,7 @@ uv sync --locked
 uv build
 ```
 
-The wheel in `dist/` bundles the native host and links against macOS system frameworks. Source and editable installs compile the host during installation. Compilation verifies source identity, function manifests, and full ANE placement.
+The wheel in `dist/` bundles the native `tinkerbox-ane-host` executable and links against macOS system frameworks. Source and editable installs compile the host during installation. Compilation verifies source identity, function manifests, and full ANE placement.
 
 Each model's notes describe its export, compile, and publishing commands. Reusable Core AI compilation and Hugging Face publishing utilities are provided in `tinkerbox_ane.coreai` and `tinkerbox_ane.publish`; see the [model publishing guide](docs/model-publishing.md). To use a compiled bundle locally before publishing:
 
