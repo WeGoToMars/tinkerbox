@@ -7,7 +7,7 @@ Requires macOS 27 on Apple Silicon.
 ## Prebuilt App
 
 1. Download and extract the latest `Tinkerbox-ANE-*-macos-arm64.zip` from the GitHub releases page.
-2. Launch **Tinkerbox.app**. The app is ad-hoc signed, so macOS blocks the first launch: allow it under **System Settings → Privacy & Security → Open Anyway**, or run `xattr -dr com.apple.quarantine Tinkerbox.app`.
+2. Move **Tinkerbox.app** to `/Applications` and launch it. The app is not notarized, so macOS blocks the first launch: allow it under **System Settings → Privacy & Security → Open Anyway**, or run `xattr -dr com.apple.quarantine Tinkerbox.app`.
 
 The app bundles a standalone `uv` binary. On first run, it configures an isolated Python 3.12 environment, installs the precompiled `tinkerbox-ane` wheel, and fetches the selected model's weights from Hugging Face. Subsequent launches reuse the cached environment.
 
@@ -22,6 +22,12 @@ uv run --no-project --python 3.12 python examples/swiftui/run.py --build-only
 ```
 
 This generates `artifacts/swiftui/Tinkerbox.app` and a distributable ZIP archive. Omit `--build-only` to launch the application immediately after building.
+
+The app is ad-hoc signed by default, which is enough for the UI, but Shortcuts refuses to run actions from an app without a team identity. Pass a signing identity from `security find-identity -v -p codesigning` to use the actions:
+
+```sh
+uv run --no-project --python 3.12 python examples/swiftui/run.py --sign "Apple Development: you@example.com"
+```
 
 Until the matching `tinkerbox-ane` version is on PyPI, bundle a locally built wheel; the app then installs it from inside the bundle:
 
@@ -78,7 +84,7 @@ For classification, feed a **List** such as `Refund request`, `Technical support
 
 Actions run in the background, reuse the UI's loaded model, and queue overlapping calls. Closing the window keeps the app available for automations; use **Quit Tinkerbox** to exit. A cold action can initialize the runtime, but completing first-run downloads in the app avoids Shortcuts' execution time limits. Setup requires network access; inference runs locally. Blank inputs, invalid options/levels, and model context-limit errors are reported to Shortcuts.
 
-The source build runs Xcode's App Intents metadata extractor before signing. Keep `Contents/Resources/Metadata.appintents` in the app bundle so the actions remain discoverable.
+The source build runs Xcode's App Intents metadata extractor before signing. Keep `Contents/Resources/Metadata.appintents` in the app bundle so the actions remain discoverable. Every Tinkerbox build shares one bundle identifier, so keep a single copy installed: Shortcuts may resolve the actions to an older copy (1.x has none) or to an ad-hoc signed build, which fails with "Shortcuts couldn't communicate with the app".
 
 To exercise all three actions against real inference, including concurrent calls with the UI runtime and recovery after errors:
 

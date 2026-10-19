@@ -37,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-tests", action="store_true")
     parser.add_argument("--no-app", action="store_true", help="Skip the SwiftUI app ZIP")
+    parser.add_argument("--sign", metavar="IDENTITY", help="code signing identity for the app (required unless --no-app)")
     args = parser.parse_args(argv)
 
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
@@ -44,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     branch = output("git", "branch", "--show-current")
     print(f"=== Preparing {tag} from {branch} ===")
 
+    if not args.no_app and not args.sign:
+        fail("pass --sign IDENTITY; Shortcuts cannot run actions from an ad-hoc signed app")
     if output("git", "status", "--porcelain"):
         fail("commit or stash changes before releasing")
     if output("git", "tag", "--list", tag):
@@ -66,7 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     if len(assets) != 1:
         fail(f"expected one {version} wheel in dist/")
     if not args.no_app:
-        run("uv", "run", "--no-project", "--python", "3.12", "python", "examples/swiftui/run.py", "--build-only")
+        run("uv", "run", "--no-project", "--python", "3.12", "python", "examples/swiftui/run.py", "--build-only",
+            "--sign", args.sign)
         assets.append(ROOT / f"artifacts/swiftui/Tinkerbox-ANE-{version}-macos-arm64.zip")
     run("git", "tag", "-a", tag, "-m", f"Release {tag}")
 

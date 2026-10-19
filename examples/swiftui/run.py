@@ -17,6 +17,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--build-only", action="store_true")
 parser.add_argument("--wheel", type=Path,
                     help="bundle this tinkerbox-ane wheel instead of installing the release from PyPI")
+parser.add_argument("--sign", default="-", metavar="IDENTITY",
+                    help="code signing identity; Shortcuts rejects ad-hoc signed apps (default: ad-hoc)")
 args = parser.parse_args()
 
 source = Path(__file__).resolve().parent
@@ -113,7 +115,7 @@ with tempfile.TemporaryDirectory(prefix=".app-", dir=out) as temporary:
     info.update(plistlib.loads(icon_plist.read_bytes()))
     (contents / "Info.plist").write_bytes(plistlib.dumps(info))
     for target in (uv, built):
-        subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(target)], check=True)
+        subprocess.run(["/usr/bin/codesign", "--force", "--sign", args.sign, str(target)], check=True)
     if app.exists():
         shutil.rmtree(app)
     built.rename(app)

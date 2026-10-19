@@ -140,10 +140,10 @@ When publishing new bundles, update the model's `revision` in `src/tinkerbox_ane
 ### Releasing the Package
 
 ```sh
-uv run python scripts/release.py
+uv run python scripts/release.py --sign "Apple Development: you@example.com"
 ```
 
-From a clean tree, the script checks that every catalog model shipped by this version has its Hugging Face tag, runs the tests, builds the wheel and app ZIP, and creates a local annotated tag. It pushes and uploads nothing; it prints the `git push`, `uv publish`, and `gh release create` commands to run after review.
+From a clean tree, the script checks that every catalog model shipped by this version has its Hugging Face tag, runs the tests, builds the wheel and the signed app ZIP, and creates a local annotated tag. It pushes and uploads nothing; it prints the `git push`, `uv publish`, and `gh release create` commands to run after review.
 
 ## Validation
 
