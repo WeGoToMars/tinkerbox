@@ -1,7 +1,7 @@
 """Model catalog shared by the Python API and the app.
 
 `models.json` lists every model this package can run. The app fetches the same file from the
-repository to offer models; entries whose `min_version` is newer than the app are shown but disabled.
+repository to show models it does not ship yet, disabled; its bundled entries always describe what it runs.
 """
 
 from __future__ import annotations

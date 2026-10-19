@@ -937,9 +937,10 @@ struct ModelsView: View {
 
     private func row(_ model: CatalogModel) -> some View {
         let downloaded = demo.catalog.downloaded.contains(model.id)
-        let inputs = model.inputs.map { $0 == "image" ? "Images" : $0.capitalized }.joined(separator: " + ")
-        let details = [inputs, "\(model.context / 1024)K context",
-                       ByteCountFormatter.string(fromByteCount: model.downloadBytes, countStyle: .file), model.license]
+        let inputs = model.inputs?.map { $0 == "image" ? "Images" : $0.capitalized }.joined(separator: " + ")
+        let details = [inputs, model.context.map { "\($0 / 1024)K context" },
+                       model.downloadBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) },
+                       model.license].compactMap { $0 }
         return HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
@@ -968,7 +969,9 @@ struct ModelsView: View {
             .fixedSize()
             .help("Open on Hugging Face")
             if !model.isSupported {
-                Text("Requires Tinkerbox \(model.minVersion)").font(.caption).foregroundStyle(.secondary)
+                Text(Catalog.isNewer(model.minVersion, than: Catalog.appVersion)
+                     ? "Requires Tinkerbox \(model.minVersion)" : "Requires a newer Tinkerbox")
+                    .font(.caption).foregroundStyle(.secondary)
             } else if model.id == demo.model && demo.loading {
                 VStack(alignment: .trailing, spacing: 4) {
                     Text(demo.status).font(.caption).foregroundStyle(.secondary)

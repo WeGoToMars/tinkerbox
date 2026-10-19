@@ -48,15 +48,48 @@ def labeled(answer):
     return answer
 
 
-def main():
-    started = time.perf_counter()
+def decide(model, entry, request):
+    """Every question about every item: one input and several questions share a single tree pass,
+    and one question over many inputs is packed into one batch."""
     from PIL import Image, ImageOps
 
+    questions = {str(index): question(item) for index, item in enumerate(request["questions"])}
+    if not questions or not request["items"]:
+        raise ValueError("Ask at least one question about at least one input.")
+    batch = []
+    for item in request["items"]:
+        images = [ImageOps.exif_transpose(Image.open(path)) for path in item.get("images", [])]
+        if images and "image" not in entry["inputs"]:
+            raise ValueError(f"{entry['name']} does not accept images.")
+        state = item["state"] if item["state"].strip() or not images else None
+        batch.append((state, questions, images))
+    if request.get("count"):
+        # What a run would read, without running the model.
+        counts = [model.count_tokens(*item) for item in batch]
+        return {"counts": [{"tokens": count["input_tokens"], "tiles": count["image_tiles"],
+                            "images": count["images"]} for count in counts]}
+    started = time.perf_counter()
+    results = model.system_one_batch(batch)
+    elapsed = (time.perf_counter() - started) * 1000
+    return {"results": [{"answers": [labeled(result["answers"][name]) for name in questions],
+                         "tokens": result["usage"]["input_tokens"]} for result in results],
+            "elapsedMs": elapsed}
+
+
+# One request handler per catalog task; a new task adds its own instead of branching inside another.
+HANDLERS = {"decision": decide}
+
+
+def main():
+    started = time.perf_counter()
     from tinkerbox_ane import models
     from tinkerbox_ane.host import device_architecture
 
     model_id = os.environ.get("TINKERBOX_MODEL") or models.CATALOG[0]["id"]
     entry = models.entry(model_id)
+    if entry["task"] not in HANDLERS:
+        raise ValueError(f"This app cannot run {entry['task']} models.")
+    handle = HANDLERS[entry["task"]]
     package = importlib.import_module(entry["module"])
     local = os.environ.get("TINKERBOX_ASSET")
     if local:
@@ -73,36 +106,13 @@ def main():
               "questionTrees": entry.get("question_trees", False),
               "settings": package.SETTINGS, "info": package.INFO,
               "setupMs": (time.perf_counter() - started) * 1000})
-        # A request asks every question about every item: one input and several questions share a
-        # single tree pass, and one question over many inputs is packed into one batch.
         for line in sys.stdin:
             try:
                 request = json.loads(line)
-                questions = {str(index): question(item) for index, item in enumerate(request["questions"])}
                 # Every request carries its settings; missing ones fall back to their defaults.
                 for setting in package.SETTINGS:
                     setattr(model, setting["key"], request.get("settings", {}).get(setting["key"], setting["default"]))
-                if not questions or not request["items"]:
-                    raise ValueError("Ask at least one question about at least one input.")
-                batch = []
-                for item in request["items"]:
-                    images = [ImageOps.exif_transpose(Image.open(path)) for path in item.get("images", [])]
-                    if images and "image" not in entry["inputs"]:
-                        raise ValueError(f"{entry['name']} does not accept images.")
-                    state = item["state"] if item["state"].strip() or not images else None
-                    batch.append((state, questions, images))
-                if request.get("count"):
-                    # What a run would read, without running the model.
-                    counts = [model.count_tokens(*item) for item in batch]
-                    send({"counts": [{"tokens": count["input_tokens"], "tiles": count["image_tiles"],
-                                      "images": count["images"]} for count in counts]})
-                    continue
-                started = time.perf_counter()
-                results = model.system_one_batch(batch)
-                elapsed = (time.perf_counter() - started) * 1000
-                send({"results": [{"answers": [labeled(result["answers"][name]) for name in questions],
-                                   "tokens": result["usage"]["input_tokens"]} for result in results],
-                      "elapsedMs": elapsed})
+                send(handle(model, entry, request))
             except Exception as error:
                 send({"error": str(error)})
 

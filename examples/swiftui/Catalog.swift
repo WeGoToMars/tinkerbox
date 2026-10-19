@@ -24,7 +24,8 @@ enum ModelTask: String, CaseIterable, Sendable {
     }
 }
 
-// One entry of tinkerbox_ane/models.json.
+// One entry of tinkerbox_ane/models.json. Released apps keep reading the remote copy, so only
+// identity and display fields are required; entries for other tasks may omit the rest.
 struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     let id: String
     let name: String
@@ -36,15 +37,17 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     let baseModel: String?
     let originalModel: String?
     let repo: String
-    let inputs: [String]
-    let context: Int
-    let downloadBytes: Int64
-    let license: String
+    let revision: String
+    let inputs: [String]?
+    let context: Int?
+    let downloadBytes: Int64?
+    let license: String?
     let minVersion: String
 
     var kind: ModelTask? { ModelTask(rawValue: task) }
-    var acceptsImages: Bool { inputs.contains("image") }
-    var isSupported: Bool { kind != nil && !Catalog.isNewer(minVersion, than: Catalog.appVersion) }
+    var acceptsImages: Bool { inputs?.contains("image") == true }
+    // This app can run it: its package ships the model, and the task has a page here.
+    var isSupported: Bool { kind != nil && Catalog.bundled.contains { $0.id == id } }
 }
 
 @MainActor @Observable final class Catalog {
@@ -65,11 +68,21 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     var isRemote = false
     var downloaded: Set<String> = []
 
+    // The catalog format this app reads; a newer one is ignored instead of misread.
+    nonisolated static let schema = 1
+
     nonisolated static func decode(_ data: Data) throws -> [CatalogModel] {
-        struct File: Decodable { let models: [CatalogModel] }
+        // An entry this app cannot read is skipped, so a newer kind of entry never hides the others.
+        struct Entry: Decodable {
+            let model: CatalogModel?
+            init(from decoder: Decoder) throws { model = try? CatalogModel(from: decoder) }
+        }
+        struct File: Decodable { let schema: Int; let models: [Entry] }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(File.self, from: data).models
+        let file = try decoder.decode(File.self, from: data)
+        guard file.schema <= schema else { throw URLError(.cannotDecodeContentData) }
+        return file.models.compactMap(\.model)
     }
 
     nonisolated static func isNewer(_ version: String, than other: String) -> Bool {
@@ -88,8 +101,8 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
             let (data, response) = try await URLSession.shared.data(from: Self.remoteURL)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
             let remote = try Self.decode(data)
-            // Keep bundled models the remote catalog no longer lists; this app can still run them.
-            models = remote + Self.bundled.filter { model in !remote.contains { $0.id == model.id } }
+            // Bundled entries describe what this app runs; the remote catalog only adds models to discover.
+            models = Self.bundled + remote.filter { model in !Self.bundled.contains { $0.id == model.id } }
             isRemote = true
         } catch {
             models = Self.bundled
@@ -100,15 +113,12 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
 
     func scanDownloads() {
         let files = FileManager.default
-        downloaded = Set(models.map(\.id).filter { id in
-            let revisions = (try? files.contentsOfDirectory(at: Self.cacheURL.appending(path: id),
-                                                            includingPropertiesForKeys: nil)) ?? []
-            return revisions.contains { revision in
-                let bundles = (try? files.contentsOfDirectory(at: revision.appending(path: "macos27"),
-                                                              includingPropertiesForKeys: nil)) ?? []
-                return bundles.contains { files.fileExists(atPath: $0.appending(path: "model.json").path) }
-            }
-        })
+        // Only the catalog's revision counts; an older one would be downloaded again on load.
+        downloaded = Set(models.filter { model in
+            let folder = Self.cacheURL.appending(path: model.id).appending(path: model.revision).appending(path: "macos27")
+            let bundles = (try? files.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            return bundles.contains { files.fileExists(atPath: $0.appending(path: "model.json").path) }
+        }.map(\.id))
     }
 
     func removeDownload(_ model: CatalogModel) throws {
