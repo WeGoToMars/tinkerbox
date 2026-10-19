@@ -1,6 +1,10 @@
 # Tinkerbox for Apple Neural Engine
 
-Run [LiquidAI/d1-3B](https://huggingface.co/LiquidAI/d1-3B) on Apple's Neural Engine through Core AI. FP16 backbone, 128-token chunks, 32,768-token context. Tokenization, embeddings and answer readout run on the CPU.
+Run models on Apple's Neural Engine through Core AI. Critical inference runs on the Neural Engine, the CPU does supplementary work such as tokenization and small heads, and the GPU stays idle.
+
+| Model | Task | Notes |
+| --- | --- | --- |
+| [LiquidAI/d1-3B](https://huggingface.co/LiquidAI/d1-3B) (`d1-3b`) | Decisions over text and images | [docs/models/d1.md](docs/models/d1.md) |
 
 Requires Apple Silicon (M4 or newer), macOS 27, and Python 3.12 or 3.13. Earlier generations (M1–M3) are not supported due to Neural Engine hardware and offline compiler constraints.
 
@@ -13,9 +17,9 @@ python -m pip install ./tinkerbox_ane-*.whl
 ```
 
 ```python
-from tinkerbox_ane import d1
+import tinkerbox_ane
 
-with d1.load() as model:
+with tinkerbox_ane.load("d1-3b") as model:
     result = model.system_one(
         "I was charged twice this month.",
         {"refund": {"type": "noul", "instructions": "Is this a refund request?"}},
@@ -23,39 +27,9 @@ with d1.load() as model:
     print(result)
 ```
 
-`load()` downloads the matching Core AI architecture from [wegotomars/d1-3B-CoreAI-ANE](https://huggingface.co/wegotomars/d1-3B-CoreAI-ANE) (`v2.0.0`) into `~/Library/Caches/tinkerbox-ane/models/d1-3b/`. Pass a directory path to `load(path)` to select a local AOT bundle. This runtime requires the version 2 packed backbone; older bundles must be re-exported and compiled. Models can also be loaded by catalog ID: `tinkerbox_ane.load("d1-3b")`.
+`tinkerbox_ane.load(model_id)` loads any model in the catalog and returns the API for its task. It downloads the Core AI bundle for this Mac into `~/Library/Caches/tinkerbox-ane/models/<model>/<revision>/`; pass a directory as the second argument to select a local AOT bundle. Each model package also has its own `load()`, such as `tinkerbox_ane.d1.load()`.
 
-The API exposes `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries. Multiple decisions share prefix computation and run in packed chunks. Prompts exceeding 32,768 tokens are rejected.
-
-## Images
-
-Pass Pillow images with any request. The SigLIP2 vision tower runs on the Neural Engine as a separate Core AI asset; pictures above one megapixel are downscaled. The state may be `None` when the pictures carry the input.
-
-```python
-from PIL import Image
-
-with d1.load() as model:
-    result = model.system_one(None, {"receipt": {"type": "noul", "instructions": "Is this a receipt?"}},
-                              images=[Image.open("photo.jpg")])
-```
-
-Image tokens join the shared trunk, so several questions about the same pictures encode them once.
-
-## Multiple decisions in one pass
-
-The backbone mirrors upstream Torch: the state is a shared trunk, and each question is an isolated branch. Attention masks prevent questions from seeing each other, convolution windows restart from the trunk history, and RoPE positions restart at the end of the trunk for each branch. Several short decisions can share one ANE invocation; longer trees stream through 128-token chunks.
-
-```python
-with d1.load() as model:
-    result = model.system_one("Hi", {
-        "greeting": {"type": "noul", "instructions": "Is this a greeting?"},
-        "refund": {"type": "noul", "instructions": "Is this a refund request?"},
-    })
-```
-
-Single-question batch requests are packed too. Each logical prompt must fit the 32,768-token context; trees exceeding that physical token budget split into groups. Multi-question usage counts the state once plus all question suffixes, matching upstream.
-
-The bundle keeps nine cache-tier functions with shared weights. Single decisions skip tree planning and reuse cached routing and causal masks in the native host, updating only newly visible history. Packed requests rebuild branch-specific metadata. Both paths execute the same ANE graph.
+Decision models expose the System One API: `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries, plus `count_tokens`. Several questions about one input share its computation. Inputs, limits, and execution details are in each model's notes.
 
 ## SwiftUI Demo
 
@@ -84,7 +58,7 @@ Model-independent pieces live at the package top level and are shared by every m
 | `coreai.py`, `guard.py`, `publish.py` | Compiler watchdog, ANE placement verification, Hugging Face releases |
 | `models.json`, `models.py` | The model catalog read by `tinkerbox_ane.load()` and the app |
 
-A model package such as `tinkerbox_ane.d1` supplies the rest: the fused FP16 graph (`model.py`), its export (`export.py`), tokenization and answer readout (`runtime.py`), decision-tree planning over LFM convolution routing (`tree.py`), and optionally a vision tower (`vision.py`). It exposes `load(asset=None)` and a bundle `KIND`; its `compile` and `publish` CLIs are thin wrappers over the shared modules. Add a catalog entry with the model's artifact repository, revision, inputs, and the first `min_version` that ships it. Older apps list the entry but keep it disabled until updated.
+A model package such as `tinkerbox_ane.d1` supplies the rest: the fused FP16 graph (`model.py`), its export (`export.py`), tokenization and answer readout (`runtime.py`), decision-tree planning over LFM convolution routing (`tree.py`), and optionally a vision tower (`vision.py`). It exposes `load(asset=None)` and a bundle `KIND`; its `compile` and `publish` CLIs are thin wrappers over the shared modules. Add a catalog entry with the model's `task` (`decision`; planned: `embedding`, `transcription`, `speech`, `segmentation`), optional `base_model` (the foundation it was fine-tuned from) and `original_model` (the model that was converted), artifact repository, revision, inputs, and the first `min_version` that ships it. Older apps list the entry but keep it disabled until updated, and skip entries they cannot read; only `id`, `name`, `publisher`, `summary`, `task`, `repo`, `revision` and `min_version` are required. Write the model's implementation notes in `docs/models/<package>.md` and link them from the table at the top.
 
 ## Building from Source
 
@@ -97,50 +71,12 @@ uv build
 
 The wheel in `dist/` bundles the native host and links against macOS system frameworks. Attach it to the GitHub release. Source and editable installs compile the host during installation.
 
-To export and compile model weights locally:
-
-```sh
-uv run python -m tinkerbox_ane.d1.export
-uv run python -m tinkerbox_ane.d1.compile
-```
-
-Export writes intermediate artifacts to `artifacts/build/d1_fp16_fused128_ctx32768`, and compilation produces the final deployment bundle in `artifacts/d1_fp16_fused128_ctx32768`. Load the local result with `d1.load(d1.DEFAULT_ASSET)`.
-
-Key compiler options:
-- `--force`: Rebuild an existing bundle. The compiler verifies the new artifact before replacing the previous build.
-- `--architecture <arch>`: Target a specific architecture instead of the current machine.
-- `--allow-unsupported`: Attempt compilation for an architecture outside the verified support list.
-
 Compilation verifies source identity, function manifests, and full ANE placement. Without cached sudo credentials, worker cancellation on failure or timeout is best effort and emits a warning.
 
-Reusable Core AI compilation and Hugging Face publishing utilities are provided in `tinkerbox_ane.coreai` and `tinkerbox_ane.publish`. See the [model publishing guide](docs/model-publishing.md) for compiling and publishing additional models.
-
-### Publishing d1 Releases
-
-Use the d1 publishing CLI to build and upload multi-architecture release bundles:
+Each model's notes describe its export, compile, and publishing commands. Reusable Core AI compilation and Hugging Face publishing utilities are provided in `tinkerbox_ane.coreai` and `tinkerbox_ane.publish`; see the [model publishing guide](docs/model-publishing.md). When publishing new bundles, update the model's `revision` in `src/tinkerbox_ane/models.json`. To use a compiled bundle before its revision is on Hugging Face, install it into the model cache; `load()`, the app, and Shortcuts then use it in place of the download:
 
 ```sh
-# Compile bundles for specific architectures without uploading
-uv run python -m tinkerbox_ane.d1.publish --arch h17s h16g --no-upload
-
-# Publish prepared bundles and create a release tag
-uv run python -m tinkerbox_ane.d1.publish --arch h17s h16g --upload-only --tag v2.0.0
-```
-
-Omitting `--arch` targets all supported architectures. The upload synchronizes the remote `macos27` tree with the selected architectures, pruning omitted targets and obsolete files while keeping existing release tags intact.
-
-Common publishing options:
-- `--arch`: Target architectures to build (defaults to all supported architectures).
-- `--tag`: New release tag to create on Hugging Face (must not already exist).
-- `--source`, `--staging`, `--repo`: Source export directory, local staging path, and Hugging Face repository.
-- `--metadata`: Directory containing release metadata files (`LICENSE`, `NOTICE`, `README.md`).
-
-When publishing new bundles, update the model's `revision` in `src/tinkerbox_ane/models.json` so `load()` resolves the new tag by default. (The legacy script `scripts/publish_all_chips.py` forwards to this CLI.)
-
-To use a compiled bundle before its revision is on Hugging Face, install it into the model cache. `load()`, the app, and Shortcuts then use it in place of the download until the tag is published:
-
-```sh
-uv run python -m tinkerbox_ane.install d1-3b artifacts/d1_fp16_fused128_ctx32768
+uv run python -m tinkerbox_ane.install <model> <bundle directory>
 ```
 
 ### Releasing the Package
@@ -151,14 +87,14 @@ uv run python scripts/release.py --sign "Apple Development: you@example.com"
 
 From a clean tree, the script checks that every catalog model shipped by this version has its Hugging Face tag, runs the tests, builds the wheel and the signed app ZIP, and creates a local annotated tag. It pushes and uploads nothing; it prints the `git push`, `uv publish`, and `gh release create` commands to run after review.
 
-## Validation
+## Tests
 
 ```sh
-uv run python scripts/build_reference.py
-uv run python -m tinkerbox_ane.d1.guard artifacts/validation/check -- uv run python scripts/validate.py
 uv run python -m tinkerbox_ane.d1.guard artifacts/validation/smoke -- uv run pytest -q
 ```
 
-Reference generation downloads benchmark inputs and runs the official FP32 CPU model. Validation checks prompt tokens and probabilities across all nine cache capacities. The two public API smoke tests require a local bundle and cached checkpoint.
+The public API tests require a local bundle and cached checkpoint. Reference validation against the official model is per model; see its notes.
 
-Weights and upstream code are pinned to `LiquidAI/d1-3B@051bcc464b01b9f92942b364d9586b0ef5912432` under the [LFM Open License v1.0](LICENSES/LFM-Open-License-v1.0.txt). See [NOTICE](NOTICE).
+## Licenses
+
+Model weights and upstream code keep their own licenses: d1-3B is pinned to `LiquidAI/d1-3B@051bcc464b01b9f92942b364d9586b0ef5912432` under the [LFM Open License v1.0](LICENSES/LFM-Open-License-v1.0.txt). See [NOTICE](NOTICE).
