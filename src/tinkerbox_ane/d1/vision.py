@@ -70,8 +70,8 @@ def load_vision_tower(checkpoint_dir: Path) -> VisionTower:
 def load_projector(checkpoint_dir: Path) -> Lfm2VlMultiModalProjector:
     """Load multimodal projector weights from safetensors checkpoint.
 
-    It runs on the CPU in FP32: Accelerate's matrix unit handles FP32, while PyTorch's FP16 CPU
-    matmul is about four times slower."""
+    Runs on CPU in FP32 to utilize Accelerate's sgemm matrix kernels, which lack
+    optimized FP16 implementations on Apple Silicon CPU."""
     checkpoint_dir = Path(checkpoint_dir)
     config = AutoConfig.from_pretrained(checkpoint_dir, trust_remote_code=True)
     proj = Lfm2VlMultiModalProjector(config)

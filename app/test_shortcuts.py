@@ -7,11 +7,11 @@ import subprocess
 import tempfile
 
 
-root = Path(__file__).resolve().parents[2]
-source = root / "examples/swiftui"
+root = Path(__file__).resolve().parents[1]
+source = root / "app"
 app = root / "artifacts/swiftui/Tinkerbox.app"
 if not app.is_dir():
-    raise SystemExit("Build the app first: python3 examples/swiftui/run.py --build-only")
+    raise SystemExit("Build the app first: python3 app/run.py --build-only")
 
 with tempfile.TemporaryDirectory(prefix="shortcuts-", dir=root / "artifacts/swiftui") as temporary:
     bundle = Path(temporary) / "ShortcutsSmoke.app/Contents"

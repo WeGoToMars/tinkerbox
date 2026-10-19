@@ -31,12 +31,12 @@ with tinkerbox_ane.load("d1-3b") as model:
 
 Decision models expose the System One API: `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries, plus `count_tokens`. Several questions about one input share its computation. Inputs, limits, and execution details are in each model's notes.
 
-## SwiftUI Demo
+## Tinkerbox app
 
-A desktop demo is available in [examples/swiftui](examples/swiftui). To build and launch it from source:
+A standalone desktop application is in [app](app). To build and launch it from source:
 
 ```sh
-uv run --no-project --python 3.12 python examples/swiftui/run.py
+uv run --no-project --python 3.12 python app/run.py
 ```
 
 Pass `--build-only` to create `artifacts/swiftui/Tinkerbox.app` and the release ZIP without launching. The prebuilt app manages its own Python environment and dependencies via an embedded `uv` binary.
@@ -49,16 +49,21 @@ Weight staging uses an [APFS copy-on-write workaround](docs/cow-staging.md) to e
 
 ## Adding a Model
 
-Model-independent pieces live at the package top level and are shared by every model:
+Model-independent infrastructure lives at the package top level and is shared across models:
 
 | Module | Role |
 | --- | --- |
-| `host.py`, `host.swift` | Native Core AI host: tiered caches, packed chains and trees, RoPE tables, and a vision asset with named inputs |
-| `bundle.py` | Bundle manifest kind and asset identity checks, per-architecture download with progress, AOT compilation; each runtime validates the manifest fields it uses |
-| `coreai.py`, `guard.py`, `publish.py` | Compiler watchdog, ANE placement verification, Hugging Face releases |
-| `models.json`, `models.py` | The model catalog read by `tinkerbox_ane.load()` and the app |
+| `host.py`, `host.swift` | Native Core AI host: tiered caches, packed chains and trees, RoPE tables, and named vision inputs |
+| `bundle.py` | Bundle manifest and asset identity verification, downloads, and AOT compilation |
+| `coreai.py`, `guard.py`, `publish.py` | Compiler watchdog, ANE placement verification, and Hugging Face releases |
+| `models.json`, `models.py` | Model catalog shared by `tinkerbox_ane.load()` and the app |
 
-A model package such as `tinkerbox_ane.d1` supplies the rest: the fused FP16 graph (`model.py`), its export (`export.py`), tokenization and answer readout (`runtime.py`), decision-tree planning over LFM convolution routing (`tree.py`), and optionally a vision tower (`vision.py`). It exposes `load(asset=None)` and a bundle `KIND`; its `compile` and `publish` CLIs are thin wrappers over the shared modules. Add a catalog entry with the model's `task` (`decision`; planned: `embedding`, `transcription`, `speech`, `segmentation`), optional `base_model` (the foundation it was fine-tuned from) and `original_model` (the model that was converted), artifact repository, revision, inputs, and the first `min_version` that ships it. Older apps list the entry but keep it disabled until updated, and skip entries they cannot read; only `id`, `name`, `publisher`, `summary`, `task`, `repo`, `revision` and `min_version` are required. Write the model's implementation notes in `docs/models/<package>.md` and link them from the table at the top.
+A model package (such as `tinkerbox_ane.d1`) provides:
+- **Neural Graph & Export:** Fused FP16 graph (`model.py`) and Core AI export (`export.py`).
+- **Runtime:** Tokenization, prompt formatting, readout (`runtime.py`), and optional tree planning (`tree.py`) or vision processing (`vision.py`).
+- **Package Interface:** Exposes `load(asset=None)`, bundle `KIND`, and compile/publish CLI wrappers.
+
+To register a model, add an entry to `src/tinkerbox_ane/models.json` specifying `id`, `name`, `publisher`, `summary`, `task`, `repo`, `revision`, and `min_version`. Add notes in `docs/models/<id>.md`.
 
 ## Building from Source
 
@@ -69,23 +74,25 @@ uv sync --locked
 uv build
 ```
 
-The wheel in `dist/` bundles the native host and links against macOS system frameworks. Attach it to the GitHub release. Source and editable installs compile the host during installation.
+The wheel in `dist/` bundles the native host and links against macOS system frameworks. Source and editable installs compile the host during installation. Compilation verifies source identity, function manifests, and full ANE placement.
 
-Compilation verifies source identity, function manifests, and full ANE placement. Without cached sudo credentials, worker cancellation on failure or timeout is best effort and emits a warning.
-
-Each model's notes describe its export, compile, and publishing commands. Reusable Core AI compilation and Hugging Face publishing utilities are provided in `tinkerbox_ane.coreai` and `tinkerbox_ane.publish`; see the [model publishing guide](docs/model-publishing.md). When publishing new bundles, update the model's `revision` in `src/tinkerbox_ane/models.json`. To use a compiled bundle before its revision is on Hugging Face, install it into the model cache; `load()`, the app, and Shortcuts then use it in place of the download:
+Each model's notes describe its export, compile, and publishing commands. Reusable Core AI compilation and Hugging Face publishing utilities are provided in `tinkerbox_ane.coreai` and `tinkerbox_ane.publish`; see the [model publishing guide](docs/model-publishing.md). To use a compiled bundle locally before publishing:
 
 ```sh
 uv run python -m tinkerbox_ane.install <model> <bundle directory>
 ```
 
-### Releasing the Package
+### Continuous Integration and Releases
+
+The Build workflow runs on pushes and pull requests on GitHub's Xcode 27 runners: it builds the wheel with the native host, type-checks the app and the Shortcuts smoke target, and builds the app. Tests, model export and compilation, and Hugging Face publishing stay local, since they need the Neural Engine and the checkpoints.
+
+To release, run from a clean tree:
 
 ```sh
-uv run python scripts/release.py --sign "Apple Development: you@example.com"
+uv run python scripts/release.py
 ```
 
-From a clean tree, the script checks that every catalog model shipped by this version has its Hugging Face tag, runs the tests, builds the wheel and the signed app ZIP, and creates a local annotated tag. It pushes and uploads nothing; it prints the `git push`, `uv publish`, and `gh release create` commands to run after review.
+The script checks that every catalog model shipped by this version has its Hugging Face tag, runs the tests, and creates a local annotated tag; it pushes nothing. Pushing the tag starts the Release workflow, which builds the wheel and the app signed with the developer identity, publishes the wheel to PyPI through trusted publishing, then attaches both to a draft GitHub release. The app installs that wheel from PyPI on first launch. The PyPI trusted publisher uses the `WeGoToMars/tinkerbox` repository, `release.yml` workflow, and `pypi` environment. The workflow reads the repository secrets `APPLE_DEVELOPER_P12` (the base64-encoded identity) and `APPLE_DEVELOPER_P12_PASSWORD`; no PyPI token is needed.
 
 ## Tests
 

@@ -22,7 +22,7 @@ parser.add_argument("--sign", default="-", metavar="IDENTITY",
 args = parser.parse_args()
 
 source = Path(__file__).resolve().parent
-root = source.parents[1]
+root = source.parent
 version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
 out = root / "artifacts/swiftui"
 out.mkdir(parents=True, exist_ok=True)
