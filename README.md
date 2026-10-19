@@ -137,6 +137,12 @@ Common publishing options:
 
 When publishing new bundles, update the model's `revision` in `src/tinkerbox_ane/models.json` so `load()` resolves the new tag by default. (The legacy script `scripts/publish_all_chips.py` forwards to this CLI.)
 
+To use a compiled bundle before its revision is on Hugging Face, install it into the model cache. `load()`, the app, and Shortcuts then use it in place of the download until the tag is published:
+
+```sh
+uv run python -m tinkerbox_ane.install d1-3b artifacts/d1_fp16_fused128_ctx32768
+```
+
 ### Releasing the Package
 
 ```sh

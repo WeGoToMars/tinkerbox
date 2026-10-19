@@ -6,6 +6,9 @@ from concurrent.futures import ThreadPoolExecutor, wait
 import json
 from pathlib import Path
 import re
+import shutil
+import tempfile
+import warnings
 
 from tinkerbox_ane.coreai import compile_asset, source_hash, verify_aot
 
@@ -23,24 +26,52 @@ def download_bundle(model: str, repo: str, revision: str, progress=None) -> Path
 
     folder = f"macos27/{architecture}"
     root = CACHE / model / revision
-    fetch = dict(repo_id=repo, revision=revision, allow_patterns=f"{folder}/*", local_dir=root)
-    if progress is None:
-        snapshot_download(**fetch)
-    else:
-        files = HfApi().model_info(repo, revision=revision, files_metadata=True).siblings
-        total = sum(f.size or 0 for f in files if f.rfilename.startswith(f"{folder}/"))
-        with ThreadPoolExecutor(1) as pool:
-            done = pool.submit(snapshot_download, **fetch)
-            # Partial files grow under the local cache folder until they are moved into place.
-            while wait([done], timeout=0.5).not_done:
-                progress(sum(p.stat().st_size for p in root.rglob("*") if p.is_file()), total)
-            done.result()
-        progress(total, total)
     bundle = root / folder
+    fetch = dict(repo_id=repo, revision=revision, allow_patterns=f"{folder}/*", local_dir=root)
+    try:
+        if progress is None:
+            snapshot_download(**fetch)
+        else:
+            files = HfApi().model_info(repo, revision=revision, files_metadata=True).siblings
+            total = sum(f.size or 0 for f in files if f.rfilename.startswith(f"{folder}/"))
+            with ThreadPoolExecutor(1) as pool:
+                done = pool.submit(snapshot_download, **fetch)
+                # Partial files grow under the local cache folder until they are moved into place.
+                while wait([done], timeout=0.5).not_done:
+                    progress(sum(p.stat().st_size for p in root.rglob("*") if p.is_file()), total)
+                done.result()
+            progress(total, total)
+    except Exception as error:
+        # Offline, or installed with install_bundle() before the revision is published.
+        if not (bundle / "model.json").is_file():
+            raise
+        warnings.warn(f"using cached {bundle}: {error}", stacklevel=2)
+        return bundle
     if not (bundle / "model.json").is_file():
         chip = chip_name(architecture)
         raise RuntimeError(f"Failed to download AOT bundle for {chip} ({architecture}) from {repo}@{revision}.")
     return bundle
+
+
+def install_bundle(model: str, revision: str, source: Path, kind: str) -> Path:
+    """Copy a locally compiled bundle into the cache where download_bundle() expects that revision."""
+    spec = read_bundle(source, kind)
+    if Path(spec["asset"]).suffix != ".aimodelc" or not spec.get("architecture"):
+        raise ValueError("install requires a compiled bundle; compile the export first")
+    target = CACHE / model / revision / "macos27" / spec["architecture"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Stage beside the revisions so the app never sees a half-copied bundle.
+    with tempfile.TemporaryDirectory(prefix=".install-", dir=CACHE / model) as temporary:
+        staged = Path(temporary) / "bundle"
+        staged.mkdir()
+        for name in (spec["asset"], spec.get("vision_asset"), "model.json"):
+            if name:
+                copy = shutil.copytree if (Path(source) / name).is_dir() else shutil.copyfile
+                copy(Path(source) / name, staged / name)
+        if target.exists():
+            shutil.rmtree(target)
+        staged.rename(target)
+    return target
 
 
 def check_asset_name(name: str) -> None:

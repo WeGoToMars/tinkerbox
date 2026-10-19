@@ -28,6 +28,15 @@ def download(model: str, progress=None) -> Path:
     return download_bundle(item["id"], item["repo"], item["revision"], progress)
 
 
+def install(model: str, bundle: Path) -> Path:
+    """Use a locally compiled bundle as the catalog revision, e.g. before it is published."""
+    from tinkerbox_ane.bundle import install_bundle
+
+    item = entry(model)
+    kind = importlib.import_module(item["module"]).KIND
+    return install_bundle(item["id"], item["revision"], bundle, kind)
+
+
 def load(model: str, asset=None):
     """Load a model's System One API from a local bundle, or download it; use as a context manager."""
     return importlib.import_module(entry(model)["module"]).load(asset)
