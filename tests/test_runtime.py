@@ -139,6 +139,10 @@ def test_multimodal_decisions_trees_and_batches(model):
     assert p_blue[0] > 0.95
     assert p_red[0] < 0.05
 
+    # Pictures the processor splits into tiles plus a thumbnail
+    tiled = model.system_one(None, {'color': q_color}, images=[Image.new('RGB', (1000, 1000), color='red')])
+    assert tiled['answers']['color']['choice'] == 'red'
+
     # Batched execution mixing image and text-only requests
     requests = [
         (None, {'blue': q_blue}, [blue_img]),
@@ -150,3 +154,37 @@ def test_multimodal_decisions_trees_and_batches(model):
     assert batch[0]['answers']['blue']['noul'] > 0.95
     assert batch[1]['answers']['greeting']['noul'] == pytest.approx(0.9797, abs=0.01)
     assert batch[2]['answers']['color']['choice'] == 'red'
+
+
+def test_image_tile_limit_and_token_counts(model):
+    from PIL import Image
+
+    photo = Image.new('RGB', (4032, 3024), color='red')
+    question = {'type': 'noul', 'instructions': 'Is this image red?'}
+
+    def counted(tiles):
+        model.max_image_tiles = tiles
+        count = model.count_tokens(None, {'red': question}, images=[photo])
+        result = model.system_one(None, {'red': question}, images=[photo])
+        assert result['answers']['red']['noul'] > 0.95
+        assert count['input_tokens'] == result['usage']['input_tokens']
+        return count
+
+    assert model.max_image_tiles == 6
+    one, four, six = counted(1), counted(4), counted(6)
+    assert [one['image_tiles'], four['image_tiles'], six['image_tiles']] == [1, 5, 7]
+    # A 4:3 photo fills a 3×2 grid of 512-pixel tiles, plus an overview of the whole picture
+    assert six['images'] == [{'source': [4032, 3024], 'cols': 3, 'rows': 2, 'size': [1536, 1024],
+                              'overview': [576, 416], 'passes': 7, 'tokens': 1770}]
+    assert one['images'][0]['overview'] is None and one['images'][0]['passes'] == 1
+    assert one['input_tokens'] < four['input_tokens'] < six['input_tokens']
+    for invalid in (0, 11, 2.5, True):
+        with pytest.raises(ValueError, match='max_image_tiles'):
+            model.max_image_tiles = invalid
+    assert model.max_image_tiles == 6
+
+    # A shared pass over text counts its trunk once
+    questions = {'greeting': GREETING, 'red': question}
+    tree = model.system_one('Hello there', questions)
+    assert model.count_tokens('Hello there', questions) == {
+        'input_tokens': tree['usage']['input_tokens'], 'image_tiles': 0, 'images': []}

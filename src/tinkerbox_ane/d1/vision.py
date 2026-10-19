@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +15,6 @@ from transformers.models.lfm2_vl.modeling_lfm2_vl import Lfm2VlMultiModalProject
 from tinkerbox_ane.coreai import source_hash
 from tinkerbox_ane.d1 import RESIDUAL_SCALE
 
-VISION_MAX_PIXELS = 1024 * 1024
 MAX_PATCHES = 1024
 PATCH_DIM = 768
 VISION_HIDDEN = 1152
@@ -24,18 +22,11 @@ PROJECTOR_HIDDEN = 2048
 IMAGE_TOKEN_ID = 124907
 
 
-def cap_pixels(image, max_pixels: int = VISION_MAX_PIXELS):
-    """A picture downscaled to at most `max_pixels`, bicubic."""
-    image = image.convert("RGB") if hasattr(image, "convert") else image
-    if not hasattr(image, "size"):
+def as_rgb(image):
+    """A Pillow picture in RGB; the processor resizes and tiles it."""
+    if not hasattr(image, "convert"):
         raise ValueError(f"invalid image input: {image!r}")
-    w, h = image.size
-    if w * h <= max_pixels:
-        return image
-    from PIL import Image
-
-    scale = math.sqrt(max_pixels / (w * h))
-    return image.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.BICUBIC)
+    return image.convert("RGB")
 
 
 class VisionTower(nn.Module):
@@ -117,6 +108,28 @@ class VisionPipeline:
         self.pos_weight = checkpoint_tensors(
             checkpoint_dir, "model.vision_tower.vision_model.embeddings.position_embedding.")["weight"].float()
 
+    def limit_tiles(self, tiles: int):
+        """Split pictures into at most `tiles` tiles; one tile resizes instead of splitting."""
+        processor = self.processor.image_processor
+        processor.min_tiles, processor.max_tiles = (1, 1) if tiles == 1 else (2, tiles)
+
+    def layout(self, image) -> dict:
+        """How one picture reaches the model: its tile grid, the size it is resized to, and its overview.
+
+        Nothing is cropped; a split picture is resized to fill its grid, and the overview is the whole
+        picture at a single view's size."""
+        processor = self.processor.image_processor
+        out = processor(images=[[image]], return_tensors="pt")
+        rows, cols = int(out["image_rows"][0]), int(out["image_cols"][0])
+        height, width = (int(n) for n in out["image_sizes"][0])
+        shapes = out["spatial_shapes"].tolist()
+        factor = processor.downsample_factor
+        tiled = rows * cols > 1
+        return {"source": list(image.size), "cols": cols, "rows": rows,
+                "size": [cols * processor.tile_size, rows * processor.tile_size] if tiled else [width, height],
+                "overview": [width, height] if len(shapes) > rows * cols else None,
+                "passes": len(shapes), "tokens": sum((h // factor) * (w // factor) for h, w in shapes)}
+
     def image_markup(self, count: int) -> str:
         """Chat template markup for `count` images."""
         if count <= 0:
@@ -141,26 +154,27 @@ class VisionPipeline:
 
     @torch.inference_mode()
     def encode_image(self, image) -> torch.Tensor:
-        """Encode one image using ANE vision tower + projector, scaled by RESIDUAL_SCALE."""
-        image = cap_pixels(image)
+        """Encode one image using ANE vision tower + projector, scaled by RESIDUAL_SCALE.
+
+        The processor splits large pictures into tiles plus a thumbnail. Each tile runs on its own,
+        and the features follow the order of the image placeholder tokens, as upstream."""
+        image = as_rgb(image)
         inputs = self.processor(text=["<image>"], images=[[image]], return_tensors="pt", add_special_tokens=False)
-        pv = inputs["pixel_values"].to(torch.float16)  # [1, 1024, 768]
-        pam = inputs["pixel_attention_mask"]  # [1, 1024]
-        spatial = inputs["spatial_shapes"][0]  # [2]
-        num_patches = int(pam.sum().item())
+        features = []
+        # pixel_values: [tiles, 1024, 768]; pixel_attention_mask: [tiles, 1024]; spatial_shapes: [tiles, 2]
+        for pv, pam, spatial in zip(inputs["pixel_values"], inputs["pixel_attention_mask"], inputs["spatial_shapes"]):
+            num_patches = int(pam.sum().item())
+            pe = self.interpolate_pos_embeds(spatial)  # [1, 1024, 1152]
+            # Attention mask: 0 for active, -65504 for padding
+            mask = torch.full((1, 1, 1, MAX_PATCHES), -65504.0, dtype=torch.float16)
+            mask[0, 0, 0, :num_patches] = 0.0
 
-        pe = self.interpolate_pos_embeds(spatial)  # [1, 1024, 1152]
-        # Attention mask: 0 for active, -65504 for padding
-        mask = torch.full((1, 1, 1, MAX_PATCHES), -65504.0, dtype=torch.float16)
-        mask[0, 0, 0, :num_patches] = 0.0
+            # Execute vision tower on ANE
+            ane_out = self.host.vision({"pixel_values": pv[None].to(torch.float16), "pos_embeds": pe, "attn_mask": mask})
+            hidden_state = torch.from_numpy(ane_out[0])  # [1024, 1152]
 
-        # Execute vision tower on ANE
-        ane_out = self.host.vision({"pixel_values": pv, "pos_embeds": pe, "attn_mask": mask})
-        hidden_state = torch.from_numpy(ane_out[0])  # [1024, 1152]
-
-        # Unpad active tokens and reshape to [1, H, W, 1152]
-        active = hidden_state[:num_patches].reshape(1, int(spatial[0]), int(spatial[1]), VISION_HIDDEN)
-        # Multimodal projection
-        features = self.projector(active)  # [1, H//2, W//2, 2048]
-        flat_features = features.reshape(-1, PROJECTOR_HIDDEN)
-        return flat_features * RESIDUAL_SCALE
+            # Unpad active tokens and reshape to [1, H, W, 1152]
+            active = hidden_state[:num_patches].reshape(1, int(spatial[0]), int(spatial[1]), VISION_HIDDEN)
+            # Multimodal projection: [1, H//2, W//2, 2048]
+            features.append(self.projector(active).reshape(-1, PROJECTOR_HIDDEN))
+        return torch.cat(features) * RESIDUAL_SCALE

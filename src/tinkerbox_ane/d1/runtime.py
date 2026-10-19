@@ -11,8 +11,8 @@ import torch
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
-from tinkerbox_ane.d1 import CHUNK, KIND, RESIDUAL_SCALE, checkpoint
-from tinkerbox_ane.d1.vision import IMAGE_TOKEN_ID, VisionPipeline, cap_pixels
+from tinkerbox_ane.d1 import CHUNK, KIND, MAX_IMAGE_TILES, RESIDUAL_SCALE, checkpoint
+from tinkerbox_ane.d1.vision import IMAGE_TOKEN_ID, VisionPipeline, as_rgb
 from tinkerbox_ane.host import Host
 from tinkerbox_ane.d1.tree import TreePlan, groups, shared_prefix
 
@@ -63,6 +63,7 @@ def load(asset):
             self._tokenizer = AutoTokenizer.from_pretrained(path)
             self._embeddings = Embeddings(path)
             self._vision = None
+            self._max_image_tiles = MAX_IMAGE_TILES
             config = json.loads((path / "config.json").read_text())
             self._render_args = (self._tokenizer.bos_token or "", prompt.default_lead(config["model_type"]),
                                  prompt.DEFAULT_STATE_STYLE, prompt.DEFAULT_SYSTEM, "desc")
@@ -84,7 +85,22 @@ def load(asset):
         def _get_vision(self) -> VisionPipeline:
             if self._vision is None:
                 self._vision = VisionPipeline(path, self._host)
+                self._vision.limit_tiles(self._max_image_tiles)
             return self._vision
+
+        @property
+        def max_image_tiles(self) -> int:
+            """Most 512×512 tiles per image, from 1 (never split) to 10; split images add a thumbnail."""
+            return self._max_image_tiles
+
+        @max_image_tiles.setter
+        def max_image_tiles(self, tiles: int):
+            if isinstance(tiles, bool) or not isinstance(tiles, int) or not 1 <= tiles <= 10:
+                raise ValueError(f"max_image_tiles must be an integer from 1 to 10, not {tiles!r}")
+            with self._lock:
+                self._max_image_tiles = tiles
+                if self._vision is not None:
+                    self._vision.limit_tiles(tiles)
 
         def tokens(self, state, question):
             text = prompt.render(self._tokenizer, state, prompt.as_question(question), *self._render_args)
@@ -117,46 +133,53 @@ def load(asset):
                     result.append(prompt.readout(self._tokenizer, question, dict(zip(option_ids, logits.tolist()))))
             return result
 
-        def _run_trees(self, requests):
-            prepared, singles = [], []
-            for index, (state, questions, images) in enumerate(requests):
-                pics = [cap_pixels(im) for im in images or ()]
-                questions = [prompt.as_question(q) for q in questions]
-                if not questions:
-                    prepared.append(([], [], [], 0, None))
-                elif not images and len(questions) == 1:
-                    ids = self.tokens(state, questions[0])
-                    if not 0 < len(ids) <= self.context:
-                        raise ValueError(f"prompt needs {len(ids)} tokens; context limit is {self.context}")
-                    singles.append((index, ids, questions[0]))
-                    prepared.append(None)
-                elif images and len(questions) == 1:
+        def _plan(self, state, questions, images):
+            """Token ids for one request: a single row, or a trunk with one branch per question.
+
+            Returns `(ids, branches, questions, pics, tiles)` after checking the context limit."""
+            pics = [as_rgb(im) for im in images or ()]
+            questions = [prompt.as_question(q) for q in questions]
+            if not questions:
+                return [], [], questions, pics, 0
+            bos, lead, style, system, option_style = self._render_args
+            tiles = 0
+            if len(questions) == 1:
+                if pics:
                     vision = self._get_vision()
-                    bos, lead, style, system, option_style = self._render_args
-                    markup = vision.image_markup(len(pics))
-                    prefix = prompt.prefix_text(self._tokenizer, state, bos, style, system, images=markup)
+                    prefix = prompt.prefix_text(self._tokenizer, state, bos, style, system,
+                                                images=vision.image_markup(len(pics)))
                     suffix = prompt.suffix_text(self._tokenizer, questions[0], lead, option_style)
                     inputs = vision.processor(text=[prefix + suffix], images=[list(pics)], return_tensors="pt", add_special_tokens=False)
-                    ids = inputs["input_ids"][0].tolist()
-                    if not 0 < len(ids) <= self.context:
-                        raise ValueError(f"prompt needs {len(ids)} tokens; context limit is {self.context}")
-                    prepared.append(([ids], [], questions, len(ids), pics))
+                    ids, tiles = inputs["input_ids"][0].tolist(), len(inputs["pixel_values"])
                 else:
-                    bos, lead, style, system, option_style = self._render_args
-                    if images:
-                        vision = self._get_vision()
-                        markup = vision.image_markup(len(pics))
-                        prefix = prompt.prefix_text(self._tokenizer, state, bos, style, system, images=markup)
-                        inputs = vision.processor(text=[prefix], images=[list(pics)], return_tensors="pt", add_special_tokens=False)
-                        trunk = inputs["input_ids"][0].tolist()
-                    else:
-                        trunk = self._tokenizer.encode(prompt.prefix_text(self._tokenizer, state, bos, style, system),
-                                                       add_special_tokens=False)
-                    branches = [self._tokenizer.encode(prompt.suffix_text(self._tokenizer, q, lead, option_style),
-                                                       add_special_tokens=False) for q in questions]
-                    # Validate every request before starting any native inference.
-                    list(groups(trunk, branches, self.context))
-                    prepared.append((trunk, branches, questions, len(trunk) + sum(map(len, branches)), pics))
+                    ids = self.tokens(state, questions[0])
+                if not 0 < len(ids) <= self.context:
+                    raise ValueError(f"prompt needs {len(ids)} tokens; context limit is {self.context}")
+                return ids, [], questions, pics, tiles
+            if pics:
+                vision = self._get_vision()
+                prefix = prompt.prefix_text(self._tokenizer, state, bos, style, system,
+                                            images=vision.image_markup(len(pics)))
+                inputs = vision.processor(text=[prefix], images=[list(pics)], return_tensors="pt", add_special_tokens=False)
+                trunk, tiles = inputs["input_ids"][0].tolist(), len(inputs["pixel_values"])
+            else:
+                trunk = self._tokenizer.encode(prompt.prefix_text(self._tokenizer, state, bos, style, system),
+                                               add_special_tokens=False)
+            branches = [self._tokenizer.encode(prompt.suffix_text(self._tokenizer, q, lead, option_style),
+                                               add_special_tokens=False) for q in questions]
+            list(groups(trunk, branches, self.context))  # raises when a group exceeds the context
+            return trunk, branches, questions, pics, tiles
+
+        def _run_trees(self, requests):
+            prepared, singles = [], []
+            # Validate every request before starting any native inference.
+            for index, request in enumerate(requests):
+                ids, branches, questions, pics, _ = self._plan(*request)
+                if questions and not pics and not branches:
+                    singles.append((index, ids, questions[0]))
+                    prepared.append(None)
+                else:
+                    prepared.append((ids, branches, questions, len(ids) + sum(map(len, branches)), pics))
             done = [None] * len(prepared)
             if singles:
                 # Pack independent single-question requests too, as the Torch API does.
@@ -178,10 +201,20 @@ def load(asset):
                     if not questions:
                         done[index] = ([], 0)
                     elif not branches:
-                        done[index] = ([self._probabilities(trunk[0], questions[0], image_features=feats)], usage)
+                        done[index] = ([self._probabilities(trunk, questions[0], image_features=feats)], usage)
                     else:
                         done[index] = (self._tree_probabilities(trunk, branches, questions, image_features=feats), usage)
             return done
+
+        def count_tokens(self, state, questions, images=None) -> dict:
+            """Input tokens and vision tiles `system_one` would use, without running the model, and how
+            each picture is fed to it (see `VisionPipeline.layout`)."""
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("the model is closed")
+                ids, branches, _, pics, tiles = self._plan(state, list(questions.values()), images)
+                return {"input_tokens": len(ids) + sum(map(len, branches)), "image_tiles": tiles,
+                        "images": [self._get_vision().layout(pic) for pic in pics]}
 
         def run(self, requests):
             with self._lock:
