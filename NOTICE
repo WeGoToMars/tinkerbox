@@ -1,11 +1,13 @@
-Independent FP16 text-backbone conversion of LiquidAI/d1-3B.
+Independent Core AI conversion of LiquidAI/d1-3B for text and image decisions.
 Upstream: https://huggingface.co/LiquidAI/d1-3B
 Revision: 051bcc464b01b9f92942b364d9586b0ef5912432
 
-The upstream checkpoint, code and converted weights are governed by the
-LFM Open License v1.0 in LICENSES/LFM-Open-License-v1.0.txt.
+The upstream checkpoint, upstream code and converted weights are governed by the
+LFM Open License v1.0. A copy of the license accompanies this distribution.
 
 The conversion uses 1x1 convolution projections, activation scaling,
-tanh-form SiLU and a split FFN. Embeddings and option readout run on the
-host. The vision tower is excluded; the model has not been retrained.
+tanh-form SiLU and a split FFN. The language backbone and SigLIP2 vision tower
+are exported as FP16 Core AI assets for the Apple Neural Engine. Tokenization,
+image preprocessing, token-embedding lookup, the FP32 multimodal projector,
+and option readout run on the host CPU. The model has not been retrained.
 This project is not affiliated with or endorsed by Liquid AI.

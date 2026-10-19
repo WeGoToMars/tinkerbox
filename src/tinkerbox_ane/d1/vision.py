@@ -68,12 +68,15 @@ def load_vision_tower(checkpoint_dir: Path) -> VisionTower:
 
 
 def load_projector(checkpoint_dir: Path) -> Lfm2VlMultiModalProjector:
-    """Load multimodal projector weights from safetensors checkpoint."""
+    """Load multimodal projector weights from safetensors checkpoint.
+
+    It runs on the CPU in FP32: Accelerate's matrix unit handles FP32, while PyTorch's FP16 CPU
+    matmul is about four times slower."""
     checkpoint_dir = Path(checkpoint_dir)
     config = AutoConfig.from_pretrained(checkpoint_dir, trust_remote_code=True)
     proj = Lfm2VlMultiModalProjector(config)
     proj.load_state_dict(checkpoint_tensors(checkpoint_dir, "model.multi_modal_projector."))
-    return proj.eval().to(torch.float16)
+    return proj.eval().float()
 
 
 def export_vision_asset(tower: VisionTower, out_path: Path) -> str:
@@ -98,7 +101,7 @@ def export_vision_asset(tower: VisionTower, out_path: Path) -> str:
 
 
 class VisionPipeline:
-    """Preprocesses images, runs ANE vision tower via Host, and projects features."""
+    """Preprocesses images, runs ANE vision tower via Host, and projects features on the CPU."""
 
     def __init__(self, checkpoint_dir: Path, host: Any):
         checkpoint_dir = Path(checkpoint_dir)
@@ -176,5 +179,5 @@ class VisionPipeline:
             # Unpad active tokens and reshape to [1, H, W, 1152]
             active = hidden_state[:num_patches].reshape(1, int(spatial[0]), int(spatial[1]), VISION_HIDDEN)
             # Multimodal projection: [1, H//2, W//2, 2048]
-            features.append(self.projector(active).reshape(-1, PROJECTOR_HIDDEN))
+            features.append(self.projector(active.float()).reshape(-1, PROJECTOR_HIDDEN))
         return torch.cat(features) * RESIDUAL_SCALE
