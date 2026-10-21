@@ -5,12 +5,9 @@ from __future__ import annotations
 import argparse
 from collections.abc import Iterable
 from functools import partial
-import json
 from pathlib import Path
-import shutil
 
 from tinkerbox_ane import publish
-from tinkerbox_ane.bundle import read_bundle
 from tinkerbox_ane.d1 import ARTIFACT_REPO, ARTIFACT_REVISION, KIND, SOURCE
 from tinkerbox_ane.d1.compile import compile_model
 from tinkerbox_ane.host import SUPPORTED_ARCHITECTURES
@@ -45,45 +42,8 @@ def upload_to_hub(
     token: str | None = None,
 ) -> str:
     """Verify and publish a complete macos27 release for the selected architectures."""
-    staging = Path(staging)
-    if architectures is None:
-        architectures = sorted(p.name for p in (staging / "macos27").iterdir()
-                               if p.is_dir() and not p.name.startswith("."))
-    patterns = ["LICENSE", "NOTICE", "README.md", "config.json"]
-    identities = set()
-    bundles = {}
-    for architecture in architectures:
-        directory = staging / "macos27" / architecture
-        spec = read_bundle(directory, KIND)
-        if (spec.get("architecture") != architecture
-                or spec["asset"] != f"fused.{architecture}.aimodelc"):
-            raise ValueError(f"{directory}: bundle does not target {architecture}")
-        identities.add(spec["source_hash"])
-        bundles[architecture] = f"macos27/{architecture}/model.json"
-        patterns.extend((f"macos27/{architecture}/model.json",
-                         f"macos27/{architecture}/{spec['asset']}/**"))
-        if spec.get("vision_asset"):
-            patterns.append(f"macos27/{architecture}/{spec['vision_asset']}/**")
-    if len(identities) != 1:
-        raise ValueError("release requires bundles with the same source identity")
-    # One shared release index is also the Hub's default download-counting file.
-    (staging / "config.json").write_text(json.dumps({
-        "version": 2, "source_hash": next(iter(identities)), "bundles": bundles,
-    }, indent=2) + "\n")
-    fallback_root = Path(metadata_dir) if metadata_dir is not None else Path(".")
-    for name in ("LICENSE", "NOTICE", "README.md"):
-        target = staging / name
-        if target.is_file() and metadata_dir is None:
-            continue
-        source = fallback_root / name
-        if name == "LICENSE" and not source.is_file():
-            source = fallback_root / "LICENSES/LFM-Open-License-v1.0.txt"
-        if not source.is_file():
-            raise ValueError(f"missing release metadata: {source}")
-        if source.resolve() != target.resolve():
-            shutil.copy2(source, target)
-    return publish.upload_to_hub(repo, staging, tag, allow_patterns=patterns,
-                                 delete_patterns=["macos27/**"], token=token)
+    return publish.upload_release(repo, staging, KIND, tag, license_file="LICENSES/LFM-Open-License-v1.0.txt",
+                                  architectures=architectures, metadata_dir=metadata_dir, token=token)
 
 
 def main(argv: list[str] | None = None) -> int:

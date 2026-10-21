@@ -7,6 +7,7 @@ Run models on Apple's Neural Engine through Core AI. Critical inference always r
 | Model | Task | Notes |
 | --- | --- | --- |
 | [LiquidAI/d1-3B](https://huggingface.co/LiquidAI/d1-3B) (`d1-3b`) | Decisions over text and images | [docs/models/d1.md](docs/models/d1.md) |
+| [vllm-sr/d3-nano](https://huggingface.co/vllm-sr/d3-nano) (`d3-nano`), [vllm-sr/d3-mini](https://huggingface.co/vllm-sr/d3-mini) (`d3-mini`) | Decisions over text and images, one question per pass | [docs/models/d3.md](docs/models/d3.md) |
 
 Requires Apple Silicon (M4 or newer), macOS 27, and Python 3.12 or 3.13. Earlier generations (M1–M3) are not supported due to Neural Engine hardware and offline compiler constraints.
 
@@ -31,7 +32,7 @@ with tinkerbox_ane.load("d1-3b") as model:
 
 `tinkerbox_ane.load(model_id)` loads any model in the catalog and returns the API for its task. It downloads the Core AI bundle for this Mac to `~/Library/Caches/tinkerbox-ane/models/<model>/<revision>/`; pass a directory as the second argument to select a local AOT-compiled bundle. Each model package also has its own `load()`, such as `tinkerbox_ane.d1.load()`.
 
-Decision models expose the System One API: `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries, plus `count_tokens`. Several questions about one input share its computation. Inputs, limits, and execution details are in each model's notes.
+Decision models expose the System One API: `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries, plus `count_tokens`. Models with parallel decisions (`question_trees` in the catalog, such as d1-3B) answer several questions about one input in a shared pass; the others answer them one after another and warn when a call asks more than one. Inputs, limits, and execution details are in each model's notes.
 
 ## Tinkerbox app
 

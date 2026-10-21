@@ -40,7 +40,7 @@ packages = ["src/tinkerbox_ane"]
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "hatch_build.py" },
-    { file = "src/tinkerbox_ane/host.swift" },
+    { file = "src/tinkerbox_ane/*.swift" },
     { file = "src/tinkerbox_ane/cow-staging.m" },
 ]
 

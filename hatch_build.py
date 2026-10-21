@@ -24,7 +24,7 @@ class CustomBuildHook(BuildHookInterface):
             ], check=True)
             subprocess.run([
                 "xcrun", "--sdk", "macosx", "swiftc", "-O", "-parse-as-library",
-                "-target", "arm64-apple-macos27.0", str(package / "host.swift"),
+                "-target", "arm64-apple-macos27.0", *map(str, sorted(package.glob("*.swift"))),
                 str(staging), "-o", str(host),
             ], check=True)
             host.replace(binary)

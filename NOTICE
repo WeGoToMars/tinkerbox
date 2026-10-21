@@ -11,3 +11,16 @@ are exported as FP16 Core AI assets for the Apple Neural Engine. Tokenization,
 image preprocessing, token-embedding lookup, the FP32 multimodal projector,
 and option readout run on the host CPU. The model has not been retrained.
 This project is not affiliated with or endorsed by Liquid AI.
+
+Independent Core AI conversions of vllm-sr/d3-nano and vllm-sr/d3-mini,
+fine-tuned from Qwen/Qwen3.5-2B and Qwen/Qwen3.5-4B, for text and image decisions.
+Upstream: https://huggingface.co/vllm-sr/d3-nano, https://huggingface.co/vllm-sr/d3-mini
+Revisions are pinned in src/tinkerbox_ane/d3/__init__.py and recorded in exported manifests.
+
+Their checkpoints, upstream code and converted weights are governed by the
+Apache License 2.0 (LICENSES/Apache-2.0.txt). The language backbone runs as
+FP16 Core AI stages and the vision tower as an FP16 Core AI asset on the Apple
+Neural Engine; tokenization, image preprocessing, position tables,
+token-embedding lookup and option readout run on the host CPU. The models
+have not been retrained. This project is not affiliated with or endorsed by
+vllm-sr or Qwen.

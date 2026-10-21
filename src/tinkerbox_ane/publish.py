@@ -1,8 +1,10 @@
 """Helpers for compiling multi-architecture models and publishing releases to Hugging Face Hub."""
 
 from collections.abc import Callable, Iterable
+import json
 import logging
 from pathlib import Path
+import shutil
 import time
 
 
@@ -72,3 +74,59 @@ def upload_to_hub(
     if tag is not None:
         api.create_tag(repo, tag=tag, revision=commit.oid)
     return commit.oid
+
+
+def upload_release(
+    repo: str,
+    staging: Path,
+    kind: str,
+    tag: str | None = None,
+    *,
+    license_file: str,
+    architectures: Iterable[str] | None = None,
+    metadata_dir: Path | None = None,
+    token: str | None = None,
+) -> str:
+    """Verify and publish a complete macos27 release of `kind` bundles for the selected architectures.
+
+    Release metadata (LICENSE, NOTICE, README.md) comes from `metadata_dir`, or else from staging and
+    then the repository root; `license_file` is the LICENSE source relative to that directory."""
+    from tinkerbox_ane.bundle import asset_names, read_bundle, resources
+
+    staging = Path(staging)
+    if architectures is None:
+        architectures = sorted(p.name for p in (staging / "macos27").iterdir()
+                               if p.is_dir() and not p.name.startswith("."))
+    patterns = ["LICENSE", "NOTICE", "README.md", "config.json"]
+    identities = set()
+    bundles = {}
+    for architecture in architectures:
+        directory = staging / "macos27" / architecture
+        spec = read_bundle(directory, kind)
+        names = asset_names(spec)
+        if (spec.get("architecture") != architecture
+                or any(not name.endswith(f".{architecture}.aimodelc") for name in names)):
+            raise ValueError(f"{directory}: bundle does not target {architecture}")
+        identities.add(tuple(entry[identity] for entry, name, identity in resources(spec) if name == "asset"))
+        bundles[architecture] = f"macos27/{architecture}/model.json"
+        patterns.append(f"macos27/{architecture}/model.json")
+        patterns.extend(f"macos27/{architecture}/{name}/**" for name in names)
+    if len(identities) != 1:
+        raise ValueError("release requires bundles with the same source identity")
+    hashes = next(iter(identities))
+    # One shared release index is also the Hub's default download-counting file.
+    index = {"version": 2, "source_hash": hashes[0]} if len(hashes) == 1 else {"version": 2, "source_hashes": list(hashes)}
+    (staging / "config.json").write_text(json.dumps(index | {"bundles": bundles}, indent=2) + "\n")
+    fallback_root = Path(metadata_dir) if metadata_dir is not None else Path(".")
+    for name in ("LICENSE", "NOTICE", "README.md"):
+        target = staging / name
+        if target.is_file() and metadata_dir is None:
+            continue
+        source = fallback_root / name
+        if name == "LICENSE" and not source.is_file():
+            source = fallback_root / license_file
+        if not source.is_file():
+            raise ValueError(f"missing release metadata: {source}")
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+    return upload_to_hub(repo, staging, tag, allow_patterns=patterns, delete_patterns=["macos27/**"], token=token)

@@ -125,12 +125,13 @@ struct ModelSetting: Decodable, Identifiable, Sendable {
     let help: String
     let min: Int
     let max: Int
+    let step: Int?
     let defaultValue: Int
 
     var id: String { key }
 
     enum CodingKeys: String, CodingKey {
-        case key, title, help, min, max, defaultValue = "default"
+        case key, title, help, min, max, step, defaultValue = "default"
     }
 }
 

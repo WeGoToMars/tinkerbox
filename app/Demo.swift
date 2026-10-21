@@ -543,7 +543,7 @@ struct ModelInspector: View {
                         demo.settingValues[setting.key] = $0 == setting.defaultValue ? nil : $0
                     }
                     VStack(alignment: .leading, spacing: 6) {
-                        Stepper(value: value, in: setting.min...setting.max) {
+                        Stepper(value: value, in: setting.min...setting.max, step: setting.step ?? 1) {
                             LabeledContent(setting.title, value: "\(value.wrappedValue)")
                         }
                         Text(setting.help).font(.caption).foregroundStyle(.secondary)
@@ -661,7 +661,10 @@ struct DecisionView: View {
                             .help("Parallel answers every question in one shared pass over the input; "
                                   + "sequential gives each question its own pass.")
                         } else {
-                            Text("One pass per question").font(.caption).foregroundStyle(.secondary)
+                            Label("No parallel decisions", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption).foregroundStyle(.orange)
+                                .help("\(demo.current?.name ?? "This model") answers one question per pass, so these "
+                                      + "questions run one after another and each reads the whole input again.")
                         }
                     }
                     if demo.busy { ProgressView().controlSize(.small) }

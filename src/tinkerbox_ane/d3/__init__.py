@@ -1,0 +1,51 @@
+"""vllm-sr d3 decision models (Qwen3.5) on the Apple Neural Engine."""
+
+from pathlib import Path
+
+KIND = "qwen3.5-vl"
+# Catalog model: checkpoint repository, pinned revision and attention capacities.
+VARIANTS = {
+    "d3-nano": ("vllm-sr/d3-nano", "462efc366229ea268cf4eed3738b3fc4415e4817",
+                (256, 512, 1024, 2048, 4096, 8192, 16384, 24576, 32768)),
+    "d3-mini": ("vllm-sr/d3-mini", "bd0090dd758d32ba59ef5c749910a8e87fc4391f",
+                (256, 512, 1024, 2048, 4096)),
+}
+# Loading imports the checkpoint's Python code, so only these sources are trusted.
+REVISIONS = {repo: revision for repo, revision, _ in VARIANTS.values()}
+RESIDUAL_SCALE = 64.0  # Keep ANE residual products above the subnormal threshold.
+CHUNK = 128
+INPUT, OUTPUT = "hidden_in", "hidden_out"
+# Vision tower patch capacities; an image runs at the smallest that holds its patches.
+PATCH_TIERS = (1024, 2048, 4096, 6400)
+# The official processor's 1.6 MP budget: 1,600 tokens of 32 × 32 pixels.
+MAX_IMAGE_TOKENS = PATCH_TIERS[-1] // 4
+
+# Settings the app shows and sends with each request; each key is a writable attribute of the model.
+SETTINGS = [
+    {"key": "max_image_tokens", "title": "Image tokens", "type": "int", "min": 64, "max": MAX_IMAGE_TOKENS,
+     "step": 64, "default": MAX_IMAGE_TOKENS,
+     "help": "Most tokens per image. Pictures keep their shape and are resized to multiples of 32 pixels, "
+             "one token per 32 × 32 block, within this budget; 1,600 is the official 1.6-megapixel limit."},
+]
+# Fixed properties the app shows beside the settings.
+INFO = [
+    {"label": "Image input", "value": "Aspect-preserving, up to 1.6 MP"},
+    {"label": "Questions", "value": "One pass each, in order"},
+    {"label": "Chunk width", "value": f"{CHUNK} tokens"},
+]
+
+
+def checkpoint(repo: str, revision: str) -> Path:
+    from huggingface_hub import snapshot_download
+
+    if REVISIONS.get(repo) != revision:
+        raise ValueError(f"{repo}@{revision} is not a supported d3 checkpoint")
+    return Path(snapshot_download(repo, revision=revision))
+
+
+def load(asset=None, model: str = "d3-nano"):
+    """Load the synchronous System One API; use as a context manager."""
+    from tinkerbox_ane.d3.runtime import load as load_model
+    from tinkerbox_ane.models import download
+
+    return load_model(download(model) if asset is None else Path(asset))

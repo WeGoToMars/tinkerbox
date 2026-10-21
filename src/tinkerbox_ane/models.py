@@ -39,4 +39,4 @@ def install(model: str, bundle: Path) -> Path:
 
 def load(model: str, asset=None):
     """Load a model's System One API from a local bundle, or download it; use as a context manager."""
-    return importlib.import_module(entry(model)["module"]).load(asset)
+    return importlib.import_module(entry(model)["module"]).load(download(model) if asset is None else asset)

@@ -57,7 +57,7 @@ def download_bundle(model: str, repo: str, revision: str, progress=None) -> Path
 def install_bundle(model: str, revision: str, source: Path, kind: str) -> Path:
     """Copy a locally compiled bundle into the cache where download_bundle() expects that revision."""
     spec = read_bundle(source, kind)
-    if Path(spec["asset"]).suffix != ".aimodelc" or not spec.get("architecture"):
+    if not compiled(spec) or not spec.get("architecture"):
         raise ValueError("install requires a compiled bundle; compile the export first")
     target = CACHE / model / revision / "macos27" / spec["architecture"]
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -65,10 +65,9 @@ def install_bundle(model: str, revision: str, source: Path, kind: str) -> Path:
     with tempfile.TemporaryDirectory(prefix=".install-", dir=CACHE / model) as temporary:
         staged = Path(temporary) / "bundle"
         staged.mkdir()
-        for name in (spec["asset"], spec.get("vision_asset"), "model.json"):
-            if name:
-                copy = shutil.copytree if (Path(source) / name).is_dir() else shutil.copyfile
-                copy(Path(source) / name, staged / name)
+        for name in [*asset_names(spec), "model.json"]:
+            copy = shutil.copytree if (Path(source) / name).is_dir() else shutil.copyfile
+            copy(Path(source) / name, staged / name)
         if target.exists():
             shutil.rmtree(target)
         staged.rename(target)
@@ -81,6 +80,24 @@ def check_asset_name(name: str) -> None:
         raise ValueError(f"unsafe or unsupported asset path: {name!r}")
 
 
+def resources(spec: dict) -> list[tuple[dict, str, str]]:
+    """Each Core AI asset as (manifest entry, name key, identity key): the text asset, or one per
+    stage, then the vision tower."""
+    found = [(spec, "asset", "source_hash")] if "asset" in spec else []
+    found += [(stage, "asset", "source_hash") for stage in spec.get("assets", [])]
+    if "vision_asset" in spec:
+        found.append((spec, "vision_asset", "vision_source_hash"))
+    return found
+
+
+def asset_names(spec: dict) -> list[str]:
+    return [entry[name] for entry, name, _ in resources(spec)]
+
+
+def compiled(spec: dict) -> bool:
+    return all(Path(name).suffix == ".aimodelc" for name in asset_names(spec))
+
+
 def read_bundle(root: Path, kind: str) -> dict:
     """The manifest after checking its kind and each asset's identity and placement.
 
@@ -89,15 +106,19 @@ def read_bundle(root: Path, kind: str) -> dict:
     spec = json.loads((root / "model.json").read_text())
     if spec.get("kind") != kind or spec.get("version") != 2:
         raise ValueError("unsupported bundle manifest; re-export and compile the model")
-    for name, identity in (("asset", "source_hash"), ("vision_asset", "vision_source_hash")):
-        if name not in spec:
-            continue
-        check_asset_name(spec[name])
-        expected = spec[identity]
-        if not re.fullmatch(r"[0-9a-f]{64}", expected) or source_hash(root / spec[name]) != expected:
+    if not resources(spec) or ("asset" in spec) == ("assets" in spec):
+        raise ValueError("bundle needs one text asset or a list of stage assets")
+    names = asset_names(spec)
+    if len(set(names)) != len(names):
+        raise ValueError("bundle assets must be distinct")
+    for entry, name, identity in resources(spec):
+        check_asset_name(entry[name])
+        expected = entry[identity]
+        if (not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)
+                or source_hash(root / entry[name]) != expected):
             raise ValueError(f"bundle {name} source identity mismatch")
-        if Path(spec[name]).suffix == ".aimodelc":
-            verify_aot(root / spec[name], expected)
+        if Path(entry[name]).suffix == ".aimodelc":
+            verify_aot(root / entry[name], expected)
     return spec
 
 
@@ -116,7 +137,7 @@ def compile_bundle(
     if source == out:
         raise ValueError("keep source exports and deployment bundles in separate directories")
     spec = read_bundle(source, kind)
-    if Path(spec["asset"]).suffix != ".aimodel":
+    if any(Path(name).suffix != ".aimodel" for name in asset_names(spec)):
         raise ValueError("compile requires a source .aimodel bundle")
     if architecture is None:
         architecture = device_architecture()
@@ -125,15 +146,24 @@ def compile_bundle(
         raise ValueError(f"invalid architecture: {architecture!r}")
     if not allow_unsupported:
         validate_architecture(architecture)
-    target = out / f"fused.{architecture}.aimodelc"
-    compile_asset(source / spec["asset"], target, architecture=architecture, min_deployment_version="27.0",
-                  expected_functions=(f"c{capacity}" for capacity in spec["tiers"]), force=force)
-    spec.update(asset=target.name, architecture=architecture, min_os="27.0", deployment="aot-fused")
+    if "asset" in spec:
+        target = out / f"fused.{architecture}.aimodelc"
+        compile_asset(source / spec["asset"], target, architecture=architecture, min_deployment_version="27.0",
+                      expected_functions=(f"c{capacity}" for capacity in spec["tiers"]), force=force)
+        spec.update(asset=target.name)
+    for stage in spec.get("assets", []):
+        target = out / f"{Path(stage['asset']).stem}.{architecture}.aimodelc"
+        compile_asset(source / stage["asset"], target, architecture=architecture, min_deployment_version="27.0",
+                      expected_functions=stage["functions"], timeout=3600, force=force,
+                      report=f"compile-{Path(stage['asset']).stem}")
+        stage.update(asset=target.name)
+    spec.update(architecture=architecture, min_os="27.0",
+                deployment="aot-staged" if "assets" in spec else "aot-fused")
     if "vision_asset" in spec:
         vision = out / f"vision.{architecture}.aimodelc"
         compile_asset(source / spec["vision_asset"], vision, architecture=architecture,
-                      min_deployment_version="27.0", expected_functions=("main",), force=force,
-                      report="compile-vision")
+                      min_deployment_version="27.0", expected_functions=spec.get("vision_functions", ("main",)),
+                      force=force, report="compile-vision")
         spec.update(vision_asset=vision.name)
     manifest = out / ".model.json"
     manifest.write_text(json.dumps(spec, indent=2) + "\n")

@@ -69,7 +69,7 @@ def device_architecture() -> str:
 
 
 def check_layout(spec: dict) -> None:
-    """The cache tiers, dimensions, and convolution/attention layers this host allocates state for."""
+    """The cache tiers, dimensions, and convolution/attention layers the chunked runner allocates state for."""
     width, context, tiers = spec["width"], spec["context"], spec["tiers"]
     if (width <= 0 or context <= width or context % width or not tiers
             or tiers != sorted(set(tiers)) or tiers[-1] != context
@@ -89,13 +89,14 @@ def check_layout(spec: dict) -> None:
 
 
 class Host:
-    def __init__(self, asset: str | Path, kind: str):
-        from tinkerbox_ane.bundle import read_bundle
+    def __init__(self, asset: str | Path, kind: str, check=check_layout):
+        """`check` validates the manifest fields the bundle's runner allocates state for."""
+        from tinkerbox_ane.bundle import compiled, read_bundle
 
         asset = Path(asset).resolve()
         spec = read_bundle(asset, kind)
-        check_layout(spec)
-        if Path(spec["asset"]).suffix != ".aimodelc":
+        check(spec)
+        if not compiled(spec):
             raise ValueError("load requires a compiled AOT bundle; compile the exported model first")
         current = device_architecture()
         if spec.get("architecture") and spec["architecture"] != current:
@@ -149,11 +150,12 @@ class Host:
         except BrokenPipeError as error:
             raise RuntimeError(f"the Core AI host exited (status {self._process.poll()})") from error
 
-    def vision(self, inputs: dict):
-        """Run the bundle's vision asset on named FP16 inputs, each row-major in its declared shape,
-        and return the `features` output."""
+    def vision(self, inputs: dict, function: str = "main"):
+        """Run a function of the bundle's vision asset on named FP16 inputs, each row-major in its
+        declared shape, and return the `features` output."""
         import numpy as np
-        payload = [b"V" + struct.pack("<I", len(inputs))]
+        encoded = function.encode()
+        payload = [b"V" + struct.pack("<I", len(encoded)) + encoded + struct.pack("<I", len(inputs))]
         for name, value in inputs.items():
             array = np.ascontiguousarray(value, dtype=np.float16)
             encoded = name.encode()

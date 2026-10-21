@@ -242,7 +242,7 @@ struct ScoreTextIntent: AppIntent {
 struct AskQuestionsIntent: AppIntent {
     static let title: LocalizedStringResource = "Ask Several Questions"
     static let description = IntentDescription(
-        "Ask several yes/no questions about the same text, images, or both, using the model selected in Tinkerbox. The model reads the input once and answers every question in one pass, so extra questions cost little. Returns one Yes/No Decision per question, in order. Each answer is independent, so several can be Yes: use it to tag an input with every label that applies."
+        "Ask several yes/no questions about the same text, images, or both, using the model selected in Tinkerbox. Models with parallel decisions, such as d1-3B, read the input once and answer every question in one pass, so extra questions cost little; others, such as d3, answer them one after another. Returns one Yes/No Decision per question, in order. Each answer is independent, so several can be Yes: use it to tag an input with every label that applies."
     )
     static var supportedModes: IntentModes { .background }
 
@@ -274,7 +274,7 @@ struct AskQuestionsIntent: AppIntent {
 struct FilterListIntent: AppIntent {
     static let title: LocalizedStringResource = "Filter List by Question"
     static let description = IntentDescription(
-        "Keep the items of a list for which the model selected in Tinkerbox answers Yes, in their original order. All items are evaluated together in one batch; blank items are dropped."
+        "Keep the items of a list for which the model selected in Tinkerbox answers Yes, in their original order. All items are sent together in one batch, which models without parallel decisions answer one after another; blank items are dropped."
     )
     static var supportedModes: IntentModes { .background }
 
@@ -298,7 +298,7 @@ struct FilterListIntent: AppIntent {
 struct SortListIntent: AppIntent {
     static let title: LocalizedStringResource = "Sort List by Score"
     static let description = IntentDescription(
-        "Score every item of a list across 2–10 ordered levels with the model selected in Tinkerbox, and sort by the expected score. Each ranked item reads as its original text and has Score, Maximum Score, and Most Likely Level properties. All items are evaluated together in one batch; blank items are dropped."
+        "Score every item of a list across 2–10 ordered levels with the model selected in Tinkerbox, and sort by the expected score. Each ranked item reads as its original text and has Score, Maximum Score, and Most Likely Level properties. All items are sent together in one batch, which models without parallel decisions answer one after another; blank items are dropped."
     )
     static var supportedModes: IntentModes { .background }
 

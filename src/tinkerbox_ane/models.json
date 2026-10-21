@@ -18,6 +18,42 @@
       "download_bytes": 5769760711,
       "license": "LFM Open License v1.0",
       "min_version": "2.0.2"
+    },
+    {
+      "id": "d3-nano",
+      "name": "d3-nano",
+      "publisher": "vllm-sr",
+      "summary": "Typed yes/no, choice and score decisions over text and images; one pass per question.",
+      "task": "decision",
+      "base_model": "Qwen/Qwen3.5-2B",
+      "original_model": "vllm-sr/d3-nano",
+      "module": "tinkerbox_ane.d3",
+      "repo": "wegotomars/d3-nano-CoreAI-ANE",
+      "revision": "v2.1.0",
+      "inputs": ["text", "image"],
+      "question_trees": false,
+      "context": 32768,
+      "download_bytes": 0,
+      "license": "Apache-2.0",
+      "min_version": "2.1.0"
+    },
+    {
+      "id": "d3-mini",
+      "name": "d3-mini",
+      "publisher": "vllm-sr",
+      "summary": "Typed yes/no, choice and score decisions over text and images; one pass per question.",
+      "task": "decision",
+      "base_model": "Qwen/Qwen3.5-4B",
+      "original_model": "vllm-sr/d3-mini",
+      "module": "tinkerbox_ane.d3",
+      "repo": "wegotomars/d3-mini-CoreAI-ANE",
+      "revision": "v2.1.0",
+      "inputs": ["text", "image"],
+      "question_trees": false,
+      "context": 4096,
+      "download_bytes": 0,
+      "license": "Apache-2.0",
+      "min_version": "2.1.0"
     }
   ]
 }
