@@ -67,6 +67,28 @@ def decision_set(path):
              "question": item["question"], "images": []} for item in json.loads(Path(path).read_text())["items"]]
 
 
+def float32_by_layer(backbone):
+    """Run a BF16 backbone in FP32 while keeping each decoder layer's weights in BF16 between its calls.
+
+    Every BF16 value is exact in FP32, so this computes what a fully FP32 model computes, but holds one
+    FP32 layer at a time: d3-mini's reference fits in 24 GB."""
+    import torch
+
+    for name, parameter in backbone.named_parameters():
+        if not name.startswith("language_model.layers."):
+            parameter.data = parameter.data.float()
+
+    def cast(dtype):
+        def hook(layer, *_):
+            for parameter in layer.parameters():
+                parameter.data = parameter.data.to(dtype)
+        return hook
+
+    for layer in backbone.language_model.layers:
+        layer.register_forward_pre_hook(cast(torch.float32))
+        layer.register_forward_hook(cast(torch.bfloat16))
+
+
 def build_reference(model, out, questions=None, dtype="float32"):
     import torch
 
@@ -77,7 +99,10 @@ def build_reference(model, out, questions=None, dtype="float32"):
     official = rt.D3.from_pretrained(str(path), device="cpu", permutation_average=False, max_length=tiers[-1])
     official.fast = None
     # The official runtime defaults to BF16; validation uses FP32 CPU, and BF16 shows the upstream drift.
-    official.backbone.to(getattr(torch, dtype))
+    if any(p.dtype != torch.bfloat16 for p in official.backbone.parameters()):
+        raise ValueError("expected a BF16 checkpoint")
+    if dtype == "float32":
+        float32_by_layer(official.backbone)
     planned = decision_set(questions) if questions else [
         {"state": state, "question": question, "images": images} for state, question, images in cases()]
     items = []
