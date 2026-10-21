@@ -12,7 +12,7 @@ from safetensors import safe_open
 from transformers import AutoConfig, AutoModel, AutoProcessor
 from transformers.models.lfm2_vl.modeling_lfm2_vl import Lfm2VlMultiModalProjector
 
-from tinkerbox_ane.coreai import source_hash
+from tinkerbox_ane.coreai import count_flops, source_hash
 from tinkerbox_ane.d1 import RESIDUAL_SCALE
 
 MAX_PATCHES = 1024
@@ -79,8 +79,8 @@ def load_projector(checkpoint_dir: Path) -> Lfm2VlMultiModalProjector:
     return proj.eval().float()
 
 
-def export_vision_asset(tower: VisionTower, out_path: Path) -> str:
-    """Export VisionTower to a Core AI .aimodel asset."""
+def export_vision_asset(tower: VisionTower, out_path: Path) -> tuple[str, dict[str, int]]:
+    """Export VisionTower to a Core AI .aimodel asset; return its source hash and its function's FLOPs."""
     from coreai_torch import TorchConverter, get_decomp_table
 
     out_path = Path(out_path)
@@ -88,6 +88,7 @@ def export_vision_asset(tower: VisionTower, out_path: Path) -> str:
     pe = torch.zeros(1, MAX_PATCHES, VISION_HIDDEN, dtype=torch.float16)
     mask = torch.zeros(1, 1, 1, MAX_PATCHES, dtype=torch.float16)
 
+    flops = {"main": count_flops(tower, (pv, pe, mask))}
     with torch.no_grad():
         ep = torch.export.export(tower, (pv, pe, mask)).run_decompositions(get_decomp_table())
         converter = TorchConverter()
@@ -97,7 +98,7 @@ def export_vision_asset(tower: VisionTower, out_path: Path) -> str:
         )
         coreai_model = converter.to_coreai()
     coreai_model.save_asset(out_path)
-    return source_hash(out_path)
+    return source_hash(out_path), flops
 
 
 class VisionPipeline:

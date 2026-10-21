@@ -48,6 +48,12 @@ def check_layout(spec: dict) -> None:
             or type(spec.get("rotary_dim")) is not int or not 0 < spec["rotary_dim"] <= spec["head_dim"]
             or spec["rotary_dim"] % 2):
         raise ValueError("invalid Qwen3.5 stages or attention configuration")
+    counted = [(asset.get("flops"), asset["functions"]) for asset in spec["assets"]]
+    if "vision_asset" in spec:
+        counted.append((spec.get("vision_flops"), spec["vision_functions"]))
+    if any(not isinstance(flops, dict) or list(flops) != functions
+           or any(type(n) is not int or n <= 0 for n in flops.values()) for flops, functions in counted):
+        raise ValueError("bundle lacks FLOP counts for its functions; re-export the model")
 
 
 def d3_code(checkpoint: Path) -> tuple[types.ModuleType, types.ModuleType]:
@@ -125,6 +131,8 @@ def load(asset: Path):
             self._max_image_tokens = MAX_IMAGE_TOKENS
             self._rope_custom = False
             self._host = Host(asset, KIND, check_layout)
+            self._flops = {name: count for entry in spec["assets"] for name, count in entry["flops"].items()}
+            self._flops.update(spec.get("vision_flops", {}))
             self.context, self.chunk_width = self._host.context, self._host.width
             try:
                 self._set_rope(torch.arange(self.context).expand(3, -1))
@@ -217,7 +225,8 @@ def load(asset: Path):
             return [weight / sum(weights) for weight in weights]
 
         def _run(self, requests):
-            """Each request's (normalized questions, probabilities, input tokens), one pass per question."""
+            """Each request's (normalized questions, probabilities, input tokens, Neural Engine time and
+            FLOPs), one pass per question."""
             with self._lock:
                 if self._closed:
                     raise RuntimeError("the model is closed")
@@ -229,13 +238,17 @@ def load(asset: Path):
                                   "sequentially, each reading its whole prompt", SequentialQuestionsWarning,
                                   stacklevel=3)
                 done = []
+                self._host.metrics()  # Start each request's Neural Engine count from zero.
                 for rows, _, media in plans:
                     features = None
                     if media is not None:
                         features = self._vision.encode(media["pixel_values"], media["image_grid_thw"])
-                    done.append(([question for _, question in rows],
-                                 [self._probabilities(ids, question, media, features) for ids, question in rows],
-                                 sum(len(ids) for ids, _ in rows)))
+                    probabilities = [self._probabilities(ids, question, media, features) for ids, question in rows]
+                    engine = self._host.metrics()
+                    compute = {"neural_engine_ms": 1000 * engine["seconds"],
+                               "flops": sum(self._flops[name] * calls for name, calls in engine["calls"].items())}
+                    done.append(([question for _, question in rows], probabilities,
+                                 sum(len(ids) for ids, _ in rows), compute))
                 return done
 
         def probabilities(self, state, questions, images=None) -> list[list[float]]:
@@ -245,10 +258,11 @@ def load(asset: Path):
         def probabilities_batch(self, requests) -> list[list[list[float]]]:
             """probabilities for many (state, questions[, images]) requests."""
             requests = [(r[0], list(r[1]), r[2] if len(r) > 2 else None) for r in requests]
-            return [probabilities for _, probabilities, _ in self._run(requests)]
+            return [probabilities for _, probabilities, _, _ in self._run(requests)]
 
         def system_one(self, state, questions, images=None) -> dict:
-            """Named questions about one state and its pictures: `{"answers", "usage"}`."""
+            """Named questions about one state and its pictures: `{"answers", "usage"}`. `usage` adds the
+            request's Neural Engine time and the FLOPs of the functions it ran, counted at export."""
             return self.system_one_batch([(state, questions, images)])[0]
 
         def system_one_batch(self, requests) -> list[dict]:
@@ -257,8 +271,8 @@ def load(asset: Path):
             done = self._run([(state, list(named.values()), images) for state, named, images in requests])
             return [{"answers": {name: rt.product_answer(question, probabilities)
                                  for name, question, probabilities in zip(named, questions, probs)},
-                     "usage": {"input_tokens": read, "output_tokens": 0}}
-                    for (_, named, _), (questions, probs, read) in zip(requests, done)]
+                     "usage": {"input_tokens": read, "output_tokens": 0, **compute}}
+                    for (_, named, _), (questions, probs, read, compute) in zip(requests, done)]
 
         def count_tokens(self, state, questions, images=None) -> dict:
             """Input tokens and vision passes `system_one` would use, without running the model, and how

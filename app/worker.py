@@ -72,7 +72,10 @@ def decide(model, entry, request):
     results = model.system_one_batch(batch)
     elapsed = (time.perf_counter() - started) * 1000
     return {"results": [{"answers": [labeled(result["answers"][name]) for name in questions],
-                         "tokens": result["usage"]["input_tokens"]} for result in results],
+                         "tokens": result["usage"]["input_tokens"],
+                         # Models that count their compute report Neural Engine time and FLOPs.
+                         "flops": result["usage"].get("flops"),
+                         "neuralEngineMs": result["usage"].get("neural_engine_ms")} for result in results],
             "elapsedMs": elapsed}
 
 

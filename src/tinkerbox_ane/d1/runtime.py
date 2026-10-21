@@ -11,6 +11,7 @@ import torch
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
+from tinkerbox_ane.bundle import read_bundle
 from tinkerbox_ane.d1 import CHUNK, KIND, MAX_IMAGE_TILES, RESIDUAL_SCALE, checkpoint
 from tinkerbox_ane.d1.vision import IMAGE_TOKEN_ID, VisionPipeline, as_rgb
 from tinkerbox_ane.host import Host
@@ -68,6 +69,8 @@ def load(asset):
             self._render_args = (self._tokenizer.bos_token or "", prompt.default_lead(config["model_type"]),
                                  prompt.DEFAULT_STATE_STYLE, prompt.DEFAULT_SYSTEM, "desc")
             self._host = Host(asset, KIND)
+            spec = read_bundle(asset, KIND)
+            self._flops = {**spec["flops"], **spec.get("vision_flops", {})}
             self.context, self.chunk_width = self._host.context, self._host.width
             try:
                 cfg = config["text_config"]
@@ -170,7 +173,18 @@ def load(asset):
             list(groups(trunk, branches, self.context))  # raises when a group exceeds the context
             return trunk, branches, questions, pics, tiles
 
+        def _compute(self):
+            """Neural Engine time and counted FLOPs since the previous call."""
+            return self._split(self._host.metrics(), 1)
+
+        def _split(self, engine, share):
+            """`share` of the Neural Engine time and FLOPs in a host metrics reading."""
+            return {"neural_engine_ms": 1000 * engine["seconds"] * share,
+                    "flops": round(share * sum(self._flops[name] * calls for name, calls in engine["calls"].items()))}
+
         def _run_trees(self, requests):
+            """Each request's (probabilities, input tokens, Neural Engine time and FLOPs). Requests packed
+            into one pass split its compute by their tokens."""
             prepared, singles = [], []
             # Validate every request before starting any native inference.
             for index, request in enumerate(requests):
@@ -181,29 +195,33 @@ def load(asset):
                 else:
                     prepared.append((ids, branches, questions, len(ids) + sum(map(len, branches)), pics))
             done = [None] * len(prepared)
+            self._host.metrics()  # Start each request's Neural Engine count from zero.
             if singles:
                 # Pack independent single-question requests too, as the Torch API does.
                 # Plan conservatively by full row length before sharing a common prefix.
                 for indices in groups([], [r for _, r, _ in singles], self.context):
                     if len(indices) == 1:
                         index, ids, question = singles[indices[0]]
-                        done[index] = ([self._probabilities(ids, question)], len(ids))
+                        done[index] = ([self._probabilities(ids, question)], len(ids), self._compute())
                         continue
                     trunk, branches = shared_prefix([singles[i][1] for i in indices])
                     probabilities = self._tree_probabilities(trunk, branches, [singles[i][2] for i in indices])
+                    engine = self._host.metrics()
+                    tokens = sum(len(singles[i][1]) for i in indices)
                     for i, probs in zip(indices, probabilities):
                         index, ids, _ = singles[i]
-                        done[index] = ([probs], len(ids))
+                        done[index] = ([probs], len(ids), self._split(engine, len(ids) / tokens))
             for index, item in enumerate(prepared):
                 if item is not None:
                     trunk, branches, questions, usage, pics = item
                     feats = [self._vision.encode_image(im) for im in pics] if pics and questions else None
                     if not questions:
-                        done[index] = ([], 0)
+                        probabilities = []
                     elif not branches:
-                        done[index] = ([self._probabilities(trunk, questions[0], image_features=feats)], usage)
+                        probabilities = [self._probabilities(trunk, questions[0], image_features=feats)]
                     else:
-                        done[index] = (self._tree_probabilities(trunk, branches, questions, image_features=feats), usage)
+                        probabilities = self._tree_probabilities(trunk, branches, questions, image_features=feats)
+                    done[index] = (probabilities, usage if questions else 0, self._compute())
             return done
 
         def count_tokens(self, state, questions, images=None) -> dict:
@@ -216,11 +234,24 @@ def load(asset):
                 return {"input_tokens": len(ids) + sum(map(len, branches)), "image_tiles": tiles,
                         "images": [self._get_vision().layout(pic) for pic in pics]}
 
-        def run(self, requests):
+        def _run(self, requests):
             with self._lock:
                 if self._closed:
                     raise RuntimeError("the model is closed")
                 return self._run_trees(requests)
+
+        def run(self, requests):
+            return [(probabilities, read) for probabilities, read, _ in self._run(requests)]
+
+        def system_one_batch(self, requests) -> list[dict]:
+            """Many `(state, questions[, images])` requests, as upstream. `usage` adds each request's
+            Neural Engine time and the FLOPs of the functions it ran, counted at export."""
+            named = [(r[0], {n: prompt.as_question(q) for n, q in r[1].items()}, (r[2] if len(r) > 2 else None) or ())
+                     for r in requests]
+            done = self._run([(state, list(qs.values()), images) for state, qs, images in named])
+            return [{"answers": {n: api.answer(q, p) for (n, q), p in zip(qs.items(), probs)},
+                     "usage": {"input_tokens": read, "output_tokens": 0, **compute}}
+                    for (_, qs, _), (probs, read, compute) in zip(named, done)]
 
         def close(self):
             with self._lock:

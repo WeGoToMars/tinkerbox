@@ -227,7 +227,7 @@ final class ChunkedRunner: Runner {
       }
       var args = inputs
       args["packed_state"] = packed!
-      var out = try await function!.run(inputs: args)
+      var out = try await timed("c\(tier + width)", function!, args)
       args.removeAll(keepingCapacity: false)
       guard let hidden = out.remove(output)?.ndArray,
         let state = out.remove("packed_state_out")?.ndArray

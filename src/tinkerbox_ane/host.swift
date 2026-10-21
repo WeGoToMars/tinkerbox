@@ -67,6 +67,21 @@ func halves(_ bytes: [UInt8]) -> [Float16] {
   bytes.withUnsafeBytes { Array($0.bindMemory(to: Float16.self)) }
 }
 
+// Neural Engine time and calls per function since the last metrics request.
+nonisolated(unsafe) var engineSeconds = 0.0
+nonisolated(unsafe) var engineCalls: [String: Int] = [:]
+
+func timed(_ name: String, _ function: InferenceFunction, _ inputs: [String: NDArray]) async throws
+  -> InferenceFunction.Outputs
+{
+  let started = ContinuousClock.now
+  let result = try await function.run(inputs: inputs)
+  let elapsed = ContinuousClock.now - started
+  engineSeconds += Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+  engineCalls[name, default: 0] += 1
+  return result
+}
+
 func sendJSON(_ object: [String: Any]) {
   let data = try! JSONSerialization.data(withJSONObject: object)
   writeAll(le32(data.count) + [UInt8](data))
@@ -194,7 +209,7 @@ final class Vision {
     guard Set(values.keys) == Set(arrays.keys) else {
       throw HostError("vision inputs differ from the previous call")
     }
-    var out = try await function.run(inputs: arrays)
+    var out = try await timed(name, function, arrays)
     guard let features = out.remove("features")?.ndArray else {
       throw HostError("missing vision features output")
     }
@@ -303,6 +318,9 @@ func forEachOffset(_ shape: [Int], _ strides: [Int], _ body: (Int, Int) -> Void)
           features.withUnsafeBytes { reply += $0 }
           writeAll(reply)
         } catch { sendError("\(error)") }
+      case UInt8(ascii: "M"):
+        sendJSON(["seconds": engineSeconds, "calls": engineCalls])
+        (engineSeconds, engineCalls) = (0, [:])
       case UInt8(ascii: "Q"):
         exit(0)
       default:

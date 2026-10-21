@@ -10,7 +10,7 @@ import time
 import torch
 from coreai_torch import TorchConverter, get_decomp_table
 
-from tinkerbox_ane.coreai import source_hash
+from tinkerbox_ane.coreai import count_flops, source_hash
 from tinkerbox_ane.d1 import CHUNK, CONTEXT, INPUT, KIND, OUTPUT, REPO, REVISION, SOURCE, TIERS, checkpoint
 from tinkerbox_ane.d1.model import FusedBackbone, load_weights
 from tinkerbox_ane.d1.vision import export_vision_asset, load_vision_tower
@@ -22,7 +22,7 @@ def export_vision(out: Path = SOURCE) -> Path:
     started = time.monotonic()
     tower = load_vision_tower(checkpoint())
     vision_asset = out / "vision.aimodel"
-    vhash = export_vision_asset(tower, vision_asset)
+    vhash, vflops = export_vision_asset(tower, vision_asset)
     manifest_path = out / "model.json"
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text())
@@ -32,6 +32,7 @@ def export_vision(out: Path = SOURCE) -> Path:
         vision_asset=vision_asset.name,
         vision_source_hash=vhash,
         vision_parameter_bytes=sum(p.numel() * p.element_size() for p in tower.parameters()),
+        vision_flops=vflops,
     )
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"exported vision tower ({time.monotonic() - started:.1f}s): {out}", flush=True)
@@ -47,10 +48,13 @@ def export(out: Path = SOURCE, include_vision: bool = True) -> Path:
     backbone = load_weights(checkpoint())
     cfg = backbone.cfg
     converter = TorchConverter()
+    # Matmul, convolution and attention FLOPs of each function, for the runtime's compute rate.
+    flops = {}
     # Reuse the same Parameter objects so each tier shares one weight resource.
     with torch.no_grad():
         for capacity in TIERS:
             model = FusedBackbone(backbone, capacity).eval()
+            flops[f"c{capacity}"] = count_flops(model, model.example_inputs())
             program = torch.export.export(model, model.example_inputs()).run_decompositions(get_decomp_table())
             converter.add_exported_program(
                 program, input_names=[INPUT, "cos", "sin", "past_mask", "packed_state", "chunk_mask", "conv_route"],
@@ -66,16 +70,17 @@ def export(out: Path = SOURCE, include_vision: bool = True) -> Path:
         "conv_layers": model.conv_layers, "attention_layers": model.attention_layers,
         "asset": asset.name, "source_hash": source_hash(asset),
         "parameter_bytes": sum(p.numel() * p.element_size() for p in backbone.parameters()),
-        "source": {"repo": REPO, "revision": REVISION},
+        "flops": flops, "source": {"repo": REPO, "revision": REVISION},
     }
     if include_vision:
         tower = load_vision_tower(checkpoint())
         vision_asset = out / "vision.aimodel"
-        vhash = export_vision_asset(tower, vision_asset)
+        vhash, vflops = export_vision_asset(tower, vision_asset)
         manifest.update(
             vision_asset=vision_asset.name,
             vision_source_hash=vhash,
             vision_parameter_bytes=sum(p.numel() * p.element_size() for p in tower.parameters()),
+            vision_flops=vflops,
         )
     (out / "model.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"exported fused backbone ({time.monotonic() - started:.1f}s): {out}", flush=True)

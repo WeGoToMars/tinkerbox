@@ -14,7 +14,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5VisionRotaryEmbedding,
 )
 
-from tinkerbox_ane.coreai import source_hash
+from tinkerbox_ane.coreai import count_flops, source_hash
 from tinkerbox_ane.d3 import PATCH_TIERS, RESIDUAL_SCALE
 from tinkerbox_ane.d3.model import MASK_MIN, CheckpointReader
 
@@ -157,10 +157,12 @@ def export_vision_asset(checkpoint_dir: Path, out_path: Path) -> dict:
     half = config.hidden_size // config.num_heads // 2
     zeros = lambda *shape: torch.zeros(shape, dtype=torch.float16)
     converter = TorchConverter()
+    flops = {}
     with torch.no_grad():
         for patches in PATCH_TIERS:
             inputs = (zeros(1, tower.patch_proj.in_channels, 1, patches), zeros(1, config.hidden_size, 1, patches),
                       zeros(1, 1, half, patches), zeros(1, 1, half, patches), zeros(1, 1, 1, patches))
+            flops[f"p{patches}"] = count_flops(tower, inputs)
             program = torch.export.export(tower, inputs).run_decompositions(get_decomp_table())
             converter.add_exported_program(
                 program, input_names=["pixel_values", "pos_embeds", "cos", "sin", "attn_mask"],
@@ -169,6 +171,7 @@ def export_vision_asset(checkpoint_dir: Path, out_path: Path) -> dict:
     converter.to_coreai().save_asset(out_path)
     return {"vision_asset": out_path.name, "vision_source_hash": source_hash(out_path),
             "vision_functions": [f"p{patches}" for patches in PATCH_TIERS],
+            "vision_flops": flops,
             "vision_parameter_bytes": sum(p.numel() * p.element_size() for p in tower.parameters())}
 
 

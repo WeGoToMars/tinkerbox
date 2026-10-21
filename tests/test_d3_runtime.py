@@ -42,17 +42,22 @@ def test_public_decisions_batches_and_request_reset(model):
     assert tone["legend"] == {"0": "Unfriendly", "1": "Neutral", "2": "Friendly"}
     assert sum(tone["probabilities"].values()) == pytest.approx(1)
     # Each question reads its whole prompt.
-    assert result["usage"] == {
-        "input_tokens": sum(len(model.tokens(state, q)) for q in questions.values()), "output_tokens": 0}
-    assert model.count_tokens(state, questions)["input_tokens"] == result["usage"]["input_tokens"]
+    usage = result["usage"]
+    assert usage["input_tokens"] == sum(len(model.tokens(state, q)) for q in questions.values())
+    assert usage["output_tokens"] == 0
+    assert model.count_tokens(state, questions)["input_tokens"] == usage["input_tokens"]
+    # Each request reports its own Neural Engine time and the FLOPs of the functions it ran.
+    assert usage["neural_engine_ms"] > 0 and usage["flops"] > 0
 
-    assert model.system_one_batch([(state, questions), (state, {})]) == [
-        result, {"answers": {}, "usage": {"input_tokens": 0, "output_tokens": 0}},
-    ]
+    first, empty = model.system_one_batch([(state, questions), (state, {})])
+    assert first["answers"] == result["answers"]
+    assert (first["usage"]["input_tokens"], first["usage"]["flops"]) == (usage["input_tokens"], usage["flops"])
+    assert empty == {"answers": {}, "usage": {"input_tokens": 0, "output_tokens": 0, "neural_engine_ms": 0, "flops": 0}}
     long = model.probabilities("Hello. " * 150, [GREETING])[0]
     assert all(math.isfinite(p) and 0 <= p <= 1 for p in long)
     assert sum(long) == pytest.approx(1)
-    assert model.system_one(state, questions) == result
+    again = model.system_one(state, questions)
+    assert (again["answers"], again["usage"]["flops"]) == (result["answers"], usage["flops"])
 
 
 def test_several_questions_warn_and_run_in_order(model):

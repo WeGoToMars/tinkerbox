@@ -10,7 +10,7 @@ import time
 import torch
 from coreai_torch import TorchConverter, get_decomp_table
 
-from tinkerbox_ane.coreai import source_hash
+from tinkerbox_ane.coreai import count_flops, source_hash
 from tinkerbox_ane.d3 import CHUNK, INPUT, KIND, OUTPUT, PROMPT_WIDTHS, VARIANTS, checkpoint
 from tinkerbox_ane.d3.model import AttendStage, PromptStage, ScanStage, load_weights, stage_ranges
 from tinkerbox_ane.d3.vision import export_vision_asset
@@ -37,6 +37,8 @@ def export(model: str, out: Path, include_vision: bool = True) -> Path:
             scan = ScanStage(backbone, start, end).eval()
             inputs = (zeros(1, cfg.hidden, 1, CHUNK), zeros(1, 1, cfg.rotary_dim // 2, CHUNK),
                       zeros(1, 1, cfg.rotary_dim // 2, CHUNK), zeros(1, scan.channels, 1, CHUNK))
+            # Matmul, convolution and attention FLOPs of each function, for the runtime's compute rate.
+            flops = {f"scan{i}": count_flops(scan, inputs)}
             program = torch.export.export(scan, inputs).run_decompositions(get_decomp_table())
             # Keep entrypoint names distinct across assets: avoid specialization cache collisions.
             converter.add_exported_program(
@@ -49,6 +51,7 @@ def export(model: str, out: Path, include_vision: bool = True) -> Path:
                 inputs = (zeros(1, cfg.hidden, 1, CHUNK), zeros(1, cfg.heads, CHUNK, cfg.head_dim),
                           zeros(1, cfg.heads, CHUNK, cfg.head_dim), zeros(1, cfg.kv_heads, capacity, cfg.head_dim),
                           zeros(1, cfg.kv_heads, capacity, cfg.head_dim), zeros(1, 1, 1, capacity))
+                flops[f"attend{i}c{capacity}"] = count_flops(attend, inputs)
                 program = torch.export.export(attend, inputs).run_decompositions(get_decomp_table())
                 converter.add_exported_program(
                     program, input_names=[INPUT, "query", "gate", "key", "value", "mask"],
@@ -58,6 +61,7 @@ def export(model: str, out: Path, include_vision: bool = True) -> Path:
                 prompt = PromptStage(backbone, start, end, width).eval()
                 inputs = (zeros(1, cfg.hidden, 1, width), zeros(1, 1, cfg.rotary_dim // 2, width),
                           zeros(1, 1, cfg.rotary_dim // 2, width), zeros(1, 1, 1, width))
+                flops[f"prompt{i}c{width}"] = count_flops(prompt, inputs)
                 program = torch.export.export(prompt, inputs).run_decompositions(get_decomp_table())
                 converter.add_exported_program(
                     program, input_names=[INPUT, "cos", "sin", "mask"], output_names=[OUTPUT],
@@ -67,7 +71,7 @@ def export(model: str, out: Path, include_vision: bool = True) -> Path:
             converter.to_coreai().save_asset(asset)
             assets.append({"asset": asset.name, "source_hash": source_hash(asset),
                            "functions": [f"scan{i}"] + [f"attend{i}c{capacity}" for capacity in tiers]
-                           + [f"prompt{i}c{width}" for width in PROMPT_WIDTHS]})
+                           + [f"prompt{i}c{width}" for width in PROMPT_WIDTHS], "flops": flops})
             print(f"exported layers {start}..{end} ({time.monotonic() - started:.1f}s)", flush=True)
     manifest = {
         "kind": KIND, "version": 2, "width": CHUNK, "context": tiers[-1], "tiers": list(tiers),

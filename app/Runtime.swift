@@ -88,6 +88,8 @@ struct Probability: Decodable, Sendable {
 struct ItemResult: Decodable, Sendable {
     let answers: [Answer]
     let tokens: Int
+    let flops: Double?  // matmul, convolution and attention FLOPs of the functions it ran
+    let neuralEngineMs: Double?
 }
 
 struct Decisions: Sendable {

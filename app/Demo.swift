@@ -42,6 +42,15 @@ enum RunMode: String, CaseIterable {
 struct RunTotals {
     var elapsedMs = 0.0
     var tokens = 0
+    var flops: Double? = 0  // nil once a pass did not report its compute
+    var neuralEngineMs: Double? = 0
+
+    mutating func add(_ result: ItemResult, elapsedMs: Double) {
+        self.elapsedMs += elapsedMs
+        tokens += result.tokens
+        flops = flops.flatMap { total in result.flops.map { total + $0 } }
+        neuralEngineMs = neuralEngineMs.flatMap { total in result.neuralEngineMs.map { total + $0 } }
+    }
 }
 
 // The catalog and the one model the worker has loaded, shared by every task page.
@@ -267,15 +276,14 @@ struct RunTotals {
             if runMode == .parallel {
                 let result = try await demo.runtime.decide(Request(items: [item], questions: questions.map(\.question)))
                 for (index, answer) in result.results[0].answers.enumerated() { questions[index].answer = answer }
-                totals = RunTotals(elapsedMs: result.elapsedMs, tokens: result.results[0].tokens)
+                totals.add(result.results[0], elapsedMs: result.elapsedMs)
             } else {
                 // Answers appear as each pass finishes.
                 for index in questions.indices {
                     let result = try await demo.runtime.decide(Request(items: [item], questions: [questions[index].question]))
                     questions[index].answer = result.results[0].answers[0]
                     questions[index].elapsedMs = result.elapsedMs
-                    totals.elapsedMs += result.elapsedMs
-                    totals.tokens += result.results[0].tokens
+                    totals.add(result.results[0], elapsedMs: result.elapsedMs)
                 }
             }
             lastRun = totals
@@ -290,6 +298,12 @@ struct RunTotals {
     var throughput: Double? {
         guard let lastRun, lastRun.elapsedMs > 0 else { return nil }
         return Double(lastRun.tokens) * 1000 / lastRun.elapsedMs
+    }
+
+    /// Counted FLOPs per second of Neural Engine time over the last run, in TFLOPS.
+    var computeRate: Double? {
+        guard let flops = lastRun?.flops, let milliseconds = lastRun?.neuralEngineMs, milliseconds > 0 else { return nil }
+        return flops / milliseconds / 1e9
     }
 
     func percentile(_ fraction: Double) -> Double? {
@@ -696,6 +710,10 @@ struct DecisionView: View {
 
                 HStack(spacing: 40) {
                     metric("Last run", duration(playground.lastRun?.elapsedMs))
+                    metric("Compute", playground.computeRate.map { String(format: "%.1f TFLOPS", $0) } ?? "—")
+                        .help(playground.lastRun?.neuralEngineMs.map {
+                            "Matmul, convolution and attention FLOPs counted from the model graph, padding included, over \(duration($0)) of Neural Engine time"
+                        } ?? "Neural Engine compute rate of the last run")
                     metric("Throughput", playground.throughput.map { String(format: "%.0f tok/s", $0) } ?? "—")
                     metric("Median", duration(playground.percentile(0.5)))
                     metric("p95", duration(playground.percentile(0.95)))

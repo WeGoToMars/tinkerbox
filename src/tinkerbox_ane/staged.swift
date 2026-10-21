@@ -136,8 +136,9 @@ final class StagedRunner: Runner {
       for t in 0..<shape[3] { p[t * strides[3]] = t < tokens ? 0 : maskMin }
     }
     for stage in manifest.stages.indices {
-      let run = try await function("prompt\(stage)c\(promptWidth)", stage: stage)
-      var out = try await run.run(inputs: [input: x, "cos": c, "sin": s, "mask": mask])
+      let name = "prompt\(stage)c\(promptWidth)"
+      let run = try await function(name, stage: stage)
+      var out = try await timed(name, run, [input: x, "cos": c, "sin": s, "mask": mask])
       guard let hidden = out.remove(output)?.ndArray else { throw HostError("missing prompt output") }
       x = hidden
     }
@@ -188,8 +189,8 @@ final class StagedRunner: Runner {
       var state = emptyStates[stage]!
       // Finish the causal scans and collect every key before running any full attention.
       for chunk in 0..<count {
-        var out = try await scan.run(inputs: [input: chunks[chunk][output]!, "cos": rope[chunk].0,
-                                              "sin": rope[chunk].1, "packed_state": state])
+        var out = try await timed("scan\(stage)", scan, [input: chunks[chunk][output]!, "cos": rope[chunk].0,
+                                                          "sin": rope[chunk].1, "packed_state": state])
         guard let nextState = out.remove("packed_state_out")?.ndArray else { throw HostError("missing scan state") }
         state = nextState
         var saved: [String: NDArray] = [:]
@@ -206,7 +207,7 @@ final class StagedRunner: Runner {
       }
       // The readout needs only the last token after the final layer.
       for chunk in (stage == manifest.stages.count - 1 ? count - 1 : 0)..<count {
-        var out = try await attend.run(inputs: [input: chunks[chunk][output]!,
+        var out = try await timed("attend\(stage)c\(capacity)", attend, [input: chunks[chunk][output]!,
           "query": chunks[chunk]["query"]!, "gate": chunks[chunk]["gate"]!,
           "key": cache.keys, "value": cache.values, "mask": cache.mask])
         guard let hidden = out.remove(output)?.ndArray else { throw HostError("missing attention output") }

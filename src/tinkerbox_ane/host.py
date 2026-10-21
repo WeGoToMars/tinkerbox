@@ -86,6 +86,12 @@ def check_layout(spec: dict) -> None:
             raise ValueError(f"invalid {name}")
     if set(spec["conv_layers"]) & set(spec["attention_layers"]):
         raise ValueError("overlapping convolution and attention layers")
+    counted = [(spec.get("flops"), [f"c{tier}" for tier in tiers])]
+    if "vision_asset" in spec:
+        counted.append((spec.get("vision_flops"), ["main"]))
+    if any(not isinstance(flops, dict) or list(flops) != functions
+           or any(type(n) is not int or n <= 0 for n in flops.values()) for flops, functions in counted):
+        raise ValueError("bundle lacks FLOP counts for its functions; re-export the model")
 
 
 class Host:
@@ -166,6 +172,11 @@ class Host:
         rank = self._u32()
         shape = struct.unpack(f"<{rank}I", self._read(4 * rank))
         return np.frombuffer(self._read(2 * int(np.prod(shape))), dtype=np.float16).reshape(shape).copy()
+
+    def metrics(self) -> dict:
+        """Neural Engine `seconds` and `calls` per function since the previous call."""
+        self._send(b"M")
+        return json.loads(self._read(self._u32()))
 
     def set_rope(self, cos, sin) -> None:
         import numpy as np

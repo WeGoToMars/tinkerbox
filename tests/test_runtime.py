@@ -53,10 +53,17 @@ def test_public_decisions_batches_and_request_reset(model):
     assert result['answers']['greeting']['noul'] == pytest.approx(0.97966643, abs=0.01)
     assert result['answers']['topic']['choice'] == 'hello'
     assert 0 <= result['answers']['tone']['score'] <= 2
-    assert result['usage'] == {'input_tokens': 87, 'output_tokens': 0}
-    assert model.system_one_batch([(state, questions), (state, {})]) == [
-        result, {'answers': {}, 'usage': {'input_tokens': 0, 'output_tokens': 0}},
-    ]
+    usage = result['usage']
+    assert (usage['input_tokens'], usage['output_tokens']) == (87, 0)
+    # Each request reports its own Neural Engine time and the FLOPs of the functions it ran.
+    assert usage['neural_engine_ms'] > 0 and usage['flops'] > 0
+    first, empty = model.system_one_batch([(state, questions), (state, {})])
+    assert first['answers'] == result['answers']
+    assert (first['usage']['input_tokens'], first['usage']['flops']) == (87, usage['flops'])
+    assert empty == {'answers': {}, 'usage': {'input_tokens': 0, 'output_tokens': 0, 'neural_engine_ms': 0, 'flops': 0}}
+    # Single-question requests packed into one pass split its compute.
+    packed = model.system_one_batch([(state, {'greeting': GREETING}), ('Hello there', {'greeting': GREETING})])
+    assert all(r['usage']['neural_engine_ms'] > 0 and r['usage']['flops'] > 0 for r in packed)
     expected = model.probabilities(state, [GREETING])
     actual = model.probabilities_batch([(state, [GREETING]), (state, [GREETING])])
     for row in actual:

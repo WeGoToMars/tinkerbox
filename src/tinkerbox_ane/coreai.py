@@ -21,6 +21,23 @@ def source_hash(asset: Path) -> str:
     return (asset / "main.hash").read_bytes().hex()
 
 
+def count_flops(module, inputs) -> int:
+    """Matmul, convolution and attention FLOPs of one call, counted from shapes alone: the inputs
+    become fake tensors, so nothing is computed. Elementwise work is not counted."""
+    import torch
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.utils.flop_counter import FlopCounterMode, sdpa_flop_count
+
+    # Masked attention runs as the CPU flash kernel, which PyTorch's counter does not know.
+    attention = {torch.ops.aten._scaled_dot_product_flash_attention_for_cpu:
+                 lambda query, key, value, *_args, **_kwargs: sdpa_flop_count(query, key, value)}
+    with torch.no_grad(), FakeTensorMode(allow_non_fake_inputs=True) as mode:
+        fake = [mode.from_tensor(x) for x in inputs]
+        with FlopCounterMode(display=False, custom_mapping=attention) as counter:
+            module(*fake)
+    return counter.get_total_flops()
+
+
 def verify_aot(asset: Path, expected: str) -> None:
     asset = Path(asset)
     if asset.suffix != ".aimodelc" or source_hash(asset) != expected:
