@@ -21,8 +21,10 @@ from tinkerbox_ane.d3.model import MASK_MIN, CheckpointReader
 IMAGE_TOKEN_ID = 248056
 # The official processor's smallest image: 64 tokens.
 MIN_PIXELS = 65_536
-# Attention scores per head the ANE compiles in one matrix.
+# Attention scores per head that one block of query rows computes.
 SCORES = 2048 * 2048
+# Heads attend in groups; four groups of four heads run faster than one or two.
+HEAD_GROUPS = 4
 
 
 def as_rgb(image):
@@ -32,58 +34,106 @@ def as_rgb(image):
     return image.convert("RGB")
 
 
+def conv(linear: nn.Linear) -> nn.Conv2d:
+    """A linear layer as the equivalent 1 x 1 convolution over [1, channels, 1, patches]."""
+    layer = nn.Conv2d(linear.in_features, linear.out_features, 1, bias=linear.bias is not None)
+    layer.weight.data = linear.weight.data[:, :, None, None]
+    if linear.bias is not None:
+        layer.bias.data = linear.bias.data
+    return layer
+
+
+class LayerNorm(nn.Module):
+    """LayerNorm over channels. The residual stream reaches thousands, whose squares overflow FP16, so
+    each patch is first divided by 32 times its mean absolute deviation, which bounds every value by
+    channels / 32; the normalized result is unchanged."""
+
+    def __init__(self, norm: nn.LayerNorm):
+        super().__init__()
+        self.weight = nn.Parameter(norm.weight.data.view(1, -1, 1, 1))
+        self.bias = nn.Parameter(norm.bias.data.view(1, -1, 1, 1))
+        self.root_eps = norm.eps ** 0.5
+
+    def forward(self, x):
+        centered = x - x.mean(1, keepdim=True)
+        inverse = 1 / (32 * centered.abs().mean(1, keepdim=True) + 0.01)
+        scaled = centered * inverse
+        eps = (self.root_eps * inverse) ** 2
+        return scaled * torch.rsqrt((scaled * scaled).mean(1, keepdim=True) + eps) * self.weight + self.bias
+
+
 class ANEVisionBlock(nn.Module):
     def __init__(self, block: nn.Module):
         super().__init__()
-        self.norm1 = block.norm1
-        self.norm2 = block.norm2
-        self.qkv = block.attn.qkv
-        self.proj = block.attn.proj
-        self.mlp = block.mlp
+        self.norm1 = LayerNorm(block.norm1)
+        self.norm2 = LayerNorm(block.norm2)
+        self.qkv = conv(block.attn.qkv)
+        self.proj = conv(block.attn.proj)
+        self.fc1 = conv(block.mlp.linear_fc1)
+        self.fc2 = conv(block.mlp.linear_fc2)
         self.num_heads = block.attn.num_heads
         self.head_dim = block.attn.head_dim
         self.scaling = block.attn.scaling
 
     def forward(self, x, cos, sin, mask):
-        # x: [1, patches, hidden]; cos, sin: [1, 1, patches, head_dim // 2]; mask: [1, 1, 1, patches]
-        h = self.norm1(x)
-        b, s, d = h.shape
-        q, k, v = self.qkv(h).reshape(b, s, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        # x: [1, hidden, 1, patches]; cos, sin: [1, 1, head_dim // 2, patches]; mask: [1, 1, 1, patches]
+        s = x.shape[-1]
+        q, k, v = self.qkv(self.norm1(x)).view(1, 3, self.num_heads, self.head_dim, s).unbind(1)
         # Axial rotary over the whole head; both halves share the same angles.
-        q1, q2 = q.chunk(2, dim=-1)
-        k1, k2 = k.chunk(2, dim=-1)
-        q = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
-        k = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
-        # Every query row attends over all patches; blocks of rows keep each score matrix within what the
-        # ANE compiles (2048 x 2048 per head).
+        q1, q2 = q.chunk(2, dim=2)
+        k1, k2 = k.chunk(2, dim=2)
+        q = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=2) * self.scaling
+        k = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=2)
+        # Every query attends over all patches. A row of ones under the values sums the softmax weights
+        # in the same matrix product, so the division runs on [head_dim, rows] instead of every score.
+        values = torch.cat([v, torch.ones_like(v[:, :, :1])], dim=2)
+        queries = q.transpose(-1, -2)
         rows = max(r for r in range(1, s + 1) if s % r == 0 and r * s <= SCORES)
-        attended = torch.cat([nn.functional.scaled_dot_product_attention(
-            q[:, :, start:start + rows], k, v, attn_mask=mask, scale=self.scaling)
-            for start in range(0, s, rows)], dim=2)
-        x = x + self.proj(attended.transpose(1, 2).reshape(b, s, d))
-        return x + self.mlp(self.norm2(x))
+        group = self.num_heads // HEAD_GROUPS
+        blocks = []
+        for start in range(0, s, rows):
+            parts = []
+            for first in range(0, self.num_heads, group):
+                heads = slice(first, first + group)
+                scores = queries[:, heads, start:start + rows] @ k[:, heads] + mask
+                weights = torch.exp(scores - scores.amax(-1, keepdim=True))
+                total = values[:, heads] @ weights.transpose(-1, -2)
+                parts.append(total[:, :, :self.head_dim] / total[:, :, self.head_dim:])
+            blocks.append(torch.cat(parts, dim=1))
+        x = x + self.proj(torch.cat(blocks, dim=-1).reshape(1, self.num_heads * self.head_dim, 1, s))
+        return x + self.fc2(nn.functional.gelu(self.fc1(self.norm2(x)), approximate="tanh"))
 
 
 class VisionTower(nn.Module):
-    """Patch embedding, transformer blocks and 2 × 2 merger over padded patches in merge order.
+    """Patch embedding, transformer blocks and 2 × 2 merger over padded patches in merge order,
+    channels first: inputs are [1, channels, 1, patches] and features [1, hidden, 1, patches / 4].
 
     The host supplies each image's interpolated position embeddings and rotary tables. Padding
-    patches are masked out of attention, and the merger keeps them in their own output rows."""
+    patches are masked out of attention, and the merger keeps them in their own output columns."""
 
     def __init__(self, visual: nn.Module):
         super().__init__()
         hidden = visual.config.hidden_size
-        self.patch_proj = nn.Linear(visual.patch_embed.proj.weight[0].numel(), hidden, bias=True)
-        self.patch_proj.weight.data = visual.patch_embed.proj.weight.reshape(hidden, -1)
+        self.patch_proj = nn.Conv2d(visual.patch_embed.proj.weight[0].numel(), hidden, 1, bias=True)
+        self.patch_proj.weight.data = visual.patch_embed.proj.weight.reshape(hidden, -1, 1, 1)
         self.patch_proj.bias.data = visual.patch_embed.proj.bias.data
         self.blocks = nn.ModuleList([ANEVisionBlock(block) for block in visual.blocks])
-        self.merger = visual.merger
+        self.merge = visual.config.spatial_merge_size ** 2
+        merger = visual.merger
+        self.merger_norm = LayerNorm(merger.norm)
+        self.merger_fc1 = conv(merger.linear_fc1)
+        self.merger_fc2 = conv(merger.linear_fc2)
 
     def forward(self, pixel_values, pos_embeds, cos, sin, attn_mask):
         h = self.patch_proj(pixel_values) + pos_embeds
         for block in self.blocks:
             h = block(h, cos, sin, attn_mask)
-        return self.merger(h.squeeze(0)).unsqueeze(0)
+        h = self.merger_norm(h)
+        # Each run of `merge` patches becomes one column of their concatenated channels.
+        channels, patches = h.shape[1], h.shape[-1]
+        h = h.view(1, channels, patches // self.merge, self.merge).permute(0, 3, 1, 2)
+        h = h.reshape(1, channels * self.merge, 1, patches // self.merge)
+        return self.merger_fc2(nn.functional.gelu(self.merger_fc1(h)))
 
 
 def load_visual(checkpoint_dir: Path) -> nn.Module:
@@ -109,8 +159,8 @@ def export_vision_asset(checkpoint_dir: Path, out_path: Path) -> dict:
     converter = TorchConverter()
     with torch.no_grad():
         for patches in PATCH_TIERS:
-            inputs = (zeros(1, patches, tower.patch_proj.in_features), zeros(1, patches, config.hidden_size),
-                      zeros(1, 1, patches, half), zeros(1, 1, patches, half), zeros(1, 1, 1, patches))
+            inputs = (zeros(1, tower.patch_proj.in_channels, 1, patches), zeros(1, config.hidden_size, 1, patches),
+                      zeros(1, 1, half, patches), zeros(1, 1, half, patches), zeros(1, 1, 1, patches))
             program = torch.export.export(tower, inputs).run_decompositions(get_decomp_table())
             converter.add_exported_program(
                 program, input_names=["pixel_values", "pos_embeds", "cos", "sin", "attn_mask"],
@@ -123,12 +173,14 @@ def export_vision_asset(checkpoint_dir: Path, out_path: Path) -> dict:
 
 
 class VisionPipeline:
-    """The checkpoint's own image processor, and the tower run on the ANE through the host."""
+    """The checkpoint's own image processor, and the tower run on the ANE through the host at the
+    bundle's patch capacities (its `p{patches}` functions)."""
 
-    def __init__(self, checkpoint_dir: Path, host):
+    def __init__(self, checkpoint_dir: Path, host, capacities):
         checkpoint_dir = Path(checkpoint_dir)
         self.processor = AutoProcessor.from_pretrained(str(checkpoint_dir))
         self.host = host
+        self.capacities = sorted(capacities)
         self.config = AutoConfig.from_pretrained(checkpoint_dir).vision_config
         self.merge = self.config.spatial_merge_size
         self.pos_weight = CheckpointReader(checkpoint_dir).get_tensor("visual.pos_embed.weight").float()
@@ -154,7 +206,7 @@ class VisionPipeline:
         features, start = [], 0
         for grid in grids:
             count = int(grid.prod())
-            capacity = next(p for p in PATCH_TIERS if p >= count)
+            capacity = next(p for p in self.capacities if p >= count)
             thw = grid[None]
             indices, weights = get_vision_interpolation_indices_and_weights(
                 thw, num_grid_per_side=int(self.config.num_position_embeddings ** 0.5), mode="bilinear",
@@ -164,17 +216,19 @@ class VisionPipeline:
             half = cos.shape[1] // 2
 
             def padded(x):
-                return torch.cat([x.half(), torch.zeros(capacity - count, x.shape[1], dtype=torch.float16)])
+                """[patches, channels] as [1, channels, 1, capacity]."""
+                x = torch.cat([x.half(), torch.zeros(capacity - count, x.shape[1], dtype=torch.float16)])
+                return x.T[None, :, None]
 
             mask = torch.full((1, 1, 1, capacity), MASK_MIN, dtype=torch.float16)
             mask[..., :count] = 0
             out = self.host.vision({
-                "pixel_values": padded(pixel_values[start:start + count])[None],
-                "pos_embeds": padded(pos)[None],
-                "cos": padded(cos[:, :half])[None, None],
-                "sin": padded(sin[:, :half])[None, None],
+                "pixel_values": padded(pixel_values[start:start + count]),
+                "pos_embeds": padded(pos),
+                "cos": padded(cos[:, :half]).transpose(1, 2),
+                "sin": padded(sin[:, :half]).transpose(1, 2),
                 "attn_mask": mask,
             }, f"p{capacity}")
-            features.append(torch.from_numpy(out[0, :count // self.merge**2]).float() * RESIDUAL_SCALE)
+            features.append(torch.from_numpy(out[0, :, 0, :count // self.merge**2]).T.float() * RESIDUAL_SCALE)
             start += count
         return features

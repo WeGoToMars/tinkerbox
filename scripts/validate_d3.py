@@ -1,4 +1,8 @@
-"""Build official FP32 CPU references or validate a d3 ANE bundle against them."""
+"""Build official FP32 CPU references or validate a d3 ANE bundle against them.
+
+Without --questions, references cover a small built-in set of text and image cases. With --questions, they cover a
+saved decision set such as d1's 204 (scripts/build_reference.py writes it to artifacts/reference.json):
+public benchmarks, a short prompt and long needle prompts, keeping those within the model's context."""
 
 import argparse
 import json
@@ -57,61 +61,113 @@ def distribution(values, count):
     return list(values)
 
 
-def build_reference(model, out):
+def decision_set(path):
+    """Text decisions with labels from a saved reference of another model."""
+    return [{"source": item["source"], "label": item["label"], "state": item["state"],
+             "question": item["question"], "images": []} for item in json.loads(Path(path).read_text())["items"]]
+
+
+def build_reference(model, out, questions=None, dtype="float32"):
     import torch
 
-    torch.set_num_threads(6)
-    repo, revision, _ = VARIANTS[model]
+    torch.set_num_threads(10)
+    repo, revision, tiers = VARIANTS[model]
     path = checkpoint(repo, revision)
     _, rt = d3_code(path)
-    official = rt.D3.from_pretrained(str(path), device="cpu", permutation_average=False)
+    official = rt.D3.from_pretrained(str(path), device="cpu", permutation_average=False, max_length=tiers[-1])
     official.fast = None
-    # The official runtime defaults to BF16; validation explicitly uses FP32 CPU.
-    official.backbone.float()
+    # The official runtime defaults to BF16; validation uses FP32 CPU, and BF16 shows the upstream drift.
+    official.backbone.to(getattr(torch, dtype))
+    planned = decision_set(questions) if questions else [
+        {"state": state, "question": question, "images": images} for state, question, images in cases()]
     items = []
-    for state, question, images in cases():
-        prepared = official.prepare(state, {"q": question}, [picture(spec) for spec in images] or None)
+    for item in planned:
+        prepared = official.prepare(item["state"], {"q": item["question"]},
+                                    [picture(spec) for spec in item["images"]] or None)
+        if "q" in prepared.errors:
+            print(f"skipped {item.get('source', 'case')}: {prepared.errors['q']['message']}", flush=True)
+            continue
         probabilities, tokens = official.run(prepared)
         count = len(prepared.questions["q"].keys)
-        item = {"state": state, "question": question, "images": images, "tokens": tokens,
-                "reference": distribution(probabilities["q"], count)}
-        if not images:
+        item = {**item, "tokens": tokens, "reference": distribution(probabilities["q"], count)}
+        if not item["images"]:
             item["ids"] = prepared.sequences["q"]
         items.append(item)
-        print(f"reference: {tokens} tokens {item['reference']}", flush=True)
+        print(f"reference {len(items)}/{len(planned)}: {tokens} tokens {item['reference']}", flush=True)
     document = {"reference": {"repository": repo, "revision": revision, "implementation": "official",
-                              "dtype": "float32", "device": "cpu"}, "items": items}
+                              "dtype": dtype, "device": "cpu"}, "items": items}
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(document, indent=2) + "\n")
 
 
-def validate(asset, reference):
+def validate(asset, reference, baseline=None):
     spec = read_bundle(asset, KIND)
     model = next(name for name, (repo, _, _) in VARIANTS.items() if repo == spec["source"]["repo"])
     document = json.loads(Path(reference).read_text())
     if document["reference"]["revision"] != spec["source"]["revision"]:
         raise ValueError("reference and bundle use different checkpoints")
     records = []
+    tiers = spec["tiers"]
     with tinkerbox_ane.load(model, asset) as runtime:
+        warmed = set()
+        for item in document["items"]:
+            tier = next(t for t in tiers if t >= item["tokens"])
+            # Exclude first-use specialization from latency.
+            if tier not in warmed:
+                runtime.probabilities(item["state"], [item["question"]], [picture(i) for i in item["images"]])
+                warmed.add(tier)
         for item in document["items"]:
             images = [picture(image) for image in item["images"]]
-            started = time.monotonic()
+            started = time.perf_counter()
             got = runtime.probabilities(item["state"], [item["question"]], images)[0]
+            latency = time.perf_counter() - started
             tokens = runtime.count_tokens(item["state"], {"q": item["question"]}, images)["input_tokens"]
             ref = item["reference"]
             drift = [abs(a - b) for a, b in zip(got, ref)]
-            records.append({"tokens": tokens, "images": len(images),
+            records.append({"source": item.get("source", "image" if images else "text"), "label": item.get("label"),
+                            "tokens": tokens, "tier": next(t for t in tiers if t >= tokens), "images": len(images),
                             "probabilities": got, "reference": ref, "max_probability_drift": max(drift),
-                            "latency_s": time.monotonic() - started,
-                            "token_match": tokens == item["tokens"],
+                            "latency_s": latency, "token_match": tokens == item["tokens"],
                             "agreement": got.index(max(got)) == ref.index(max(ref))})
-    errors = [abs(a - b) for r in records for a, b in zip(r["probabilities"], r["reference"])]
     report = {"asset": str(Path(asset).resolve()), "architecture": spec["architecture"],
-              "source_hashes": [a["source_hash"] for a in spec["assets"]], "records": records,
-              "max_probability_drift": max(errors), "mean_probability_drift": sum(errors) / len(errors)}
-    report["passed"] = (all(r["token_match"] and r["agreement"] for r in records)
-                        and max(errors) <= .05 and sum(errors) / len(errors) <= .005)
+              "source_hashes": [a["source_hash"] for a in spec["assets"]], **summary(records),
+              "tiers": {str(tier): summary([r for r in records if r["tier"] == tier])
+                        for tier in sorted({r["tier"] for r in records})}, "records": records}
+    if baseline:
+        # The same drift measures for another official precision, such as BF16, on the same items.
+        others = json.loads(Path(baseline).read_text())
+        if [item["tokens"] for item in others["items"]] != [item["tokens"] for item in document["items"]]:
+            raise ValueError("baseline and reference cover different items")
+        compared = [{**r, "probabilities": got, "latency_s": 0,
+                     "agreement": got.index(max(got)) == r["reference"].index(max(r["reference"]))}
+                    for r, got in zip(records, (item["reference"] for item in others["items"]))]
+
+        def drift(rows):
+            return {k: v for k, v in summary(rows).items() if k not in ("p50_ms", "label_accuracy")}
+        report["baseline"] = {"reference": others["reference"], **drift(compared),
+                              "tiers": {tier: drift([r for r in compared if str(r["tier"]) == tier])
+                                        for tier in report["tiers"]}}
+    # Overall gates as d1's; each tier must agree on 97% and keep its mean drift within 0.01.
+    report["passed"] = (all(r["token_match"] for r in records) and report["agreement"] >= .97
+                        and report["max_probability_drift"] <= .05 and report["mean_probability_drift"] <= .005
+                        and all(t["agreement"] >= .97 and t["mean_probability_drift"] <= .01
+                                for t in report["tiers"].values()))
     return report
+
+
+def summary(records):
+    errors = [abs(a - b) for r in records for a, b in zip(r["probabilities"], r["reference"])]
+    latencies = sorted(r["latency_s"] for r in records)
+    labeled = [r for r in records if r["label"] is not None]
+    result = {"decisions": len(records), "agreement": sum(r["agreement"] for r in records) / len(records),
+              "mean_probability_drift": sum(errors) / len(errors), "max_probability_drift": max(errors),
+              "p50_ms": 1000 * latencies[len(latencies) // 2]}
+    if labeled:
+        def correct(r, key):
+            return r[key].index(max(r[key])) == r["label"]
+        result["label_accuracy"] = {"ane": sum(correct(r, "probabilities") for r in labeled) / len(labeled),
+                                    "reference": sum(correct(r, "reference") for r in labeled) / len(labeled)}
+    return result
 
 
 def main():
@@ -119,15 +175,21 @@ def main():
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--write-reference", choices=list(VARIANTS), metavar="MODEL",
                         help="Write the official FP32 reference of d3-nano or d3-mini")
+    parser.add_argument("--questions", type=Path,
+                        help="With --write-reference: a saved decision set to use instead of the built-in cases")
+    parser.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32",
+                        help="With --write-reference: official precision; validation gates use float32")
+    parser.add_argument("--baseline", type=Path,
+                        help="With --asset: a reference of the same items at another precision to report beside")
     parser.add_argument("--asset", type=Path)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     if args.write_reference:
-        build_reference(args.write_reference, args.reference)
+        build_reference(args.write_reference, args.reference, args.questions, args.dtype)
     else:
         if not args.asset or not args.out:
             parser.error("validation requires --asset and --out")
-        report = validate(args.asset, args.reference)
+        report = validate(args.asset, args.reference, args.baseline)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps({k: v for k, v in report.items() if k != "records"}, indent=2))

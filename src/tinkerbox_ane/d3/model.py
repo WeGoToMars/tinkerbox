@@ -138,7 +138,6 @@ class LinearAttentionBlock(nn.Module):
         self.k_dim = cfg.linear_k_dim
         self.v_dim = cfg.linear_v_dim
         self.taps = cfg.conv_taps
-        self.chunk = CHUNK
         self.conv_dim = self.k_heads * self.k_dim * 2 + self.v_heads * self.v_dim
         self.eps = cfg.eps
         self.scaling = self.k_dim ** -0.5
@@ -172,11 +171,12 @@ class LinearAttentionBlock(nn.Module):
             self.register_buffer("decay_intervals", intervals, persistent=False)
 
     def forward(self, x: torch.Tensor, tail: torch.Tensor, state: torch.Tensor):
+        chunk = x.shape[-1]
         residual = x
         normed_x = self.operator_norm(x)
         fused = self.in_proj(normed_x)
         qkv, z, b, a = fused.split([self.conv_dim, self.v_heads * self.v_dim, self.v_heads, self.v_heads], dim=1)
-        z = z.view(1, self.v_heads, self.v_dim, self.chunk).permute(0, 1, 3, 2)
+        z = z.view(1, self.v_heads, self.v_dim, chunk).permute(0, 1, 3, 2)
 
         window = torch.cat((tail, qkv), dim=-1)
         new_tail = window[..., -(self.taps - 1):]
@@ -184,10 +184,10 @@ class LinearAttentionBlock(nn.Module):
         convolved = silu(self.conv(window), 1.0)
 
         q, k, v = convolved.split([self.k_heads * self.k_dim, self.k_heads * self.k_dim, self.v_heads * self.v_dim], dim=1)
-        q = q.view(1, self.k_heads, self.k_dim, self.chunk).permute(0, 1, 3, 2)
-        k = k.view(1, self.k_heads, self.k_dim, self.chunk).permute(0, 1, 3, 2)
+        q = q.view(1, self.k_heads, self.k_dim, chunk).permute(0, 1, 3, 2)
+        k = k.view(1, self.k_heads, self.k_dim, chunk).permute(0, 1, 3, 2)
         # Keep DeltaNet values and recurrent state above the ANE FP16 subnormal range.
-        v = (v * DELTA_STATE_SCALE).view(1, self.v_heads, self.v_dim, self.chunk).permute(0, 1, 3, 2)
+        v = (v * DELTA_STATE_SCALE).view(1, self.v_heads, self.v_dim, chunk).permute(0, 1, 3, 2)
 
         if self.v_heads // self.k_heads > 1:
             repeat = self.v_heads // self.k_heads
@@ -198,12 +198,12 @@ class LinearAttentionBlock(nn.Module):
         q = q * torch.rsqrt((q * q).sum(-1, keepdim=True) + 1e-6 * NORM_COMPUTE_SCALE**2) * self.scaling
         k = k * torch.rsqrt((k * k).sum(-1, keepdim=True) + 1e-6 * NORM_COMPUTE_SCALE**2)
 
-        beta = (0.5 + 0.5 * torch.tanh(0.5 * b)).view(1, self.v_heads, self.chunk, 1)
+        beta = (0.5 + 0.5 * torch.tanh(0.5 * b)).view(1, self.v_heads, chunk, 1)
         g = -torch.exp(self.A_log[None, :, None, None]) * _softplus(a + self.dt_bias[None, :, None, None])
         g = g.squeeze(2)
 
         SUB = 32
-        NUM_SUBS = self.chunk // SUB
+        NUM_SUBS = chunk // SUB
         v_beta = (v * beta).view(1, self.v_heads, NUM_SUBS, SUB, self.v_dim)
         k_beta = (k * beta).view(1, self.v_heads, NUM_SUBS, SUB, self.k_dim)
         q_b = q.view(1, self.v_heads, NUM_SUBS, SUB, self.k_dim)
@@ -248,7 +248,7 @@ class LinearAttentionBlock(nn.Module):
         norm_input = core_attn_out * (GATED_NORM_SCALE / DELTA_STATE_SCALE)
         normed = norm_input * torch.rsqrt((norm_input * norm_input).mean(-1, keepdim=True) + self.eps * GATED_NORM_SCALE**2) * self.norm_weight
         normed = normed * silu(z, 1.0)
-        attn_out = normed.permute(0, 1, 3, 2).reshape(1, self.v_heads * self.v_dim, 1, self.chunk)
+        attn_out = normed.permute(0, 1, 3, 2).reshape(1, self.v_heads * self.v_dim, 1, chunk)
         h = self.out_proj(attn_out)
         x = residual + h
         return x + self.feed_forward(self.ffn_norm(x)), new_tail, state
@@ -402,6 +402,31 @@ class AttendStage(nn.Module):
 
     def forward(self, x, q, gate, k, v, mask):
         return self.final_norm(self.layer.finish(x, self.attention(q, k, v, mask), gate))
+
+
+class PromptStage(nn.Module):
+    """A whole short prompt through one stage in one call: scan it from an empty state, then attend over
+    its keys. Keeps the recurrent state and keys on the ANE. The scan runs in 128-token chunks and a final
+    64-token chunk for the remainder; wider chunks run slower."""
+
+    def __init__(self, backbone: Backbone, start: int, end: int, width: int):
+        super().__init__()
+        self.scan = ScanStage(backbone, start, end)
+        self.attend = AttendStage(backbone, end, width)
+        self.chunks = [CHUNK] * (width // CHUNK) + [width % CHUNK] * bool(width % CHUNK)
+
+    def forward(self, x, cos, sin, mask):
+        state = torch.zeros(1, self.scan.channels, 1, CHUNK, dtype=x.dtype)
+        saved, keys, values, start = [], [], [], 0
+        for size in self.chunks:
+            part = slice(start, start + size)
+            out, q, gate, k, v, state = self.scan(x[..., part], cos[..., part], sin[..., part], state)
+            saved.append((out, q, gate))
+            keys.append(k)
+            values.append(v)
+            start += size
+        k, v = torch.cat(keys, dim=2), torch.cat(values, dim=2)
+        return torch.cat([self.attend(out, q, gate, k, v, mask) for out, q, gate in saved], dim=-1)
 
 
 def stage_ranges(cfg: Config) -> list[tuple[int, int]]:

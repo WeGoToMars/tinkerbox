@@ -33,6 +33,10 @@ def check_layout(spec: dict) -> None:
             or tiers != sorted(set(tiers)) or tiers[-1] != context
             or any(t < width or t > context or t % width for t in tiers)):
         raise ValueError("invalid attention capacities")
+    prompts = spec.get("prompts", [])
+    if prompts != sorted(set(prompts)) or any(type(w) is not int or w <= 0 or w % 32 or w > context
+                                              for w in prompts):
+        raise ValueError("invalid prompt widths")
     for name in ("hidden", "heads", "kv_heads", "head_dim", "conv_taps"):
         if not isinstance(spec[name], int) or spec[name] <= 0:
             raise ValueError(f"invalid {name}")
@@ -132,7 +136,7 @@ def load(asset: Path):
             if not spec.get("vision_asset"):
                 raise ValueError("this bundle has no vision tower; image inputs are unavailable")
             if self._vision is None:
-                self._vision = VisionPipeline(path, self._host)
+                self._vision = VisionPipeline(path, self._host, [int(name[1:]) for name in spec["vision_functions"]])
                 self._vision.limit_tokens(self._max_image_tokens)
             return self._vision
 

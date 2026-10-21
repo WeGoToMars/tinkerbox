@@ -11,8 +11,8 @@ import torch
 from coreai_torch import TorchConverter, get_decomp_table
 
 from tinkerbox_ane.coreai import source_hash
-from tinkerbox_ane.d3 import CHUNK, INPUT, KIND, OUTPUT, VARIANTS, checkpoint
-from tinkerbox_ane.d3.model import AttendStage, ScanStage, load_weights, stage_ranges
+from tinkerbox_ane.d3 import CHUNK, INPUT, KIND, OUTPUT, PROMPT_WIDTHS, VARIANTS, checkpoint
+from tinkerbox_ane.d3.model import AttendStage, PromptStage, ScanStage, load_weights, stage_ranges
 from tinkerbox_ane.d3.vision import export_vision_asset
 
 
@@ -54,13 +54,24 @@ def export(model: str, out: Path, include_vision: bool = True) -> Path:
                     program, input_names=[INPUT, "query", "gate", "key", "value", "mask"],
                     output_names=[OUTPUT], entrypoint_name=f"attend{i}c{capacity}",
                 )
+            for width in PROMPT_WIDTHS:
+                prompt = PromptStage(backbone, start, end, width).eval()
+                inputs = (zeros(1, cfg.hidden, 1, width), zeros(1, 1, cfg.rotary_dim // 2, width),
+                          zeros(1, 1, cfg.rotary_dim // 2, width), zeros(1, 1, 1, width))
+                program = torch.export.export(prompt, inputs).run_decompositions(get_decomp_table())
+                converter.add_exported_program(
+                    program, input_names=[INPUT, "cos", "sin", "mask"], output_names=[OUTPUT],
+                    entrypoint_name=f"prompt{i}c{width}",
+                )
             asset = out / f"stage{i}.aimodel"
             converter.to_coreai().save_asset(asset)
             assets.append({"asset": asset.name, "source_hash": source_hash(asset),
-                           "functions": [f"scan{i}"] + [f"attend{i}c{capacity}" for capacity in tiers]})
+                           "functions": [f"scan{i}"] + [f"attend{i}c{capacity}" for capacity in tiers]
+                           + [f"prompt{i}c{width}" for width in PROMPT_WIDTHS]})
             print(f"exported layers {start}..{end} ({time.monotonic() - started:.1f}s)", flush=True)
     manifest = {
         "kind": KIND, "version": 2, "width": CHUNK, "context": tiers[-1], "tiers": list(tiers),
+        "prompts": list(PROMPT_WIDTHS),
         "hidden": cfg.hidden, "heads": cfg.heads, "kv_heads": cfg.kv_heads, "head_dim": cfg.head_dim,
         "conv_taps": cfg.conv_taps, "rotary_dim": cfg.rotary_dim,
         "stages": [end - start for start, end in stage_ranges(cfg)],

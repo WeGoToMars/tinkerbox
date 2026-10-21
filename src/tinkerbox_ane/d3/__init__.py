@@ -14,9 +14,13 @@ VARIANTS = {
 REVISIONS = {repo: revision for repo, revision, _ in VARIANTS.values()}
 RESIDUAL_SCALE = 64.0  # Keep ANE residual products above the subnormal threshold.
 CHUNK = 128
+# Short prompts run each stage in one call at the smallest of these widths that holds them: the DeltaNet
+# scan over the whole prompt, then full attention. Steps of 64 limit padding; past 320 tokens a call
+# saves under 10% over the chunked path.
+PROMPT_WIDTHS = (128, 192, 256, 320)
 INPUT, OUTPUT = "hidden_in", "hidden_out"
 # Vision tower patch capacities; an image runs at the smallest that holds its patches.
-PATCH_TIERS = (1024, 2048, 4096, 6400)
+PATCH_TIERS = (1024, 1536, 2048, 3072, 4096, 5120, 6400)
 # The official processor's 1.6 MP budget: 1,600 tokens of 32 × 32 pixels.
 MAX_IMAGE_TOKENS = PATCH_TIERS[-1] // 4
 
