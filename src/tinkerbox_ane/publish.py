@@ -68,8 +68,9 @@ def upload_to_hub(
     api.create_repo(repo, repo_type="model", exist_ok=True)
     if tag is not None and any(ref.name == tag for ref in api.list_repo_refs(repo).tags):
         raise ValueError(f"release tag {tag!r} already exists; choose a new version")
+    # Loading a staged bundle compiles its checkpoint code into __pycache__; releases ship sources only.
     commit = api.upload_folder(repo_id=repo, folder_path=staging, allow_patterns=allow_patterns,
-                               delete_patterns=delete_patterns,
+                               ignore_patterns=["**/__pycache__/**", "**/*.pyc"], delete_patterns=delete_patterns,
                                commit_message="Publish model bundles")
     if tag is not None:
         api.create_tag(repo, tag=tag, revision=commit.oid)

@@ -164,6 +164,7 @@ def test_upload_to_hub_assembles_release_and_synchronizes_patterns(release, monk
     assert "macos27/h17s/fused.h17s.aimodelc/**" in kwargs["allow_patterns"]
     assert "macos27/h17s/checkpoint/**" in kwargs["allow_patterns"]
     assert kwargs["delete_patterns"] == ["macos27/**"]
+    assert "**/__pycache__/**" in kwargs["ignore_patterns"]
 
     hub.create_tag.assert_called_once_with(
         "user/d1-3B-CoreAI-ANE", tag="v1.0.1", revision="commit_sha_123"
