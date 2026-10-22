@@ -33,7 +33,7 @@
       "inputs": ["text", "image"],
       "question_trees": false,
       "context": 32768,
-      "download_bytes": 4571111931,
+      "download_bytes": 4571108246,
       "license": "Apache-2.0",
       "min_version": "2.1.0"
     },
@@ -51,7 +51,7 @@
       "inputs": ["text", "image"],
       "question_trees": false,
       "context": 32768,
-      "download_bytes": 9239066920,
+      "download_bytes": 9254462596,
       "license": "Apache-2.0",
       "min_version": "2.1.0"
     }
