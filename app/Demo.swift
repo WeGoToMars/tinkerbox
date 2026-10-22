@@ -541,7 +541,7 @@ struct ModelToolbar: ToolbarContent {
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem {
             Menu {
-                Picker("Model", selection: Binding(get: { demo.model }, set: { id in
+                Picker("Model for Decision and Shortcuts", selection: Binding(get: { demo.model }, set: { id in
                     guard let model = demo.catalog.models.first(where: { $0.id == id }) else { return }
                     Task { await demo.choose(model) }
                 })) {
@@ -551,11 +551,11 @@ struct ModelToolbar: ToolbarContent {
                 Divider()
                 Button("Manage Models…", action: showModels)
             } label: {
-                Label(demo.current?.name ?? "Models", systemImage: "square.stack.3d.up")
+                Label(demo.current.map { "Model: \($0.name)" } ?? "Select Model", systemImage: "square.stack.3d.up")
                     .labelStyle(.titleAndIcon)
             }
             .disabled(demo.busy)
-            .help("Switch or download models")
+            .help("Used by Decision and Shortcuts. Open to select or download a model.")
         }
         ToolbarItem {
             Toggle("Model Settings", systemImage: "gearshape", isOn: $showingInspector)
@@ -1030,8 +1030,9 @@ struct ModelsView: View {
                     ProgressView(value: demo.progress).frame(width: 120)
                 }
             } else if model.id == demo.model {
-                Label(demo.ready ? "In use" : "Selected", systemImage: "checkmark.circle.fill")
+                Label("Selected", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(demo.ready ? .green : .secondary)
+                    .help("Used by Decision and Shortcuts")
             } else {
                 if demo.storage.removing.contains(model.id) {
                     ProgressView().controlSize(.small)
@@ -1041,7 +1042,7 @@ struct ModelsView: View {
                         .help("Delete model files and cached copies")
                         .disabled(!demo.storage.removing.isEmpty)
                 }
-                Button(downloaded ? "Use" : "Download") {
+                Button(downloaded ? "Select" : "Download & Select") {
                     Task { await demo.choose(model) }
                 }
                 .disabled(demo.busy || demo.storage.removing.contains(model.id))
