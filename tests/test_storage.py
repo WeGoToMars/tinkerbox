@@ -6,10 +6,14 @@ import subprocess
 import sys
 
 
-def specialization(home, build, key):
+def specialization(home, build, key, weights=None):
+    """Core AI's compiled copy of an asset: an APFS clone of its weights, as Core AI makes, or new data."""
     root = home / "Library/Application Support/coreai-cache" / build / "tinkerbox-ane-host" / key / "options"
     root.mkdir(parents=True)
-    (root / "model.aimodelx").write_bytes(b"\0" * 50_000)
+    if weights:
+        subprocess.run(["cp", "-c", str(weights), str(root / "weights.bin")], check=True)
+    else:
+        (root / "model.aimodelx").write_bytes(b"\1" * 50_000)
     return root.parent
 
 
@@ -17,18 +21,18 @@ def bundle(home, build, model, revision):
     """A downloaded bundle with one asset, and Core AI's compiled copy of it."""
     root = home / "Library/Caches/tinkerbox-ane/models" / model / revision / "macos27/h17s"
     (root / "stage.aimodelc").mkdir(parents=True)
-    (root / "stage.aimodelc/weights.bin").write_bytes(b"\0" * 100_000)
+    (root / "stage.aimodelc/weights.bin").write_bytes(b"\1" * 100_000)
     digest = hashlib.sha256(f"{model}{revision}".encode()).digest()
     (root / "stage.aimodelc/main.hash").write_bytes(digest)
     (root / "model.json").write_text(json.dumps({"assets": [{"asset": "stage.aimodelc", "source_hash": "x"}]}))
-    return root.parents[1], specialization(home, build, digest.hex())
+    return root.parents[1], specialization(home, build, digest.hex(), root / "stage.aimodelc/weights.bin")
 
 
 def checkpoint(hub, repo):
     root = hub / f"models--{repo.replace('/', '--')}"
     commit = hashlib.sha1(repo.encode()).hexdigest()
     (root / "blobs").mkdir(parents=True)
-    (root / "blobs/weights").write_bytes(b"\0" * 200_000)
+    (root / "blobs/weights").write_bytes(b"\1" * 200_000)
     (root / "snapshots" / commit).mkdir(parents=True)
     (root / "snapshots" / commit / "model.safetensors").symlink_to("../../blobs/weights")
     (root / "refs").mkdir()
@@ -58,7 +62,9 @@ def test_report_and_remove_a_model_with_everything_it_downloaded(tmp_path: Path)
     bundles = [(b["revision"], b["current"], b["compiled"]["paths"]) for b in models["d3-nano"]["bundles"]]
     assert bundles == [("v2.0.0", False, [str(old_compiled)]), ("v2.1.0", True, [str(current_compiled)])]
     assert models["d3-nano"]["checkpoint"]["repo"] == "vllm-sr/d3-nano"
-    assert models["d3-nano"]["bytes"] >= 2 * (100_000 + 50_000) + 200_000
+    # Clones share the bundle's blocks, so compiled copies add nothing to the model's size.
+    assert all(b["compiled"]["bytes"] == 0 for b in models["d3-nano"]["bundles"])
+    assert 2 * 100_000 + 200_000 <= models["d3-nano"]["bytes"] < 2 * 100_000 + 200_000 + 50_000
     assert found == set(map(str, unused))
 
     models, _ = storage(tmp_path, "--remove", "d3-nano", "--outdated")

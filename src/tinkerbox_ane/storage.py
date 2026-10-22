@@ -1,17 +1,21 @@
 """What models have stored on this Mac, and removing them.
 
-Each model keeps its Core AI bundle under `bundle.CACHE`, its upstream checkpoint (tokenizer,
-embeddings and readout) in the Hugging Face cache, and a copy of every asset that Core AI compiled
-for this Mac's Neural Engine in its specialization cache. Python and its packages are shared by all
-models. Sizes are allocated bytes with hard links counted once; APFS clones share blocks but count in full."""
+Each model keeps its Core AI bundle under `bundle.CACHE`, and Core AI keeps a copy of every asset it
+compiled for this Mac's Neural Engine in its specialization cache, usually an APFS clone of the bundle's
+files. Earlier versions also downloaded the upstream checkpoint into the Hugging Face cache. Python and
+its packages are shared by all models. Sizes count each allocated block once, so files that clone or
+hard-link others add only the blocks they do not share with files measured before them."""
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
+import struct
 import subprocess
 import sys
 
@@ -24,19 +28,48 @@ from tinkerbox_ane.models import CATALOG
 SPECIALIZATIONS = Path.home() / "Library/Application Support/coreai-cache"
 
 
-def size(path: Path) -> int:
-    """Allocated bytes under `path`, counting each hard-linked file once and following no symlinks."""
-    seen, total = set(), 0
-    for root, _, files in os.walk(path):
-        for name in files:
-            try:
-                info = os.lstat(os.path.join(root, name))
-            except OSError:
-                continue
-            if (info.st_dev, info.st_ino) not in seen:
-                seen.add((info.st_dev, info.st_ino))
-                total += info.st_blocks * 512
-    return total
+# fcntl(2): the device offset and contiguous length of a file's data at a logical offset.
+F_LOG2PHYS_EXT = 65
+LOG2PHYS = struct.Struct("=Iqq")  # flags, contiguous bytes, device offset (packed to 4 bytes)
+BLOCK = 4096  # APFS allocation block
+
+
+class Meter:
+    """Allocated bytes of the paths measured so far, counting a block that several files share once."""
+
+    def __init__(self):
+        self.seen = set()
+
+    def __call__(self, path: Path) -> int:
+        """Bytes under `path` that no earlier measurement counted, following no symlinks."""
+        return sum(self.file(os.path.join(root, name)) for root, _, files in os.walk(path) for name in files)
+
+    def file(self, path: str) -> int:
+        try:
+            info = os.lstat(path)
+            if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) in self.seen:
+                return 0
+            self.seen.add((info.st_dev, info.st_ino))
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return 0
+        try:
+            total, offset = 0, 0
+            while offset < info.st_size:
+                request = LOG2PHYS.pack(0, info.st_size - offset, offset)
+                _, length, device = LOG2PHYS.unpack(fcntl.fcntl(fd, F_LOG2PHYS_EXT, request))
+                if length <= 0:
+                    break
+                if (info.st_dev, device) not in self.seen:
+                    self.seen.add((info.st_dev, device))
+                    total += -(-length // BLOCK) * BLOCK
+                offset += length
+            return min(total, info.st_blocks * 512)
+        except OSError:
+            # Compressed or sparse files have no plain mapping; count what they allocate.
+            return info.st_blocks * 512
+        finally:
+            os.close(fd)
 
 
 def revisions(model: str) -> list[Path]:
@@ -81,7 +114,7 @@ def checkpoints() -> dict[str, object]:
     return {repo.repo_id: repo for repo in cache.repos if repo.repo_type == "model"}
 
 
-def files(paths: list[Path]) -> dict:
+def files(paths: list[Path], size: Meter) -> dict:
     return {"paths": [str(p) for p in paths], "bytes": sum(map(size, paths))}
 
 
@@ -99,6 +132,7 @@ def usage() -> dict:
     cached = checkpoints()
     catalog = {entry["id"]: entry for entry in CATALOG}
     current, earlier = specializations()
+    size = Meter()  # bundles first, so Core AI's clones of their files add only what they do not share
     used, models = set(), []
     for model in model_ids():
         entry = catalog.get(model, {})
@@ -107,7 +141,7 @@ def usage() -> dict:
             compiled = sorted(current[key] for key in keys(revision) if key in current)
             used |= {p.name for p in compiled}
             bundles.append({"revision": revision.name, "path": str(revision), "bytes": size(revision),
-                            "current": revision.name == entry.get("revision"), "compiled": files(compiled)})
+                            "current": revision.name == entry.get("revision"), "compiled": files(compiled, size)})
         repo = cached.get(entry.get("original_model"))
         checkpoint = repo and {"repo": repo.repo_id, "path": str(repo.repo_path), "bytes": repo.size_on_disk}
         if bundles or checkpoint:
@@ -115,7 +149,7 @@ def usage() -> dict:
             total += checkpoint["bytes"] if checkpoint else 0
             models.append({"id": model, "name": entry.get("name", model), "bundles": bundles,
                            "checkpoint": checkpoint, "bytes": total})
-    unused = files([p for key, p in current.items() if key not in used] + earlier)
+    unused = files([p for key, p in current.items() if key not in used] + earlier, size)
     # uv links the packages from its cache, shared with other uv projects, into the environment.
     python = Path(sys.base_prefix)
     sites = {Path(p): size(Path(p)) for p in sys.path
