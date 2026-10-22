@@ -60,10 +60,12 @@ func formatBytes(_ bytes: Int64) -> String {
     static let unused = "unused compiled copies"
 
     func refresh() async {
+        guard removing.isEmpty else { return }
         await update([])
     }
 
     func removeUnused() async {
+        guard removing.isEmpty else { return }
         removing.insert(Self.unused)
         defer { removing.remove(Self.unused) }
         await update(["--remove-unused"])
@@ -72,6 +74,7 @@ func formatBytes(_ bytes: Int64) -> String {
     // Deletes a model's bundles, their compiled copies and its checkpoint; with `outdated`, only
     // bundles of revisions the catalog no longer loads.
     func remove(_ model: String, outdated: Bool = false) async {
+        guard removing.isEmpty else { return }
         removing.insert(model)
         defer { removing.remove(model) }
         await update(["--remove", model] + (outdated ? ["--outdated"] : []))
@@ -83,9 +86,12 @@ func formatBytes(_ bytes: Int64) -> String {
         let current = generation
         do {
             let report = try await Self.run(arguments)
-            if current == generation { self.report = report }
+            if current == generation {
+                self.report = report
+                self.error = nil
+            }
         } catch {
-            self.error = error.localizedDescription
+            if current == generation { self.error = error.localizedDescription }
         }
     }
 
@@ -163,7 +169,7 @@ struct StorageView: View {
                             ProgressView().controlSize(.small)
                         } else {
                             Button("Remove") { confirmingUnused = true }
-                                .disabled(report.unusedCompiled.paths.isEmpty)
+                                .disabled(report.unusedCompiled.paths.isEmpty || !storage.removing.isEmpty)
                         }
                     }
                     files("Python", detail: "The interpreter, managed by uv.",
@@ -239,12 +245,14 @@ struct StorageView: View {
             } else {
                 if !outdated.isEmpty && model.bundles.contains(where: \.current) {
                     Button("Remove Outdated") { Task { await demo.remove(model.id, outdated: true) } }
+                        .disabled(!demo.storage.removing.isEmpty)
                         .help("Delete \(formatBytes(outdated.map { $0.bytes + $0.compiled.bytes }.reduce(0, +))) "
                               + "of bundles this version no longer loads")
                 }
                 Button(role: .destructive) { pending = model } label: { Image(systemName: "trash") }
                     .buttonStyle(.borderless)
                     .help("Delete everything this model downloaded")
+                    .disabled(!demo.storage.removing.isEmpty)
             }
         }
     }

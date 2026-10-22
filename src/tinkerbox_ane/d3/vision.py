@@ -27,13 +27,6 @@ SCORES = 2048 * 2048
 HEAD_GROUPS = 4
 
 
-def as_rgb(image):
-    """A Pillow picture in RGB; the processor resizes it."""
-    if not hasattr(image, "convert"):
-        raise ValueError(f"invalid image input: {image!r}")
-    return image.convert("RGB")
-
-
 def conv(linear: nn.Linear) -> nn.Conv2d:
     """A linear layer as the equivalent 1 x 1 convolution over [1, channels, 1, patches]."""
     layer = nn.Conv2d(linear.in_features, linear.out_features, 1, bias=linear.bias is not None)

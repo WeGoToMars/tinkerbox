@@ -29,10 +29,10 @@ A model's `compile_model()` function can delegate to `tinkerbox_ane.coreai.compi
 
 - **Verification:** Validates source identity, full ANE placement (`mps.fullyPlacedOnANE`), target architecture, and minimum deployment version before accepting an asset.
 - **Safe Replacement:** Compiles into a temporary directory and verifies the result before replacing an existing target.
-- **Rebuilds:** Pass `force=True` to recompile an existing target when sources or build configurations change.
+- **Rebuilds:** Pass `force=True` to recompile an existing target when sources or build configurations change. Bundle builds keep verified stages in a sibling `.<name>.build` directory after failure and resume on retry. Only a complete build replaces the deployment directory, using an atomic macOS directory swap.
 - **Watchdog Protection:** Monitors compilation time, SSD write budgets, and free disk space, writing reports to `compile.json` and `compile.log` in the target's parent directory (pass `report=` to name them per asset).
 
-Exports write the upstream files their runtime reads into a `checkpoint` folder with `tinkerbox_ane.bundle.write_checkpoint()`: everything but the weights, plus a `model.safetensors` with only the named tensors. `compile_bundle()` and `install_bundle()` copy it into each bundle as an APFS clone, and `upload_release()` requires and publishes it.
+Exports write the upstream files their runtime reads into a `checkpoint` folder with `tinkerbox_ane.bundle.write_checkpoint()`: everything but the weights, plus a `model.safetensors` with only the named tensors. Exports record its `checkpoint_hash`; compilation and publishing verify that identity. `compile_bundle()` and `install_bundle()` copy it into each bundle as an APFS clone, and `upload_release()` requires matching text, vision and checkpoint identities across architectures before publishing.
 
 ## Publishing to Hugging Face Hub
 

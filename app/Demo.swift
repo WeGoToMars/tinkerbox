@@ -131,9 +131,14 @@ struct RunTotals {
     }
 
     func choose(_ choice: CatalogModel) async {
-        guard let task = choice.kind, choice.isSupported, choice.id != model || !ready else { return }
+        guard let task = choice.kind, choice.isSupported, !storage.removing.contains(choice.id),
+              choice.id != model || !ready else { return }
+        generation += 1
+        model = choice.id  // reserve its files before yielding to the runtime
+        ready = false
+        loading = true
         await runtime.select(model: choice.id, for: task)
-        model = choice.id
+        guard model == choice.id else { return }
         setupMs = nil
         await load()
     }
@@ -201,8 +206,8 @@ struct RunTotals {
         }
     }
 
-    // Models without question trees answer each question in its own pass.
-    var runMode: RunMode { demo.questionTrees && questions.count > 1 ? mode : .sequential }
+    // One request lets models without question trees share image encoding across their sequential passes.
+    var runMode: RunMode { demo.questionTrees && questions.count > 1 ? mode : .parallel }
 
     var canRun: Bool {
         demo.ready && !demo.busy && !(isBlank(state) && images.isEmpty)
@@ -1033,11 +1038,12 @@ struct ModelsView: View {
                     Button(role: .destructive) { pending = model } label: { Image(systemName: "trash") }
                         .buttonStyle(.borderless)
                         .help("Delete everything this model downloaded")
+                        .disabled(!demo.storage.removing.isEmpty)
                 }
                 Button(downloaded ? "Use" : "Download") {
                     Task { await demo.choose(model) }
                 }
-                .disabled(demo.busy)
+                .disabled(demo.busy || demo.storage.removing.contains(model.id))
             }
         }
     }

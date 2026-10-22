@@ -8,7 +8,7 @@ from functools import partial
 from pathlib import Path
 
 from tinkerbox_ane import publish
-from tinkerbox_ane.d1 import ARTIFACT_REPO, ARTIFACT_REVISION, KIND, SOURCE
+from tinkerbox_ane.d1 import ARTIFACT_REPO, ARTIFACT_REVISION, KIND, REPO, REVISION, SOURCE
 from tinkerbox_ane.d1.compile import compile_model
 from tinkerbox_ane.host import SUPPORTED_ARCHITECTURES
 
@@ -43,6 +43,7 @@ def upload_to_hub(
 ) -> str:
     """Verify and publish a complete macos27 release for the selected architectures."""
     return publish.upload_release(repo, staging, KIND, tag, license_file="LICENSES/LFM-Open-License-v1.0.txt",
+                                  expected_source={"repo": REPO, "revision": REVISION},
                                   architectures=architectures, metadata_dir=metadata_dir, token=token)
 
 

@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 def specialization(home, build, key, weights=None):
     """Core AI's compiled copy of an asset: an APFS clone of its weights, as Core AI makes, or new data."""
@@ -80,3 +82,35 @@ def test_report_and_remove_a_model_with_everything_it_downloaded(tmp_path: Path)
     models, found = storage(tmp_path, "--remove-unused")
     assert found == set() and not any(path.exists() for path in unused)
     assert models["d1-3b"]["bundles"][0]["compiled"]["paths"] == [str(other_compiled)]
+
+
+def test_removal_stays_inside_real_model_directories(tmp_path):
+    victim = tmp_path / "unrelated"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("keep")
+    cache = tmp_path / "Library/Caches/tinkerbox-ane/models"
+    cache.mkdir(parents=True)
+    (cache / "linked-model").symlink_to(victim, target_is_directory=True)
+    for name in [str(victim), "../../../../unrelated", "linked-model"]:
+        with pytest.raises(subprocess.CalledProcessError):
+            storage(tmp_path, "--remove", name)
+        assert (victim / "keep.txt").read_text() == "keep"
+
+
+def test_partial_clones_have_the_same_size_after_renaming(tmp_path):
+    folder = tmp_path / "Library/Caches/tinkerbox-ane/models/leftover/v1"
+    folder.mkdir(parents=True)
+    original, cloned = folder / "a.bin", folder / "b.bin"
+    original.write_bytes(os.urandom(4 * 1024**2))
+    subprocess.run(["cp", "-c", str(original), str(cloned)], check=True)
+    with cloned.open("r+b") as stream:
+        stream.seek(2 * 1024**2)
+        stream.write(os.urandom(1024**2))
+        stream.flush()
+        os.fsync(stream.fileno())
+    first, _ = storage(tmp_path)
+    original.rename(folder / "swap.bin")
+    cloned.rename(original)
+    (folder / "swap.bin").rename(cloned)
+    second, _ = storage(tmp_path)
+    assert first["leftover"]["bytes"] == second["leftover"]["bytes"] == 5 * 1024**2

@@ -9,6 +9,7 @@ hard-link others add only the blocks they do not share with files measured befor
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 import fcntl
 import json
 import os
@@ -38,7 +39,23 @@ class Meter:
     """Allocated bytes of the paths measured so far, counting a block that several files share once."""
 
     def __init__(self):
-        self.seen = set()
+        self.inodes = set()
+        self.ranges = {}
+
+    def extent(self, device: int, start: int, length: int) -> int:
+        start, end = start // BLOCK * BLOCK, -(-(start + length) // BLOCK) * BLOCK
+        ranges = self.ranges.setdefault(device, [])
+        first = bisect_left(ranges, (start,))
+        if first and ranges[first - 1][1] >= start:
+            first -= 1
+        last, lo, hi, added = first, start, end, end - start
+        while last < len(ranges) and ranges[last][0] <= hi:
+            a, b = ranges[last]
+            added -= max(0, min(end, b) - max(start, a))
+            lo, hi = min(lo, a), max(hi, b)
+            last += 1
+        ranges[first:last] = [(lo, hi)]
+        return added
 
     def __call__(self, path: Path) -> int:
         """Bytes under `path` that no earlier measurement counted, following no symlinks."""
@@ -47,23 +64,22 @@ class Meter:
     def file(self, path: str) -> int:
         try:
             info = os.lstat(path)
-            if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) in self.seen:
+            if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) in self.inodes:
                 return 0
-            self.seen.add((info.st_dev, info.st_ino))
             fd = os.open(path, os.O_RDONLY)
+            self.inodes.add((info.st_dev, info.st_ino))
         except OSError:
             return 0
         try:
-            total, offset = 0, 0
+            extents, offset = [], 0
             while offset < info.st_size:
                 request = LOG2PHYS.pack(0, info.st_size - offset, offset)
                 _, length, device = LOG2PHYS.unpack(fcntl.fcntl(fd, F_LOG2PHYS_EXT, request))
                 if length <= 0:
                     break
-                if (info.st_dev, device) not in self.seen:
-                    self.seen.add((info.st_dev, device))
-                    total += -(-length // BLOCK) * BLOCK
+                extents.append((device, length))
                 offset += length
+            total = sum(self.extent(info.st_dev, start, length) for start, length in extents)
             return min(total, info.st_blocks * 512)
         except OSError:
             # Compressed or sparse files have no plain mapping; count what they allocate.
@@ -74,7 +90,8 @@ class Meter:
 
 def revisions(model: str) -> list[Path]:
     folder = CACHE / model
-    return sorted(p for p in folder.iterdir() if p.is_dir() and not p.name.startswith(".")) if folder.is_dir() else []
+    return sorted(p for p in folder.iterdir() if p.is_dir() and not p.is_symlink()
+                  and not p.name.startswith(".")) if folder.is_dir() and not folder.is_symlink() else []
 
 
 def keys(revision: Path) -> set[str]:
@@ -121,7 +138,8 @@ def files(paths: list[Path], size: Meter) -> dict:
 def model_ids() -> list[str]:
     """Catalog models, then leftovers of earlier versions that are no longer in it."""
     catalog = [entry["id"] for entry in CATALOG]
-    found = sorted(p.name for p in CACHE.iterdir() if p.is_dir() and not p.name.startswith(".")) \
+    found = sorted(p.name for p in CACHE.iterdir() if p.is_dir() and not p.is_symlink()
+                   and not p.name.startswith(".")) \
         if CACHE.is_dir() else []
     return catalog + [model for model in found if model not in catalog]
 
@@ -163,9 +181,9 @@ def usage() -> dict:
 def remove(model: str, outdated: bool = False) -> None:
     """Delete a model's bundles, their compiled copies and its upstream checkpoint. With `outdated`,
     delete only bundle revisions other than the catalog's, and keep the checkpoint."""
-    entry = next((e for e in CATALOG if e["id"] == model), {})
-    if not entry and not (CACHE / model).is_dir():
+    if model not in model_ids() or (CACHE / model).is_symlink():
         raise ValueError(f"unknown model {model!r}")
+    entry = next((e for e in CATALOG if e["id"] == model), {})
     doomed = [r for r in revisions(model) if not outdated or r.name != entry.get("revision")]
     # Identical assets share a specialization: keep those another remaining bundle still uses.
     kept = [r for other in model_ids() for r in revisions(other) if r not in doomed]

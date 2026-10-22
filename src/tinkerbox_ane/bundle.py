@@ -71,9 +71,7 @@ def install_bundle(model: str, revision: str, source: Path, kind: str) -> Path:
         staged.mkdir()
         for name in [*asset_names(spec), CHECKPOINT, "model.json"]:
             clone(Path(source) / name, staged / name)
-        if target.exists():
-            shutil.rmtree(target)
-        staged.rename(target)
+        replace_directory(staged, target)
     return target
 
 
@@ -111,8 +109,7 @@ def write_checkpoint(upstream: Path, out: Path, tensors: Iterable[str]) -> Path:
                 (staged / relative).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(path, staged / relative)
         save_file(selected, staged / "model.safetensors", metadata={"format": "pt"})
-        shutil.rmtree(out / CHECKPOINT, ignore_errors=True)
-        staged.rename(out / CHECKPOINT)
+        replace_directory(staged, out / CHECKPOINT)
     except BaseException:
         shutil.rmtree(staged, ignore_errors=True)
         raise
@@ -127,6 +124,33 @@ def code_digest(checkpoint: Path) -> str:
         if not any(part.startswith(".") or part == "__pycache__" for part in relative.parts):
             digest.update(str(relative).encode() + b"\0" + path.read_bytes() + b"\0")
     return digest.hexdigest()
+
+
+def checkpoint_digest(checkpoint: Path) -> str:
+    """Release identity of the CPU tensors, configuration and source files, excluding local caches."""
+    digest = hashlib.sha256()
+    for path in sorted(Path(checkpoint).rglob("*")):
+        relative = path.relative_to(checkpoint)
+        if (not path.is_file() or path.suffix == ".pyc"
+                or any(part.startswith(".") or part == "__pycache__" for part in relative.parts)):
+            continue
+        digest.update(str(relative).encode() + b"\0")
+        with path.open("rb") as stream:
+            while data := stream.read(1024 * 1024):
+                digest.update(data)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def replace_directory(staged: Path, target: Path) -> None:
+    """Publish a complete directory; macOS RENAME_SWAP keeps an existing target continuously available."""
+    if not target.exists():
+        staged.rename(target)
+        return
+    if ctypes.CDLL(None, use_errno=True).renamex_np(os.fsencode(staged), os.fsencode(target), 2):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(target))
+    shutil.rmtree(staged)
 
 
 def clone(source: Path, target: Path) -> None:
@@ -212,6 +236,9 @@ def compile_bundle(
     if any(Path(name).suffix != ".aimodel" for name in asset_names(spec)):
         raise ValueError("compile requires a source .aimodel bundle")
     checkpoint = bundled_checkpoint(source)
+    checkpoint_hash = checkpoint_digest(checkpoint)
+    if spec.get("checkpoint_hash") != checkpoint_hash:
+        raise ValueError("checkpoint identity mismatch; re-export the bundle")
     if architecture is None:
         architecture = device_architecture()
     if (not architecture or Path(architecture).name != architecture
@@ -219,31 +246,43 @@ def compile_bundle(
         raise ValueError(f"invalid architecture: {architecture!r}")
     if not allow_unsupported:
         validate_architecture(architecture)
+    # Keep verified stages after a compiler failure, without touching the deployment bundle.
+    build = out.with_name(f".{out.name}.build")
+    identity = {"source": spec, "architecture": architecture, "force": force}
+    marker = build / ".source.json"
+    if build.exists() and (not marker.is_file() or json.loads(marker.read_text()) != identity):
+        shutil.rmtree(build)
+    if not build.exists():
+        if out.exists() and not force:
+            clone(out, build)
+        else:
+            build.mkdir(parents=True)
+        marker.write_text(json.dumps(identity))
     if "asset" in spec:
-        target = out / f"fused.{architecture}.aimodelc"
+        target = build / f"fused.{architecture}.aimodelc"
         compile_asset(source / spec["asset"], target, architecture=architecture, min_deployment_version="27.0",
-                      expected_functions=(f"c{capacity}" for capacity in spec["tiers"]), force=force)
+                      expected_functions=(f"c{capacity}" for capacity in spec["tiers"]))
         spec.update(asset=target.name)
     for stage in spec.get("assets", []):
-        target = out / f"{Path(stage['asset']).stem}.{architecture}.aimodelc"
+        target = build / f"{Path(stage['asset']).stem}.{architecture}.aimodelc"
         compile_asset(source / stage["asset"], target, architecture=architecture, min_deployment_version="27.0",
-                      expected_functions=stage["functions"], timeout=3600, force=force,
+                      expected_functions=stage["functions"], timeout=3600,
                       report=f"compile-{Path(stage['asset']).stem}")
         stage.update(asset=target.name)
     spec.update(architecture=architecture, min_os="27.0",
                 deployment="aot-staged" if "assets" in spec else "aot-fused")
     if "vision_asset" in spec:
-        vision = out / f"vision.{architecture}.aimodelc"
+        vision = build / f"vision.{architecture}.aimodelc"
         compile_asset(source / spec["vision_asset"], vision, architecture=architecture,
                       min_deployment_version="27.0", expected_functions=spec.get("vision_functions", ("main",)),
-                      force=force, report="compile-vision")
+                      report="compile-vision")
         spec.update(vision_asset=vision.name)
-    staged = out / f".{CHECKPOINT}"
+    staged = build / f".{CHECKPOINT}"
     shutil.rmtree(staged, ignore_errors=True)
     clone(checkpoint, staged)
-    shutil.rmtree(out / CHECKPOINT, ignore_errors=True)
-    staged.rename(out / CHECKPOINT)
-    manifest = out / ".model.json"
+    replace_directory(staged, build / CHECKPOINT)
+    manifest = build / "model.json"
     manifest.write_text(json.dumps(spec, indent=2) + "\n")
-    manifest.replace(out / "model.json")
+    marker.unlink()
+    replace_directory(build, out)
     return out

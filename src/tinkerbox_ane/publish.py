@@ -84,6 +84,7 @@ def upload_release(
     tag: str | None = None,
     *,
     license_file: str,
+    expected_source: dict | None = None,
     architectures: Iterable[str] | None = None,
     metadata_dir: Path | None = None,
     token: str | None = None,
@@ -92,7 +93,7 @@ def upload_release(
 
     Release metadata (LICENSE, NOTICE, README.md) comes from `metadata_dir`, or else from staging and
     then the repository root; `license_file` is the LICENSE source relative to that directory."""
-    from tinkerbox_ane.bundle import CHECKPOINT, asset_names, bundled_checkpoint, read_bundle, resources
+    from tinkerbox_ane.bundle import CHECKPOINT, asset_names, bundled_checkpoint, checkpoint_digest, read_bundle, resources
 
     staging = Path(staging)
     if architectures is None:
@@ -108,17 +109,24 @@ def upload_release(
         if (spec.get("architecture") != architecture
                 or any(not name.endswith(f".{architecture}.aimodelc") for name in names)):
             raise ValueError(f"{directory}: bundle does not target {architecture}")
-        identities.add(tuple(entry[identity] for entry, name, identity in resources(spec) if name == "asset"))
-        bundled_checkpoint(directory)
+        if expected_source is not None and spec["source"] != expected_source:
+            raise ValueError(f"{directory}: bundle source does not match the selected model")
+        checkpoint_hash = checkpoint_digest(bundled_checkpoint(directory))
+        if spec.get("checkpoint_hash") != checkpoint_hash:
+            raise ValueError(f"{directory}: checkpoint identity mismatch; re-export and compile the bundle")
+        identities.add((tuple(entry[identity] for entry, _, identity in resources(spec)), checkpoint_hash))
         bundles[architecture] = f"macos27/{architecture}/model.json"
         patterns += [f"macos27/{architecture}/model.json", f"macos27/{architecture}/{CHECKPOINT}/**"]
         patterns.extend(f"macos27/{architecture}/{name}/**" for name in names)
     if len(identities) != 1:
         raise ValueError("release requires bundles with the same source identity")
-    hashes = next(iter(identities))
+    hashes = tuple(entry[identity] for entry, name, identity in resources(spec) if name == "asset")
     # One shared release index is also the Hub's default download-counting file.
     index = {"version": 2, "source_hash": hashes[0]} if len(hashes) == 1 else {"version": 2, "source_hashes": list(hashes)}
-    (staging / "config.json").write_text(json.dumps(index | {"bundles": bundles}, indent=2) + "\n")
+    index.update(checkpoint_hash=checkpoint_hash, bundles=bundles)
+    if "vision_source_hash" in spec:
+        index["vision_source_hash"] = spec["vision_source_hash"]
+    (staging / "config.json").write_text(json.dumps(index, indent=2) + "\n")
     fallback_root = Path(metadata_dir) if metadata_dir is not None else Path(".")
     for name in ("LICENSE", "NOTICE", "README.md"):
         target = staging / name

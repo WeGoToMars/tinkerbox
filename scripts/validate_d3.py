@@ -6,7 +6,7 @@ public benchmarks, a short prompt and long needle prompts, keeping those within 
 
 import argparse
 import json
-import math
+import hashlib
 from pathlib import Path
 import time
 
@@ -14,6 +14,7 @@ import tinkerbox_ane
 from tinkerbox_ane.bundle import read_bundle
 from tinkerbox_ane.d3 import KIND, VARIANTS, checkpoint
 from tinkerbox_ane.d3.runtime import d3_code
+from tinkerbox_ane.validation import distribution
 
 
 def picture(spec):
@@ -53,12 +54,6 @@ def cases():
             (None, order, [{"size": [1280, 960], "color": "white", "stripes": rgb}]),
             (None, order, [{"size": [1200, 400], "color": "white", "stripes": list(reversed(rgb))}]),
             ("Two photos.", same, [{"size": [512, 512], "color": "red"}, {"size": [800, 600], "color": "red"}])]
-
-
-def distribution(values, count):
-    if len(values) != count or not math.isclose(sum(values), 1, abs_tol=1e-4):
-        raise ValueError("expected one probability per option, summing to one")
-    return list(values)
 
 
 def decision_set(path):
@@ -125,47 +120,84 @@ def build_reference(model, out, questions=None, dtype="float32"):
     out.write_text(json.dumps(document, indent=2) + "\n")
 
 
-def validate(asset, reference, baseline=None):
+def validate(asset, reference, baseline=None, *, smoke=False):
     spec = read_bundle(asset, KIND)
-    model = next(name for name, (repo, _, _) in VARIANTS.items() if repo == spec["source"]["repo"])
-    document = json.loads(Path(reference).read_text())
-    if document["reference"]["revision"] != spec["source"]["revision"]:
-        raise ValueError("reference and bundle use different checkpoints")
+    source = spec["source"]
+    model = next(name for name, (repo, _, _) in VARIANTS.items() if repo == source["repo"])
+    reference_bytes = Path(reference).read_bytes()
+    document = json.loads(reference_bytes)
+    repo, revision, _ = VARIANTS[model]
+    if source != {"repo": repo, "revision": revision}:
+        raise ValueError("bundle does not use a pinned d3 checkpoint")
+    expected = {"repository": repo, "revision": revision,
+                "implementation": "official", "dtype": "float32", "device": "cpu"}
+    if document.get("reference") != expected:
+        raise ValueError("reference must use the pinned official FP32 CPU model")
+    if not document.get("items"):
+        raise ValueError("reference has no decisions")
+    for item in document["items"]:
+        count = 2 if item["question"]["type"] == "noul" else len(item["question"]["criteria"])
+        distribution(item["reference"], count)
+        if not item["images"] and not item.get("ids"):
+            raise ValueError("text references need exact prompt token IDs")
+
     records = []
-    tiers = spec["tiers"]
+    tiers, prompts = spec["tiers"], spec.get("prompts", [])
+
+    def path(tokens):
+        width = next((w for w in prompts if w >= tokens), None)
+        return f"prompt{width}" if width else f"attention{next(t for t in tiers if t >= tokens)}"
+
+    # Short prompts use whole-prompt functions, making smaller attention functions unreachable.
+    required = {f"prompt{w}" for w in prompts} | {f"attention{t}" for t in tiers if t > max(prompts, default=0)}
+    covered = set()
     with tinkerbox_ane.load(model, asset) as runtime:
         warmed = set()
-        for item in document["items"]:
-            tier = next(t for t in tiers if t >= item["tokens"])
-            # Exclude first-use specialization from latency.
-            if tier not in warmed:
-                runtime.probabilities(item["state"], [item["question"]], [picture(i) for i in item["images"]])
-                warmed.add(tier)
+        patch_tiers = [int(name[1:]) for name in spec.get("vision_functions", [])]
         for item in document["items"]:
             images = [picture(image) for image in item["images"]]
+            counted = runtime.count_tokens(item["state"], {"q": item["question"]}, images)
+            tokens = counted["input_tokens"]
+            execution = path(tokens)
+            vision = tuple(next(p for p in patch_tiers if p >= image["tokens"] * 4)
+                           for image in counted["images"])
+            key = (execution, vision)
+            if key not in warmed:
+                runtime.probabilities(item["state"], [item["question"]], images)
+                warmed.add(key)
             started = time.perf_counter()
             got = runtime.probabilities(item["state"], [item["question"]], images)[0]
             latency = time.perf_counter() - started
-            tokens = runtime.count_tokens(item["state"], {"q": item["question"]}, images)["input_tokens"]
-            ref = item["reference"]
-            drift = [abs(a - b) for a, b in zip(got, ref)]
+            ref = distribution(item["reference"], len(got))
+            distribution(got, len(ref))
+            token_match = tokens == item["tokens"] and (bool(images) or runtime.tokens(
+                item["state"], item["question"]) == item["ids"])
+            covered.add(execution)
             records.append({"source": item.get("source", "image" if images else "text"), "label": item.get("label"),
                             "tokens": tokens, "tier": next(t for t in tiers if t >= tokens), "images": len(images),
-                            "probabilities": got, "reference": ref, "max_probability_drift": max(drift),
-                            "latency_s": latency, "token_match": tokens == item["tokens"],
+                            "path": execution, "vision_capacities": list(vision),
+                            "probabilities": got, "reference": ref,
+                            "max_probability_drift": max(abs(a - b) for a, b in zip(got, ref)),
+                            "latency_s": latency, "token_match": token_match,
                             "agreement": got.index(max(got)) == ref.index(max(ref))})
     report = {"asset": str(Path(asset).resolve()), "architecture": spec["architecture"],
-              "source_hashes": [a["source_hash"] for a in spec["assets"]], **summary(records),
+              "reference": expected, "reference_sha256": hashlib.sha256(reference_bytes).hexdigest(),
+              "source_hashes": [a["source_hash"] for a in spec["assets"]],
+              "vision_source_hash": spec.get("vision_source_hash"), "checkpoint_hash": spec.get("checkpoint_hash"),
+              "mode": "smoke" if smoke else "acceptance", "missing_paths": sorted(required - covered),
+              **summary(records),
               "tiers": {str(tier): summary([r for r in records if r["tier"] == tier])
                         for tier in sorted({r["tier"] for r in records})}, "records": records}
     if baseline:
         # The same drift measures for another official precision, such as BF16, on the same items.
         others = json.loads(Path(baseline).read_text())
-        if [item["tokens"] for item in others["items"]] != [item["tokens"] for item in document["items"]]:
+        identity = lambda item: (item["state"], item["question"], item["images"], item["tokens"])
+        if ((others["reference"].get("repository"), others["reference"].get("revision")) != (repo, revision)
+                or list(map(identity, others["items"])) != list(map(identity, document["items"]))):
             raise ValueError("baseline and reference cover different items")
         compared = [{**r, "probabilities": got, "latency_s": 0,
                      "agreement": got.index(max(got)) == r["reference"].index(max(r["reference"]))}
-                    for r, got in zip(records, (item["reference"] for item in others["items"]))]
+                    for r, got in zip(records, (distribution(item["reference"]) for item in others["items"]))]
 
         def drift(rows):
             return {k: v for k, v in summary(rows).items() if k not in ("p50_ms", "label_accuracy")}
@@ -174,10 +206,11 @@ def validate(asset, reference, baseline=None):
                                         for tier in report["tiers"]}}
     # d1's gates, except a maximum drift of 0.1 and 96% agreement per tier: the Neural Engine
     # runs the Gated DeltaNet recurrence in FP16, which upstream keeps in FP32.
-    report["passed"] = (all(r["token_match"] for r in records) and report["agreement"] >= .97
-                        and report["max_probability_drift"] <= .1 and report["mean_probability_drift"] <= .005
-                        and all(t["agreement"] >= .96 and t["mean_probability_drift"] <= .01
-                                for t in report["tiers"].values()))
+    report["smoke_passed"] = (all(r["token_match"] for r in records) and report["agreement"] >= .97
+                              and report["max_probability_drift"] <= .1 and report["mean_probability_drift"] <= .005
+                              and all(t["agreement"] >= .96 and t["mean_probability_drift"] <= .01
+                                      for t in report["tiers"].values()))
+    report["passed"] = report["smoke_passed"] and not report["missing_paths"]
     return report
 
 
@@ -207,6 +240,7 @@ def main():
                         help="With --write-reference: official precision; validation gates use float32")
     parser.add_argument("--baseline", type=Path,
                         help="With --asset: a reference of the same items at another precision to report beside")
+    parser.add_argument("--smoke", action="store_true", help="Allow partial coverage; the report still distinguishes acceptance")
     parser.add_argument("--asset", type=Path)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
@@ -215,11 +249,11 @@ def main():
     else:
         if not args.asset or not args.out:
             parser.error("validation requires --asset and --out")
-        report = validate(args.asset, args.reference, args.baseline)
+        report = validate(args.asset, args.reference, args.baseline, smoke=args.smoke)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps({k: v for k, v in report.items() if k != "records"}, indent=2))
-        raise SystemExit(0 if report["passed"] else 1)
+        raise SystemExit(0 if report["smoke_passed" if args.smoke else "passed"] else 1)
 
 
 if __name__ == "__main__":

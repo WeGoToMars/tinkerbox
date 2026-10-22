@@ -52,7 +52,7 @@ def check_layout(spec: dict) -> None:
     counted = [(asset.get("flops"), asset["functions"]) for asset in spec["assets"]]
     if "vision_asset" in spec:
         counted.append((spec.get("vision_flops"), spec["vision_functions"]))
-    if any(not isinstance(flops, dict) or list(flops) != functions
+    if any(not isinstance(flops, dict) or set(flops) != set(functions)
            or any(type(n) is not int or n <= 0 for n in flops.values()) for flops, functions in counted):
         raise ValueError("bundle lacks FLOP counts for its functions; re-export the model")
 

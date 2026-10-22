@@ -193,3 +193,32 @@ def test_image_tile_limit_and_token_counts(model):
     tree = model.system_one('Hello there', questions)
     assert model.count_tokens('Hello there', questions) == {
         'input_tokens': tree['usage']['input_tokens'], 'image_tiles': 0, 'images': []}
+
+
+def test_bundle_configuration_cannot_load_external_code(model, tmp_path):
+    import json
+    from PIL import Image
+    from tinkerbox_ane.bundle import clone
+
+    bundle = tmp_path / "bundle"
+    clone(DEFAULT_ASSET, bundle)
+    marker = tmp_path / "executed.txt"
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "configuration_probe.py").write_text(
+        "from pathlib import Path\n"
+        "from transformers.models.lfm2_vl.configuration_lfm2_vl import Lfm2VlConfig\n"
+        f"Path({str(marker)!r}).write_text('executed')\n"
+        "class ProbeConfig(Lfm2VlConfig):\n    pass\n")
+    config = bundle / "checkpoint/config.json"
+    content = json.loads(config.read_text())
+    content.setdefault("auto_map", {})["AutoConfig"] = f"{external}--configuration_probe.ProbeConfig"
+    config.write_text(json.dumps(content))
+    # Mapping order is not part of a bundle's execution contract.
+    manifest = bundle / "model.json"
+    manifest.write_text(json.dumps(json.loads(manifest.read_text()), sort_keys=True))
+    with tinkerbox_ane.load(MODEL, bundle) as runtime:
+        result = runtime.system_one(None, {"blue": {"type": "noul", "instructions": "Is this image blue?"}},
+                                    [Image.new("RGB", (64, 64), "blue")])
+    assert result["answers"]["blue"]["noul"] > .95
+    assert not marker.exists()

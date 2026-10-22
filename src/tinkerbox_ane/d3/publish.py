@@ -7,6 +7,7 @@ from functools import partial
 from pathlib import Path
 
 from tinkerbox_ane import publish
+from tinkerbox_ane.bundle import read_bundle
 from tinkerbox_ane.d3 import KIND, VARIANTS
 from tinkerbox_ane.d3.compile import compile_model
 from tinkerbox_ane.host import SUPPORTED_ARCHITECTURES
@@ -34,15 +35,20 @@ def main(argv: list[str] | None = None) -> int:
     item = entry(args.model)
     repo, tag = args.repo or item["repo"], args.tag or item["revision"]
     staging = args.staging or Path("artifacts/huggingface") / repo.split("/")[-1]
+    upstream, revision, _ = VARIANTS[args.model]
+    source = {"repo": upstream, "revision": revision}
 
     architectures = args.arch
     if not args.upload_only:
+        if read_bundle(args.source, KIND)["source"] != source:
+            raise ValueError("export source does not match the selected model")
         bundles = publish.build_architectures(
             partial(compile_model, allow_unsupported=args.allow_unsupported), args.source,
             staging / "macos27", architectures, force=args.force, continue_on_error=args.continue_on_error)
         architectures = list(bundles)
     if not args.no_upload:
         commit = publish.upload_release(repo, staging, KIND, tag, license_file="LICENSES/Apache-2.0.txt",
+                                        expected_source=source,
                                         architectures=architectures, metadata_dir=args.metadata)
         print(f"Published {repo} at {commit}")
     return int(set(architectures) != set(args.arch))

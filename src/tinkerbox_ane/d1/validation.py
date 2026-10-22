@@ -6,18 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from tinkerbox_ane.d1 import REPO, REVISION
-
-
-def distribution(values, expected=None) -> list[float]:
-    if not isinstance(values, (list, tuple)) or len(values) < 2:
-        raise ValueError("expected at least two option probabilities")
-    if expected is not None and len(values) != expected:
-        raise ValueError(f"expected {expected} probabilities, got {len(values)}")
-    if any(type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1 for value in values):
-        raise ValueError("probabilities must be finite numbers in [0, 1]")
-    if not math.isclose(sum(values), 1., abs_tol=1e-5):
-        raise ValueError("probabilities must sum to one")
-    return list(values)
+from tinkerbox_ane.validation import distribution
 
 
 def reference_metadata() -> dict:

@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from safetensors import safe_open
-from transformers import AutoConfig, AutoModel, AutoProcessor
+from transformers import AutoConfig, AutoModel, Lfm2VlConfig, Lfm2VlProcessor
 from transformers.models.lfm2_vl.modeling_lfm2_vl import Lfm2VlMultiModalProjector
 
 from tinkerbox_ane.coreai import count_flops, source_hash
@@ -73,7 +73,7 @@ def load_projector(checkpoint_dir: Path) -> Lfm2VlMultiModalProjector:
     Runs on CPU in FP32 to utilize Accelerate's sgemm matrix kernels, which lack
     optimized FP16 implementations on Apple Silicon CPU."""
     checkpoint_dir = Path(checkpoint_dir)
-    config = AutoConfig.from_pretrained(checkpoint_dir, trust_remote_code=True)
+    config = Lfm2VlConfig.from_pretrained(checkpoint_dir)
     proj = Lfm2VlMultiModalProjector(config)
     proj.load_state_dict(checkpoint_tensors(checkpoint_dir, "model.multi_modal_projector."))
     return proj.eval().float()
@@ -106,7 +106,7 @@ class VisionPipeline:
 
     def __init__(self, checkpoint_dir: Path, host: Any):
         checkpoint_dir = Path(checkpoint_dir)
-        self.processor = AutoProcessor.from_pretrained(checkpoint_dir, trust_remote_code=True)
+        self.processor = Lfm2VlProcessor.from_pretrained(checkpoint_dir)
         self.projector = load_projector(checkpoint_dir)
         self.host = host
         self.pos_weight = checkpoint_tensors(
