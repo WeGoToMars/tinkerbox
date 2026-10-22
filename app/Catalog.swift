@@ -121,3 +121,65 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
         }.map(\.id))
     }
 }
+
+// Bundles download in their own processes, beside the runtime: switching models neither waits for
+// nor stops a download, and the previous model stays loaded until the next one is ready.
+@MainActor @Observable final class Downloads {
+    static var processes: [String: Process] = [:]  // by model; stopped when the app quits
+    private(set) var progress: [String: Double] = [:]  // by model, once the download size is known
+    private var tasks: [String: Task<Void, Error>] = [:]
+    private var stopped: Set<String> = []
+
+    func contains(_ model: String) -> Bool { tasks[model] != nil }
+
+    // Waits for a model's download, starting it unless it is already running.
+    func fetch(_ model: String) async throws {
+        if let task = tasks[model] { return try await task.value }
+        let task = Task {
+            defer {
+                tasks[model] = nil
+                progress[model] = nil
+            }
+            try await run(model)
+        }
+        tasks[model] = task
+        try await task.value
+    }
+
+    // Stops a download and waits for it to end; its partial files stay until the model is removed.
+    // Those waiting for it see a CancellationError.
+    func stop(_ model: String) async {
+        guard let task = tasks[model] else { return }
+        stopped.insert(model)
+        Runtime.stop(Self.processes[model])
+        _ = try? await task.value
+    }
+
+    private func run(_ model: String) async throws {
+        struct Update: Decodable { let progress: Double? }
+        defer { stopped.remove(model) }
+        let process = Process(), output = Pipe(), errors = Pipe()
+        Runtime.configure(process, python: ["-u", "-m", "tinkerbox_ane.download", model])
+        process.environment!["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = output
+        process.standardError = errors
+        try process.run()
+        Self.processes[model] = process
+        defer { Self.processes[model] = nil }
+        // Read both pipes at once so neither fills up and stalls the other.
+        async let failure = Task.detached { errors.fileHandleForReading.readDataToEndOfFile() }.value
+        for try await line in output.fileHandleForReading.bytes.lines {
+            if let value = (try? JSONDecoder().decode(Update.self, from: Data(line.utf8)))?.progress {
+                progress[model] = value
+            }
+        }
+        let details = String(decoding: await failure, as: UTF8.self)
+        await Task.detached { process.waitUntilExit() }.value
+        if stopped.contains(model) { throw CancellationError() }
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "Tinkerbox", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "Could not download the model.\n\(details.suffix(2000))"])
+        }
+    }
+}

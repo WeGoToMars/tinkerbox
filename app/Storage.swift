@@ -219,7 +219,7 @@ struct StorageView: View {
     }
 
     private func row(_ model: StorageReport.Model) -> some View {
-        let inUse = model.id == demo.model
+        let kept = demo.keeps(model.id)
         let removing = demo.storage.removing.contains(model.id)
         let outdated = model.bundles.filter { !$0.current }
         return HStack(alignment: .center, spacing: 12) {
@@ -242,20 +242,27 @@ struct StorageView: View {
             Spacer()
             if removing {
                 ProgressView().controlSize(.small)
-            } else if inUse {
-                Text(demo.loading ? "Loading" : demo.ready ? "In use" : "Selected")
-                    .font(.caption).foregroundStyle(.secondary)
             } else {
+                if let progress = demo.downloads.progress[model.id] {
+                    Text("Downloading \(Int(progress * 100))%").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                } else if kept {
+                    let runtime = demo.runtime.state
+                    Text(model.id != runtime.model ? "Selected" : runtime.loading ? "Loading" : "In use")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if !outdated.isEmpty && model.bundles.contains(where: \.current) {
                     Button("Remove Outdated") { Task { await demo.remove(model.id, outdated: true) } }
                         .disabled(!demo.storage.removing.isEmpty)
                         .help("Delete \(formatBytes(outdated.map { $0.bytes + $0.compiled.bytes }.reduce(0, +))) "
                               + "of bundles this version no longer loads")
                 }
-                Button(role: .destructive) { pending = model } label: { Image(systemName: "trash") }
-                    .buttonStyle(.borderless)
-                    .help("Delete model files and cached copies")
-                    .disabled(!demo.storage.removing.isEmpty)
+                if !kept {
+                    Button(role: .destructive) { pending = model } label: { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                        .help(demo.downloads.contains(model.id) ? "Stop the download and delete its files"
+                              : "Delete model files and cached copies")
+                        .disabled(!demo.storage.removing.isEmpty)
+                }
             }
         }
     }

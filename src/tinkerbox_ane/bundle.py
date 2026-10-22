@@ -21,7 +21,7 @@ CACHE = Path.home() / "Library/Caches/tinkerbox-ane/models"
 
 
 def download_bundle(model: str, repo: str, revision: str, progress=None) -> Path:
-    from huggingface_hub import HfApi, snapshot_download
+    from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
     from tinkerbox_ane.host import chip_name, device_architecture, validate_architecture
 
@@ -31,16 +31,22 @@ def download_bundle(model: str, repo: str, revision: str, progress=None) -> Path
     folder = f"macos27/{architecture}"
     root = CACHE / model / revision
     bundle = root / folder
-    fetch = dict(repo_id=repo, revision=revision, allow_patterns=["config.json", f"{folder}/*"], local_dir=root)
+
+    def fetch():
+        # The manifest comes last, so a bundle that has one is complete.
+        snapshot_download(repo, revision=revision, allow_patterns=["config.json", f"{folder}/*"],
+                          ignore_patterns=[f"{folder}/model.json"], local_dir=root)
+        hf_hub_download(repo, f"{folder}/model.json", revision=revision, local_dir=root)
+
     try:
         if progress is None:
-            snapshot_download(**fetch)
+            fetch()
         else:
             files = HfApi().model_info(repo, revision=revision, files_metadata=True).siblings
             total = sum(f.size or 0 for f in files
                         if f.rfilename == "config.json" or f.rfilename.startswith(f"{folder}/"))
             with ThreadPoolExecutor(1) as pool:
-                done = pool.submit(snapshot_download, **fetch)
+                done = pool.submit(fetch)
                 # Partial files grow under the local cache folder until they are moved into place.
                 while wait([done], timeout=0.5).not_done:
                     progress(sum(p.stat().st_size for p in root.rglob("*") if p.is_file()), total)

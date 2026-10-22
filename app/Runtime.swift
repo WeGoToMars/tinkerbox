@@ -172,6 +172,7 @@ struct Reply: Decodable, Sendable {
 @MainActor @Observable final class RuntimeState {
     nonisolated init() {}
     var reply: Reply?
+    var model: String?  // loaded, or being loaded
     var loading = false
     var status = "Preparing runtime…"
     var progress: Double?
@@ -282,6 +283,7 @@ actor Runtime {
         if let readyReply, readyReply.modelId == model, process?.isRunning == true, replies != nil { return readyReply }
         readyReply = nil
         await MainActor.run {
+            state.model = model
             state.loading = true
             state.reply = nil
             state.status = "Preparing runtime…"
@@ -439,6 +441,7 @@ actor Runtime {
         }
         await MainActor.run {
             state.reply = nil
+            state.model = nil
             state.loading = false
             state.progress = nil
             Runtime.workerProcess = nil

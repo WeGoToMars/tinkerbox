@@ -57,11 +57,13 @@ struct RunTotals {
 @MainActor @Observable final class Demo {
     var catalog = Catalog()
     let storage = Storage()
+    let downloads = Downloads()
     var model = Runtime.selectedModel(for: .decision)
     var ready: Bool { runtime.state.reply?.modelId == model }
-    var loading: Bool { runtime.state.loading }
-    var status: String { runtime.state.status }
-    var progress: Double? { runtime.state.progress }
+    // The selected model's download, then the runtime loading it.
+    var loading: Bool { downloads.contains(model) || runtime.state.loading }
+    var status: String { downloads.contains(model) ? "Downloading model…" : runtime.state.status }
+    var progress: Double? { downloads.contains(model) ? downloads.progress[model] : runtime.state.progress }
     var busy = false  // a request from the app is running
     var unloading = false
     var error: String?
@@ -81,24 +83,31 @@ struct RunTotals {
 
     var current: CatalogModel? { catalog.models.first { $0.id == model } }
 
+    func isDownloaded(_ id: String) -> Bool { catalog.downloaded.contains(id) && !downloads.contains(id) }
+
     // The models a task can switch to without a download; the Models library lists the rest.
     func models(for task: ModelTask) -> [CatalogModel] {
         catalog.models.filter { model in
-            model.kind == task && model.isSupported && (catalog.downloaded.contains(model.id) || model.id == self.model)
+            model.kind == task && model.isSupported && (isDownloaded(model.id) || model.id == self.model)
         }
+    }
+
+    // Downloads run beside the runtime, so they never hold up requests or model switches.
+    private func fetch(_ id: String) async throws {
+        // The worker loads a local bundle given at launch instead.
+        guard !isDownloaded(id), ProcessInfo.processInfo.environment["TINKERBOX_ASSET"] == nil else { return }
+        defer {
+            catalog.scanDownloads()
+            Task { await storage.refresh() }
+        }
+        try await downloads.fetch(id)
     }
 
     func load() async {
         // A model switch supersedes an earlier load; ignore that load's outcome.
         generation += 1
         let current = generation
-        error = nil
-        modelName = nil
-        cpuModel = nil
-        architecture = nil
-        settings = []
-        info = []
-        settingValues = Runtime.settings(for: model)
+        forgetLoadedModel()
         defer {
             if current == generation {
                 catalog.scanDownloads()
@@ -106,6 +115,8 @@ struct RunTotals {
             }
         }
         do {
+            try await fetch(model)
+            guard current == generation else { return }
             let reply = try await runtime.start(model: model)
             guard current == generation else { return }
             setupMs = reply.setupMs
@@ -115,18 +126,38 @@ struct RunTotals {
             questionTrees = reply.questionTrees == true
             settings = reply.settings ?? []
             info = reply.info ?? []
+        } catch is CancellationError {
+            // Its download was stopped to remove the model.
         } catch {
             if current == generation { self.error = error.localizedDescription }
         }
     }
 
+    private func forgetLoadedModel() {
+        error = nil
+        modelName = nil
+        cpuModel = nil
+        architecture = nil
+        settings = []
+        info = []
+        settingValues = Runtime.settings(for: model)
+    }
+
+    // The previous model keeps serving Shortcuts until the chosen one has downloaded.
     func choose(_ choice: CatalogModel) async {
         guard let task = choice.kind, choice.isSupported, !storage.removing.contains(choice.id),
               choice.id != model || !ready else { return }
         generation += 1
+        let current = generation
         model = choice.id  // reserve its files before yielding to the runtime
+        forgetLoadedModel()  // its settings are not the chosen model's
+        do { try await fetch(choice.id) } catch {
+            if current == generation && !(error is CancellationError) { self.error = error.localizedDescription }
+            return
+        }
+        guard current == generation else { return }
         await runtime.select(model: choice.id, for: task)
-        guard model == choice.id else { return }
+        guard current == generation else { return }
         setupMs = nil
         await load()
     }
@@ -138,9 +169,15 @@ struct RunTotals {
         await runtime.unload()
     }
 
-    // The model in use, or being loaded, keeps its files.
+    // The model the runtime has loaded or is loading, and the selected one once downloaded, keep their files.
+    func keeps(_ id: String) -> Bool { id == runtime.state.model || (id == model && isDownloaded(id)) }
+
+    // Removing a model stops its download first. Outdated revisions are never loaded, so any model can lose them.
     func remove(_ id: String, outdated: Bool = false) async {
-        guard id != model else { return }
+        if !outdated {
+            guard !keeps(id) else { return }
+            await downloads.stop(id)
+        }
         await storage.remove(id, outdated: outdated)
         catalog.scanDownloads()
     }
@@ -999,7 +1036,11 @@ struct ModelsView: View {
     }
 
     private func row(_ model: CatalogModel) -> some View {
-        let downloaded = demo.catalog.downloaded.contains(model.id)
+        let downloaded = demo.isDownloaded(model.id)
+        let downloading = demo.downloads.contains(model.id)
+        // Partial downloads count, so an interrupted one can be deleted.
+        let stored = demo.catalog.downloaded.contains(model.id) || downloading
+            || demo.storage.report?.models.contains { $0.id == model.id } == true
         let inputs = model.inputs?.map { $0 == "image" ? "Images" : $0.capitalized }.joined(separator: " + ")
         let details = [inputs, model.context.map { "\($0 / 1024)K-token context" },
                        model.downloadBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) },
@@ -1035,28 +1076,36 @@ struct ModelsView: View {
                 Text(Catalog.isNewer(model.minVersion, than: Catalog.appVersion)
                      ? "Requires Tinkerbox \(model.minVersion)" : "Update Tinkerbox to use this model")
                     .font(.caption).foregroundStyle(.secondary)
-            } else if model.id == demo.model && demo.loading {
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(demo.status).font(.caption).foregroundStyle(.secondary)
-                    ProgressView(value: demo.progress).frame(width: 120)
-                }
-            } else if model.id == demo.model {
-                Label("Selected", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(demo.ready ? .green : .secondary)
-                    .help("Used by Decision and Shortcuts")
             } else {
+                if model.id == demo.model && demo.loading {
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text(demo.status).font(.caption).foregroundStyle(.secondary)
+                        ProgressView(value: demo.progress).frame(width: 120)
+                    }
+                } else if downloading {
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("Downloading in background…").font(.caption).foregroundStyle(.secondary)
+                        ProgressView(value: demo.downloads.progress[model.id]).frame(width: 120)
+                    }
+                } else if model.id == demo.model {
+                    Label("Selected", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(demo.ready ? .green : .secondary)
+                        .help("Used by Decision and Shortcuts")
+                }
                 if demo.storage.removing.contains(model.id) {
                     ProgressView().controlSize(.small)
-                } else if downloaded {
+                } else if stored && !demo.keeps(model.id) {
                     Button(role: .destructive) { pending = model } label: { Image(systemName: "trash") }
                         .buttonStyle(.borderless)
-                        .help("Delete model files and cached copies")
+                        .help(downloading ? "Stop the download and delete its files" : "Delete model files and cached copies")
                         .disabled(!demo.storage.removing.isEmpty)
                 }
-                Button(downloaded ? "Select" : "Download & Select") {
-                    Task { await demo.choose(model) }
+                if model.id != demo.model {
+                    Button(downloaded ? "Select" : "Download & Select") {
+                        Task { await demo.choose(model) }
+                    }
+                    .disabled(demo.busy || demo.storage.removing.contains(model.id))
                 }
-                .disabled(demo.busy || demo.storage.removing.contains(model.id))
             }
         }
     }
@@ -1160,6 +1209,7 @@ struct SystemFooter: View {
 
     func applicationWillTerminate(_ notification: Notification) {
         Runtime.stop(Runtime.workerProcess)
+        Downloads.processes.values.forEach { Runtime.stop($0) }
     }
 }
 

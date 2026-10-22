@@ -52,7 +52,7 @@ Each question is configured as a card. With multiple questions, models supportin
 
 ## Model Management
 
-The sidebar **Models** view displays the catalog grouped by task, fetched from `models.json` on the main branch (falling back to the bundled catalog offline). Downloaded models can be activated or removed; entries requiring a newer app version remain disabled until updated.
+The sidebar **Models** view displays the catalog grouped by task, fetched from `models.json` on the main branch (falling back to the bundled catalog offline). Downloaded models can be activated or removed; entries requiring a newer app version remain disabled until updated. Downloads run in the background.
 
 **Model Settings** in the task toolbar configures parameters declared by the active model (such as `max_image_tiles`). Settings persist per model and apply to both UI runs and Shortcuts automations.
 
