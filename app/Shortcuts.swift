@@ -154,7 +154,7 @@ struct RankedItem: TransientAppEntity {
 struct YesNoDecisionIntent: AppIntent {
     static let title: LocalizedStringResource = "Yes/No Decision"
     static let description = IntentDescription(
-        "Ask a yes/no question about text, images, or both with the model selected in Tinkerbox. Returns a Boolean Answer, Yes Probability (0–1), all probabilities, input tokens and inference time (ms). Text output includes the answer and its probability, such as “Yes (93%)”. Open Tinkerbox to complete initial runtime and model setup."
+        "Ask a yes/no question about text, images, or both. Uses the same model as Tinkerbox’s Decision screen. To change it, use the model menu at the top of that screen. Returns a Boolean Answer, Yes Probability (0–1), all probabilities, input tokens and inference time (ms). Text output includes the answer and its probability, such as “Yes (93%)”. Open Tinkerbox to complete initial runtime and model setup."
     )
     static var supportedModes: IntentModes { .background }
 
@@ -184,7 +184,7 @@ struct YesNoDecisionIntent: AppIntent {
 struct ChooseOptionIntent: AppIntent {
     static let title: LocalizedStringResource = "Choose Option"
     static let description = IntentDescription(
-        "Choose among distinct options for text, images, or both with the model selected in Tinkerbox. Returns Chosen Option, Most Likely Option, Confidence (0–1), all probabilities, input tokens and inference time (ms). Below Minimum Confidence, Chosen Option is empty and text output starts with “Unsure”. Open Tinkerbox to complete initial runtime and model setup."
+        "Choose among distinct options for text, images, or both. Uses the same model as Tinkerbox’s Decision screen. To change it, use the model menu at the top of that screen. Returns Chosen Option, Most Likely Option, Confidence (0–1), all probabilities, input tokens and inference time (ms). Below Minimum Confidence, Chosen Option is empty and text output starts with “Unsure”. Open Tinkerbox to complete initial runtime and model setup."
     )
     static var supportedModes: IntentModes { .background }
 
@@ -215,7 +215,7 @@ struct ChooseOptionIntent: AppIntent {
 struct ScoreTextIntent: AppIntent {
     static let title: LocalizedStringResource = "Score Text"
     static let description = IntentDescription(
-        "Score text, images, or both across ordered levels with the model selected in Tinkerbox. Returns the expected Score (a probability-weighted average from 0 to the number of levels minus one), Maximum Score, Most Likely Level, all probabilities, input tokens and inference time (ms). Open Tinkerbox to complete initial runtime and model setup."
+        "Score text, images, or both across ordered levels. Uses the same model as Tinkerbox’s Decision screen. To change it, use the model menu at the top of that screen. Returns the expected Score (a probability-weighted average from 0 to the number of levels minus one), Maximum Score, Most Likely Level, all probabilities, input tokens and inference time (ms). Open Tinkerbox to complete initial runtime and model setup."
     )
     static var supportedModes: IntentModes { .background }
 
@@ -242,7 +242,7 @@ struct ScoreTextIntent: AppIntent {
 struct AskQuestionsIntent: AppIntent {
     static let title: LocalizedStringResource = "Ask Several Questions"
     static let description = IntentDescription(
-        "Ask several independent yes/no questions about the same text, images, or both with the model selected in Tinkerbox. Returns Yes/No Decisions in question order; multiple answers can be Yes. Models with parallel decisions share one input pass; other models reread the input for each question."
+        "Ask several independent yes/no questions about the same text, images, or both. Uses the same model as Tinkerbox’s Decision screen. To change it, use the model menu at the top of that screen. Returns Yes/No Decisions in question order; multiple answers can be Yes. Models with parallel decisions share one input pass; other models reread the input for each question."
     )
     static var supportedModes: IntentModes { .background }
 
@@ -274,7 +274,7 @@ struct AskQuestionsIntent: AppIntent {
 struct FilterListIntent: AppIntent {
     static let title: LocalizedStringResource = "Filter List by Question"
     static let description = IntentDescription(
-        "Keep list items for which the model selected in Tinkerbox answers Yes, preserving input order and skipping blank items. Items are submitted as one batch; models without parallel decisions process them sequentially."
+        "Keep list items that answer Yes to the question, preserving input order and skipping blank items. Uses the same model as Tinkerbox’s Decision screen. To change it, use the model menu at the top of that screen. Items are submitted as one batch; models without parallel decisions process them sequentially."
     )
     static var supportedModes: IntentModes { .background }
 
@@ -298,7 +298,7 @@ struct FilterListIntent: AppIntent {
 struct SortListIntent: AppIntent {
     static let title: LocalizedStringResource = "Sort List by Score"
     static let description = IntentDescription(
-        "Sort list items by expected score with the model selected in Tinkerbox. Each result retains its original text and exposes Score, Maximum Score and Most Likely Level. Blank items are skipped; ties preserve input order. Items are submitted as one batch; models without parallel decisions process them sequentially."
+        "Sort list items by expected score. Uses the same model as Tinkerbox’s Decision screen. To change it, use the model menu at the top of that screen. Each result retains its original text and exposes Score, Maximum Score and Most Likely Level. Blank items are skipped; ties preserve input order. Items are submitted as one batch; models without parallel decisions process them sequentially."
     )
     static var supportedModes: IntentModes { .background }
 
