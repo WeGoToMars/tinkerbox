@@ -6,12 +6,16 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, wait
 import ctypes
 import hashlib
+import importlib
+from importlib.machinery import SOURCE_SUFFIXES, FileFinder, SourceFileLoader
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import sys
 import tempfile
+import types
 import warnings
 
 from tinkerbox_ane.coreai import compile_asset, source_hash, verify_aot
@@ -174,6 +178,25 @@ def bundled_checkpoint(bundle: Path, code: str | None = None) -> Path:
     if code is not None and code_digest(path) != code:
         raise ValueError("bundle's checkpoint code is not the pinned upstream release")
     return path
+
+
+class _SourceOnly(SourceFileLoader):
+    """Compiles the .py file itself, never cached bytecode."""
+
+    def get_code(self, fullname):
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
+def checkpoint_modules(checkpoint: Path, package: str, *names: str) -> list[types.ModuleType]:
+    """Import a checkpoint's Python files as `package`. Only their sources load: an extension module
+    or bytecode beside them would bypass the digest that pinned them."""
+    if package not in sys.modules:
+        path = str(checkpoint)
+        sys.path_importer_cache[path] = FileFinder(path, (_SourceOnly, SOURCE_SUFFIXES))
+        module = types.ModuleType(package)
+        module.__path__ = [path]
+        sys.modules[package] = module
+    return [importlib.import_module(f"{package}.{name}") for name in names]
 
 
 def check_asset_name(name: str) -> None:

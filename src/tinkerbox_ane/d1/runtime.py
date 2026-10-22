@@ -1,30 +1,18 @@
 """Synchronous System One API backed by the native Core AI host."""
 
-import importlib
 import json
 from pathlib import Path
-import sys
-import types
 import threading
 
 import torch
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
-from tinkerbox_ane.bundle import bundled_checkpoint, read_bundle
+from tinkerbox_ane.bundle import bundled_checkpoint, checkpoint_modules, read_bundle
 from tinkerbox_ane.d1 import CHUNK, CODE, KIND, MAX_IMAGE_TILES, RESIDUAL_SCALE
 from tinkerbox_ane.d1.vision import IMAGE_TOKEN_ID, VisionPipeline, as_rgb
 from tinkerbox_ane.host import Host
 from tinkerbox_ane.d1.tree import TreePlan, groups, shared_prefix
-
-
-def d1_code(checkpoint: Path) -> tuple[types.ModuleType, types.ModuleType]:
-    pkg = "d1_remote"
-    if pkg not in sys.modules:
-        module = types.ModuleType(pkg)
-        module.__path__ = [str(checkpoint)]
-        sys.modules[pkg] = module
-    return importlib.import_module(f"{pkg}.prompt"), importlib.import_module(f"{pkg}.api")
 
 
 class Embeddings:
@@ -55,7 +43,7 @@ class Embeddings:
 
 def load(asset):
     path = bundled_checkpoint(asset, CODE)
-    prompt, api = d1_code(path)
+    prompt, api = checkpoint_modules(path, "d1_remote", "prompt", "api")
 
     class Model(api.SystemOneApi):
         def __init__(self):

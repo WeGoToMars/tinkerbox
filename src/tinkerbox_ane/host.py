@@ -89,6 +89,11 @@ def check_layout(spec: dict) -> None:
     counted = [(spec.get("flops"), [f"c{tier}" for tier in tiers])]
     if "vision_asset" in spec:
         counted.append((spec.get("vision_flops"), ["main"]))
+    check_flops(counted)
+
+
+def check_flops(counted) -> None:
+    """Each asset's manifest counts the FLOPs of exactly its functions: `counted` pairs them."""
     if any(not isinstance(flops, dict) or set(flops) != set(functions)
            or any(type(n) is not int or n <= 0 for n in flops.values()) for flops, functions in counted):
         raise ValueError("bundle lacks FLOP counts for its functions; re-export the model")

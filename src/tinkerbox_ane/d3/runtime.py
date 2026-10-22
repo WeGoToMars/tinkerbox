@@ -3,24 +3,21 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import math
 from pathlib import Path
-import sys
 import threading
-import types
 import warnings
 
 import torch
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
-from tinkerbox_ane.bundle import bundled_checkpoint, read_bundle
+from tinkerbox_ane.bundle import bundled_checkpoint, checkpoint_modules, read_bundle
 from tinkerbox_ane.d3 import CHUNK, CODE, KIND, MAX_IMAGE_TOKENS, RESIDUAL_SCALE
 from tinkerbox_ane.d3.model import CheckpointReader, Config
 from tinkerbox_ane.d3.vision import IMAGE_TOKEN_ID, VisionPipeline
-from tinkerbox_ane.host import Host
+from tinkerbox_ane.host import Host, check_flops
 
 
 class SequentialQuestionsWarning(UserWarning):
@@ -52,18 +49,7 @@ def check_layout(spec: dict) -> None:
     counted = [(asset.get("flops"), asset["functions"]) for asset in spec["assets"]]
     if "vision_asset" in spec:
         counted.append((spec.get("vision_flops"), spec["vision_functions"]))
-    if any(not isinstance(flops, dict) or set(flops) != set(functions)
-           or any(type(n) is not int or n <= 0 for n in flops.values()) for flops, functions in counted):
-        raise ValueError("bundle lacks FLOP counts for its functions; re-export the model")
-
-
-def d3_code(checkpoint: Path) -> tuple[types.ModuleType, types.ModuleType]:
-    pkg = f"d3_remote_{hashlib.sha256(str(checkpoint.resolve()).encode()).hexdigest()[:16]}"
-    if pkg not in sys.modules:
-        module = types.ModuleType(pkg)
-        module.__path__ = [str(checkpoint)]
-        sys.modules[pkg] = module
-    return importlib.import_module(f"{pkg}.d3_format"), importlib.import_module(f"{pkg}.d3_runtime")
+    check_flops(counted)
 
 
 class Embeddings:
@@ -112,7 +98,8 @@ def load(asset: Path):
     spec = read_bundle(asset, KIND)
     source = spec["source"]
     path = bundled_checkpoint(asset, CODE)
-    fmt, rt = d3_code(path)
+    package = f"d3_remote_{hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16]}"
+    fmt, rt = checkpoint_modules(path, package, "d3_format", "d3_runtime")
 
     class Model:
         """Typed decisions over text and images. The full-attention layers see the whole prompt,
