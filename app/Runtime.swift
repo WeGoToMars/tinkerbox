@@ -247,21 +247,8 @@ actor Runtime {
         self.input = input
         self.output = output
         replies = output.fileHandleForReading.bytes.lines.makeAsyncIterator()
-        let resources = Bundle.main.resourceURL!
-        process.executableURL = Bundle.main.executableURL!.deletingLastPathComponent().appending(path: "uv")
-        process.arguments = [
-            "run", "--no-project", "--no-config", "--isolated", "--managed-python",
-            "--python", "3.12", "--no-build", "--with-requirements",
-            resources.appending(path: "requirements.txt").path,
-            "python", "-u", resources.appending(path: "worker.py").path,
-        ]
-        var environment = ProcessInfo.processInfo.environment
-        for name in ["PYTHONPATH", "PYTHONHOME", "UV_INTERNAL__PARENT_INTERPRETER"] {
-            environment.removeValue(forKey: name)
-        }
-        environment["TINKERBOX_MODEL"] = model
-        process.environment = environment
-        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        Self.configure(process, python: ["-u", Bundle.main.resourceURL!.appending(path: "worker.py").path])
+        process.environment!["TINKERBOX_MODEL"] = model
         try FileManager.default.createDirectory(at: Self.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: Self.logURL.path, contents: nil)
         let log = try FileHandle(forWritingTo: Self.logURL)
@@ -287,6 +274,22 @@ actor Runtime {
                 return reply
             }
         }
+    }
+
+    // Runs Python with these arguments in the app's environment: its pinned tinkerbox-ane and dependencies.
+    nonisolated static func configure(_ process: Process, python arguments: [String]) {
+        process.executableURL = Bundle.main.executableURL!.deletingLastPathComponent().appending(path: "uv")
+        process.arguments = [
+            "run", "--no-project", "--no-config", "--isolated", "--managed-python",
+            "--python", "3.12", "--no-build", "--with-requirements",
+            Bundle.main.resourceURL!.appending(path: "requirements.txt").path, "python",
+        ] + arguments
+        var environment = ProcessInfo.processInfo.environment
+        for name in ["PYTHONPATH", "PYTHONHOME", "UV_INTERNAL__PARENT_INTERPRETER"] {
+            environment.removeValue(forKey: name)
+        }
+        process.environment = environment
+        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
     }
 
     func decide(_ request: Request) async throws -> Decisions {

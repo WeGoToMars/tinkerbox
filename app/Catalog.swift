@@ -120,9 +120,4 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
             return bundles.contains { files.fileExists(atPath: $0.appending(path: "model.json").path) }
         }.map(\.id))
     }
-
-    func removeDownload(_ model: CatalogModel) throws {
-        try FileManager.default.removeItem(at: Self.cacheURL.appending(path: model.id))
-        scanDownloads()
-    }
 }

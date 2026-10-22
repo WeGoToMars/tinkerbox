@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix=".app-", dir=out) as temporary:
         shutil.copyfile(args.wheel, resources / args.wheel.name)
         package = f"tinkerbox-ane @ {(app / 'Contents/Resources' / args.wheel.name).as_uri()}"
     (resources / "requirements.txt").write_text(f"{package}\n" + requirements)
-    swift_sources = [source / name for name in ("Demo.swift", "Catalog.swift", "Runtime.swift", "Shortcuts.swift")]
+    swift_sources = [source / name for name in ("Demo.swift", "Catalog.swift", "Runtime.swift", "Shortcuts.swift", "Storage.swift")]
     toolchain = Path(subprocess.check_output(["xcrun", "--find", "swiftc"], text=True).strip()).parents[1]
     sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
     const_values = Path(temporary) / "TinkerboxDemo.swiftconstvalues"

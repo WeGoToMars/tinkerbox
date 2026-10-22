@@ -56,6 +56,7 @@ struct RunTotals {
 // The catalog and the one model the worker has loaded, shared by every task page.
 @MainActor @Observable final class Demo {
     var catalog = Catalog()
+    let storage = Storage()
     var model = Runtime.selectedModel(for: .decision)
     var ready = false
     var loading = true
@@ -106,6 +107,7 @@ struct RunTotals {
                 loading = false
                 progress = nil
                 catalog.scanDownloads()
+                Task { await storage.refresh() }  // the load may have downloaded files
             }
         }
         do {
@@ -134,6 +136,13 @@ struct RunTotals {
         model = choice.id
         setupMs = nil
         await load()
+    }
+
+    // The model in use, or being loaded, keeps its files.
+    func remove(_ id: String, outdated: Bool = false) async {
+        guard id != model else { return }
+        await storage.remove(id, outdated: outdated)
+        catalog.scanDownloads()
     }
 }
 
@@ -442,7 +451,7 @@ func duration(_ milliseconds: Double?) -> String {
 }
 
 enum Destination: Hashable {
-    case task(ModelTask), models
+    case task(ModelTask), models, storage
 }
 
 struct AppView: View {
@@ -466,7 +475,11 @@ struct AppView: View {
                 }
                 Section("Library") {
                     Label("Models", systemImage: "square.stack.3d.up").tag(Destination.models)
+                    Label("Storage", systemImage: "internaldrive").tag(Destination.storage)
                 }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                StorageSummary(storage: demo.storage) { destination = .storage }
             }
             .navigationSplitViewColumnWidth(min: 160, ideal: 180)
         } detail: {
@@ -474,6 +487,7 @@ struct AppView: View {
                 switch destination ?? .task(.decision) {
                 case .task(.decision): DecisionView(playground: decisions) { destination = .models }
                 case .models: ModelsView(demo: demo)
+                case .storage: StorageView(demo: demo)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { SystemFooter() }
@@ -481,6 +495,11 @@ struct AppView: View {
         .task { await demo.load() }
         .task { await demo.catalog.refresh() }
         .onChange(of: demo.model) { decisions.reset() }
+        .alert("Could not update storage", isPresented: Binding(get: { demo.storage.error != nil },
+                                                                set: { if !$0 { demo.storage.error = nil } })) {
+        } message: {
+            Text(demo.storage.error ?? "")
+        }
     }
 }
 
@@ -920,7 +939,7 @@ struct QuestionCard: View {
 // Every catalog model, grouped by task, with downloads in progress shown in their row.
 struct ModelsView: View {
     let demo: Demo
-    @State private var removalError: String?
+    @State private var pending: CatalogModel?
     @Environment(\.openURL) private var openURL
 
     // In catalog order; the remote catalog can list tasks this app does not run yet.
@@ -948,10 +967,15 @@ struct ModelsView: View {
         .toolbar {
             Button("Refresh", systemImage: "arrow.clockwise") { Task { await demo.catalog.refresh() } }
         }
-        .alert("Could not remove the model", isPresented: Binding(get: { removalError != nil },
-                                                                  set: { if !$0 { removalError = nil } })) {
-        } message: {
-            Text(removalError ?? "")
+        .confirmationDialog("Delete \(pending?.name ?? "")?", isPresented: Binding(
+            get: { pending != nil }, set: { if !$0 { pending = nil } }), presenting: pending) { model in
+            Button("Delete", role: .destructive) { Task { await demo.remove(model.id) } }
+        } message: { model in
+            if let stored = demo.storage.report?.models.first(where: { $0.id == model.id }) {
+                Text(StorageView.removal(of: stored))
+            } else {
+                Text("Deletes its bundle, its compiled copies and its checkpoint. Using it again downloads it again.")
+            }
         }
         .task { await demo.catalog.refresh() }
     }
@@ -1002,14 +1026,12 @@ struct ModelsView: View {
                 Label(demo.ready ? "In use" : "Selected", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(demo.ready ? .green : .secondary)
             } else {
-                if downloaded {
-                    Button(role: .destructive) {
-                        do { try demo.catalog.removeDownload(model) } catch { removalError = error.localizedDescription }
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Remove downloaded files")
+                if demo.storage.removing.contains(model.id) {
+                    ProgressView().controlSize(.small)
+                } else if downloaded {
+                    Button(role: .destructive) { pending = model } label: { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                        .help("Delete everything this model downloaded")
                 }
                 Button(downloaded ? "Use" : "Download") {
                     Task { await demo.choose(model) }

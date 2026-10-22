@@ -32,6 +32,8 @@ with tinkerbox_ane.load("d1-3b") as model:
 
 `tinkerbox_ane.load(model_id)` loads any model in the catalog and returns the API for its task. It downloads the Core AI bundle for this Mac to `~/Library/Caches/tinkerbox-ane/models/<model>/<revision>/`; pass a directory as the second argument to select a local AOT-compiled bundle. Each model package also has its own `load()`, such as `tinkerbox_ane.d1.load()`.
 
+`python -m tinkerbox_ane.storage` reports, as JSON, each model's bundles, Core AI's compiled copies of their assets, and its upstream checkpoint in the Hugging Face cache, then the compiled copies no downloaded bundle uses and the Python and packages the models share. `--remove MODEL` deletes all of a model's files; add `--outdated` to delete only bundle revisions the catalog no longer loads. `--remove-unused` deletes unused compiled copies, such as those of local exports, which compile again on their next load.
+
 Decision models expose the System One API: `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries, plus `count_tokens`. Models with parallel decisions (`question_trees` in the catalog, such as d1-3B) answer several questions about one input in a shared pass; the others answer them one after another and warn when a call asks more than one. Inputs, limits, and execution details are in each model's notes.
 
 ## Tinkerbox app
@@ -43,6 +45,8 @@ uv run --no-project --python 3.12 python app/run.py
 ```
 
 Pass `--build-only` to create `artifacts/swiftui/Tinkerbox.app` and the release ZIP without launching. The prebuilt app manages its own Python environment and dependencies via an embedded `uv` binary.
+
+The Storage page, opened from the bottom of the sidebar, lists every file the models keep on this Mac and deletes a model with everything it downloaded.
 
 ## Architecture & Staging
 
@@ -60,6 +64,7 @@ Model-independent infrastructure is located at the package top level and is shar
 | `bundle.py` | Bundle manifest and asset identity verification, downloads, and AOT compilation |
 | `coreai.py`, `guard.py`, `publish.py` | Compiler watchdog, ANE placement verification, and Hugging Face releases |
 | `models.json`, `models.py` | Model catalog shared by `tinkerbox_ane.load()` and the app |
+| `storage.py` | Disk usage of downloaded models, and their removal |
 
 A model package (such as `tinkerbox_ane.d1`) provides:
 - **Neural Graph & Export:** Fused FP16 graph (`model.py`) and Core AI export (`export.py`).
