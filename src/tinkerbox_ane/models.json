@@ -11,13 +11,13 @@
       "original_model": "LiquidAI/d1-3B",
       "module": "tinkerbox_ane.d1",
       "repo": "wegotomars/d1-3B-CoreAI-ANE",
-      "revision": "2.0.2",
+      "revision": "v2.1.0",
       "inputs": ["text", "image"],
       "question_trees": true,
       "context": 32768,
-      "download_bytes": 5769760711,
+      "download_bytes": 6321785067,
       "license": "LFM Open License v1.0",
-      "min_version": "2.0.2"
+      "min_version": "2.1.0"
     },
     {
       "id": "d3-nano",
