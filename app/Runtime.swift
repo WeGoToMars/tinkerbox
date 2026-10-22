@@ -169,9 +169,18 @@ struct Reply: Decodable, Sendable {
     let error: String?
 }
 
+@MainActor @Observable final class RuntimeState {
+    nonisolated init() {}
+    var reply: Reply?
+    var loading = false
+    var status = "Preparing runtime…"
+    var progress: Double?
+}
+
 actor Runtime {
     static let shared = Runtime()
-    @MainActor static var setupProcess: Process?
+    @MainActor static var workerProcess: Process?
+    nonisolated let state = RuntimeState()
     static let logURL = FileManager.default.homeDirectoryForCurrentUser
         .appending(path: "Library/Logs/tinkerbox-ane/demo.log")
     private var process: Process?
@@ -181,13 +190,23 @@ actor Runtime {
     private var readyReply: Reply?
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private let idleTimeout: Duration
+    private var idleDeadline: ContinuousClock.Instant?
+    private var idleTask: Task<Void, Never>?
 
-    private init() {
+    init(idleTimeout: Duration = .seconds(300)) {
+        self.idleTimeout = idleTimeout
         // A dead worker should fail the next write, not kill the app.
         signal(SIGPIPE, SIG_IGN)
     }
 
     var isConnected: Bool { readyReply != nil && process?.isRunning == true && replies != nil }
+
+    nonisolated static func stop(_ process: Process?, signal: Int32 = SIGTERM) {
+        guard let process, process.isRunning else { return }
+        let pid = process.processIdentifier
+        kill(getpgid(pid) == pid ? -pid : pid, signal)
+    }
 
     // Each task remembers its own model; the UI and Shortcuts both use the one chosen in the app.
     nonisolated static func selectedModel(for task: ModelTask) -> String {
@@ -205,16 +224,26 @@ actor Runtime {
         UserDefaults.standard.set(settings, forKey: "settings.\(model)")
     }
 
-    // Takes effect on the next start or request. Stopping the worker also cancels a download or
-    // load in progress; the queued caller then fails and the next one launches the new model.
-    func select(model: String, for task: ModelTask) {
+    // Change the saved selection after pending requests finish, then release the previous model.
+    func select(model: String, for task: ModelTask) async {
+        await acquire()
+        defer { release() }
         UserDefaults.standard.set(model, forKey: "model.\(task.rawValue)")
-        if readyReply?.modelId != model { disconnect() }
+        if readyReply?.modelId != model { await disconnect(graceful: true) }
+    }
+
+    // Queue behind active requests; unloading never interrupts inference or changes the selection.
+    func unload() async {
+        await acquire()
+        defer { release() }
+        await disconnect(graceful: true)
     }
 
     // Actors are reentrant at awaits. Hold the queue across startup AND a full
     // request/reply exchange so UI and Shortcuts calls cannot read each other's replies.
     private func acquire() async {
+        idleTask?.cancel()
+        idleTask = nil
         if busy {
             await withCheckedContinuation { waiters.append($0) }
         } else {
@@ -222,32 +251,52 @@ actor Runtime {
         }
     }
 
-    private func release() {
-        if waiters.isEmpty { busy = false } else { waiters.removeFirst().resume() }
+    private func release(activity: Bool = true) {
+        if activity { idleDeadline = isConnected ? .now.advanced(by: idleTimeout) : nil }
+        if !waiters.isEmpty {
+            waiters.removeFirst().resume()
+            return
+        }
+        busy = false
+        guard isConnected, let deadline = idleDeadline else { return }
+        idleTask = Task { [weak self] in
+            do { try await ContinuousClock().sleep(until: deadline) } catch { return }
+            await self?.unloadIfIdle()
+        }
     }
 
-    func start(model: String, status: @MainActor @Sendable (String, Double?) -> Void = { _, _ in }) async throws -> Reply {
+    private func unloadIfIdle() async {
+        guard !Task.isCancelled, !busy, let deadline = idleDeadline, .now >= deadline else { return }
+        await unload()
+    }
+
+    func start(model: String) async throws -> Reply {
         await acquire()
         defer { release() }
         try Task.checkCancellation()
-        return try await prepare(model: model, status: status)
+        return try await prepare(model: model)
     }
 
     // One model is loaded at a time; a request for another one replaces it.
-    private func prepare(model: String, status: @MainActor @Sendable (String, Double?) -> Void) async throws -> Reply {
+    private func prepare(model: String) async throws -> Reply {
         if let readyReply, readyReply.modelId == model, process?.isRunning == true, replies != nil { return readyReply }
         readyReply = nil
+        await MainActor.run {
+            state.loading = true
+            state.reply = nil
+            state.status = "Preparing runtime…"
+            state.progress = nil
+        }
         do {
-            return try await launch(model: model, status: status)
+            return try await launch(model: model)
         } catch {
-            disconnect()
-            await MainActor.run { Runtime.setupProcess = nil }
+            await disconnect()
             throw error
         }
     }
 
-    private func launch(model: String, status: @MainActor @Sendable (String, Double?) -> Void) async throws -> Reply {
-        if let process, process.isRunning { process.terminate() }
+    private func launch(model: String) async throws -> Reply {
+        Self.stop(process)
         input?.fileHandleForWriting.closeFile()
         output?.fileHandleForReading.closeFile()
         let process = Process(), input = Pipe(), output = Pipe()
@@ -266,7 +315,7 @@ actor Runtime {
         process.standardError = log
         try await MainActor.run {
             try process.run()
-            Runtime.setupProcess = process
+            Runtime.workerProcess = process
         }
         // Let the child see EOF when the app closes its writer or exits.
         input.fileHandleForReading.closeFile()
@@ -274,11 +323,18 @@ actor Runtime {
         while true {
             let reply = try await readReply()
             if let message = reply.status {
-                await status(message, reply.progress)
+                await MainActor.run {
+                    state.status = message
+                    state.progress = reply.progress
+                }
             } else {
                 guard reply.ready == true else { throw DecisionError.invalidReply }
-                await MainActor.run { Runtime.setupProcess = nil }
                 readyReply = reply
+                await MainActor.run {
+                    state.reply = reply
+                    state.loading = false
+                    state.progress = nil
+                }
                 return reply
             }
         }
@@ -322,16 +378,22 @@ actor Runtime {
     private func exchange(_ request: Request) async throws -> Reply {
         try request.validate()
         await acquire()
-        defer { release() }
+        defer { release(activity: !request.count) }
         try Task.checkCancellation()
         let model = Self.selectedModel(for: .decision)
-        _ = try await prepare(model: model, status: { _, _ in })
+        if request.count {
+            guard isConnected, readyReply?.modelId == model else {
+                throw DecisionError.invalid("Load a model before counting tokens.")
+            }
+        } else {
+            _ = try await prepare(model: model)
+        }
         var request = request
         request.settings = Self.settings(for: model)
         var data = try JSONEncoder().encode(request)
         data.append(10)
         do { try input!.fileHandleForWriting.write(contentsOf: data) } catch {
-            disconnect()
+            await disconnect()
             throw Self.stopped()
         }
         return try await readReply()
@@ -344,7 +406,7 @@ actor Runtime {
             self.replies = replies
             reply = try JSONDecoder().decode(Reply.self, from: Data(line.utf8))
         } catch {
-            disconnect()
+            await disconnect()
             throw error
         }
         if let error = reply.error {
@@ -353,12 +415,34 @@ actor Runtime {
         return reply
     }
 
-    private func disconnect() {
+    private func disconnect(graceful: Bool = false) async {
+        idleTask?.cancel()
+        idleTask = nil
+        idleDeadline = nil
         replies = nil
         readyReply = nil
         input?.fileHandleForWriting.closeFile()
         output?.fileHandleForReading.closeFile()
-        if let process, process.isRunning { process.terminate() }
+        let process = self.process
+        self.process = nil
+        input = nil
+        output = nil
+        if let process, process.isRunning {
+            if !graceful { Self.stop(process) }
+            // EOF lets the worker close its native host and ANE resources. Bound shutdown if stuck.
+            let watchdog = Task {
+                do { try await Task.sleep(for: .seconds(12)) } catch { return }
+                Self.stop(process, signal: SIGKILL)
+            }
+            await Task.detached { process.waitUntilExit() }.value
+            watchdog.cancel()
+        }
+        await MainActor.run {
+            state.reply = nil
+            state.loading = false
+            state.progress = nil
+            Runtime.workerProcess = nil
+        }
     }
 
     private static func stopped() -> NSError {

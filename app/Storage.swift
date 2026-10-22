@@ -243,7 +243,8 @@ struct StorageView: View {
             if removing {
                 ProgressView().controlSize(.small)
             } else if inUse {
-                Text(demo.loading ? "Loading" : "In use").font(.caption).foregroundStyle(.secondary)
+                Text(demo.loading ? "Loading" : demo.ready ? "In use" : "Selected")
+                    .font(.caption).foregroundStyle(.secondary)
             } else {
                 if !outdated.isEmpty && model.bundles.contains(where: \.current) {
                     Button("Remove Outdated") { Task { await demo.remove(model.id, outdated: true) } }

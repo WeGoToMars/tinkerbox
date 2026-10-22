@@ -148,6 +148,46 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         let repeated = try await yes.perform().value!
         try require(repeated.answer && abs(repeated.yesProbability - affirmative.yesProbability) < 0.01,
                     "A failed request affected the next decision")
-        print("PASS: typed answers, probabilities, usage, images, several questions, list filter and sort, cold startup, concurrent UI/Shortcuts calls, validation, and error recovery")
+        // Unloading preserves the selection, and the next App Intent reloads it automatically.
+        let selected = Runtime.selectedModel(for: .decision)
+        let settings = Runtime.settings(for: selected)
+        await Runtime.shared.unload()
+        try require(await !Runtime.shared.isConnected, "Manual unload kept the model loaded")
+        try require(Runtime.selectedModel(for: .decision) == selected, "Unload changed the selected model")
+        let afterUnload = try await yes.perform().value!
+        try require(afterUnload.answer && abs(afterUnload.yesProbability - affirmative.yesProbability) < 0.01,
+                    "The App Intent did not recover after unloading")
+        try require(Runtime.settings(for: selected) == settings, "Reload changed the saved settings")
+        await Runtime.shared.unload()
+
+        // A short idle policy exercises the same lifecycle without waiting five minutes.
+        let idle = Runtime(idleTimeout: .seconds(2))
+        let request = Request(items: [Item(state: yes.text!)], questions: [Question(type: .noul, instructions: yes.question)])
+        _ = try await idle.decide(request)
+        try await Task.sleep(for: .milliseconds(1200))
+        _ = try await idle.decide(request)
+        try await Task.sleep(for: .milliseconds(1200))
+        try require(await idle.isConnected, "New inference did not renew the idle timeout")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        var expired = false
+        while ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(200))
+            do { _ = try await idle.count(request) }
+            catch DecisionError.invalid { expired = true; break }
+        }
+        let disconnected = await !idle.isConnected
+        try require(expired && disconnected, "Token previews kept an idle model loaded")
+        let reloaded = try await idle.decide(request)
+        try require(reloaded.results[0].answers[0].noul! > 0.9, "Inference did not reload the idle model")
+
+        // Unload waits for an active request rather than cancelling it.
+        let long = Request(items: [Item(state: String(repeating: "Hello, friend! ", count: 1200))], questions: request.questions)
+        async let active = idle.decide(long)
+        try await Task.sleep(for: .milliseconds(100))
+        await idle.unload()
+        let completed = try await active
+        try require(completed.results[0].answers.count == 1, "Unload interrupted inference")
+        try require(await !idle.isConnected, "Queued unload did not release the model")
+        print("PASS: typed answers, probabilities, usage, images, several questions, list filter and sort, cold startup, concurrent UI/Shortcuts calls, validation, error recovery, manual/idle unload, preview inactivity, automatic reload and queued unload")
     }
 }

@@ -58,11 +58,12 @@ struct RunTotals {
     var catalog = Catalog()
     let storage = Storage()
     var model = Runtime.selectedModel(for: .decision)
-    var ready = false
-    var loading = true
-    var status = "Preparing runtime…"
-    var progress: Double?
+    var ready: Bool { runtime.state.reply?.modelId == model }
+    var loading: Bool { runtime.state.loading }
+    var status: String { runtime.state.status }
+    var progress: Double? { runtime.state.progress }
     var busy = false  // a request from the app is running
+    var unloading = false
     var error: String?
     var setupMs: Double?
     var modelName: String?
@@ -91,11 +92,7 @@ struct RunTotals {
         // A model switch supersedes an earlier load; ignore that load's outcome.
         generation += 1
         let current = generation
-        loading = true
-        ready = false
         error = nil
-        status = "Preparing runtime…"
-        progress = nil
         modelName = nil
         cpuModel = nil
         architecture = nil
@@ -104,18 +101,12 @@ struct RunTotals {
         settingValues = Runtime.settings(for: model)
         defer {
             if current == generation {
-                loading = false
-                progress = nil
                 catalog.scanDownloads()
                 Task { await storage.refresh() }  // the load may have downloaded files
             }
         }
         do {
-            let reply = try await runtime.start(model: model) { [weak self] message, progress in
-                guard let self, current == self.generation else { return }
-                self.status = message
-                self.progress = progress
-            }
+            let reply = try await runtime.start(model: model)
             guard current == generation else { return }
             setupMs = reply.setupMs
             modelName = reply.modelName
@@ -124,7 +115,6 @@ struct RunTotals {
             questionTrees = reply.questionTrees == true
             settings = reply.settings ?? []
             info = reply.info ?? []
-            ready = reply.ready == true
         } catch {
             if current == generation { self.error = error.localizedDescription }
         }
@@ -135,12 +125,17 @@ struct RunTotals {
               choice.id != model || !ready else { return }
         generation += 1
         model = choice.id  // reserve its files before yielding to the runtime
-        ready = false
-        loading = true
         await runtime.select(model: choice.id, for: task)
         guard model == choice.id else { return }
         setupMs = nil
         await load()
+    }
+
+    func unload() async {
+        busy = true
+        unloading = true
+        defer { busy = false; unloading = false }
+        await runtime.unload()
     }
 
     // The model in use, or being loaded, keeps its files.
@@ -210,7 +205,7 @@ struct RunTotals {
     var runMode: RunMode { demo.questionTrees && questions.count > 1 ? mode : .parallel }
 
     var canRun: Bool {
-        demo.ready && !demo.busy && !(isBlank(state) && images.isEmpty)
+        !demo.loading && !demo.busy && !(isBlank(state) && images.isEmpty)
             && questions.allSatisfy { $0.validation == nil && !isBlank($0.instructions) }
     }
 
@@ -287,6 +282,10 @@ struct RunTotals {
         let item = Item(state: state, images: images.map(\.path))
         var totals = RunTotals()
         do {
+            if !demo.ready {
+                await demo.load()
+                guard demo.ready else { return }
+            }
             if runMode == .parallel {
                 let result = try await demo.runtime.decide(Request(items: [item], questions: questions.map(\.question)))
                 for (index, answer) in result.results[0].answers.enumerated() { questions[index].answer = answer }
@@ -304,7 +303,6 @@ struct RunTotals {
             times.append(totals.elapsedMs)
         } catch {
             self.error = error.localizedDescription
-            if await !demo.runtime.isConnected { demo.ready = false }
         }
     }
 
@@ -518,7 +516,9 @@ struct ModelToolbar: ToolbarContent {
 
     var body: some ToolbarContent {
         ToolbarItem {
-            if demo.loading {
+            if demo.unloading {
+                Text("Unloading model…").foregroundStyle(.secondary)
+            } else if demo.loading {
                 HStack(spacing: 8) {
                     if let progress = demo.progress {
                         ProgressView(value: progress).frame(width: 80)
@@ -535,6 +535,11 @@ struct ModelToolbar: ToolbarContent {
                     .labelStyle(.titleAndIcon)
                     .foregroundStyle(.green)
                     .fixedSize()
+                    .help("Unloads after 5 minutes without inference.")
+            } else {
+                Label("Model unloaded", systemImage: "moon")
+                    .foregroundStyle(.secondary)
+                    .help("Loads automatically on the next run. Unloads after 5 minutes without inference.")
             }
         }
         // Status text, not a control, so it sits outside the glass capsule.
@@ -558,6 +563,12 @@ struct ModelToolbar: ToolbarContent {
             .help("Used by Decision and Shortcuts. Open to select or download a model.")
         }
         ToolbarItem {
+            Button("Unload", systemImage: "eject") { Task { await demo.unload() } }
+                .labelStyle(.titleAndIcon)
+                .disabled(!demo.ready || demo.loading || demo.busy)
+                .help("Unload the model from memory. The next run loads it again.")
+        }
+        ToolbarItem {
             Toggle("Model Settings", systemImage: "gearshape", isOn: $showingInspector)
                 .help("Model settings")
         }
@@ -572,7 +583,7 @@ struct ModelInspector: View {
         Form {
             Section("Settings") {
                 if demo.settings.isEmpty {
-                    Text(demo.ready ? "No model settings." : "Loading settings…")
+                    Text(demo.loading ? "Loading settings…" : demo.ready ? "No model settings." : "Load the model to view settings.")
                         .foregroundStyle(.secondary)
                 }
                 ForEach(demo.settings) { setting in
@@ -619,7 +630,7 @@ struct DecisionView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                if !demo.ready {
+                if !demo.ready && (demo.loading || demo.error != nil) {
                     HStack {
                         Text("First launch downloads Python, dependencies and model files.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -682,7 +693,7 @@ struct DecisionView: View {
                     Button {
                         Task { await playground.run() }
                     } label: {
-                        Label(demo.busy ? "Running…" : playground.questions.count == 1 ? "Run decision"
+                        Label(demo.busy && !demo.unloading ? "Running…" : playground.questions.count == 1 ? "Run decision"
                               : "Run \(playground.questions.count) questions", systemImage: "play.fill")
                     }
                     .buttonStyle(.borderedProminent)
@@ -704,7 +715,7 @@ struct DecisionView: View {
                                 .help("Each question runs sequentially and reads the full input again.")
                         }
                     }
-                    if demo.busy { ProgressView().controlSize(.small) }
+                    if demo.busy && !demo.unloading { ProgressView().controlSize(.small) }
                     if let error = playground.previewError {
                         Text(error).font(.caption).foregroundStyle(.red).lineLimit(2)
                     } else if let preview = playground.preview {
@@ -1148,7 +1159,7 @@ struct SystemFooter: View {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let process = Runtime.setupProcess, process.isRunning { process.terminate() }
+        Runtime.stop(Runtime.workerProcess)
     }
 }
 
