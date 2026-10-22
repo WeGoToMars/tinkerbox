@@ -127,8 +127,10 @@ struct StorageSummary: View {
     var body: some View {
         Button(action: open) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Storage used: \(storage.report.map { formatBytes($0.bytes) } ?? "Measuring…")")
-                Text("Models downloaded: \(storage.report == nil ? "–" : String(storage.downloadedModels))")
+                Text(storage.report.map { "\(formatBytes($0.bytes)) used" } ?? "Measuring storage…")
+                if storage.report != nil {
+                    Text("\(storage.downloadedModels) \(storage.downloadedModels == 1 ? "model" : "models") downloaded")
+                }
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -155,15 +157,15 @@ struct StorageView: View {
             if let report = storage.report {
                 Section("Models") {
                     if report.models.isEmpty {
-                        Text("No models are downloaded.").foregroundStyle(.secondary)
+                        Text("No downloaded models.").foregroundStyle(.secondary)
                     }
                     ForEach(report.models) { model in
                         row(model).padding(.vertical, 6)
                     }
                 }
-                Section("Shared by all models") {
-                    files("Unused compiled copies", detail: "Core AI's copies of deleted bundles, local exports and "
-                          + "earlier macOS versions, which no downloaded model loads.",
+                Section("Shared files") {
+                    files("Unused compiled copies", detail: "Core AI copies of deleted bundles, local exports and "
+                          + "earlier macOS builds that no downloaded model uses.",
                           paths: report.unusedCompiled.paths, bytes: report.unusedCompiled.bytes) {
                         if storage.removing.contains(Storage.unused) {
                             ProgressView().controlSize(.small)
@@ -200,7 +202,7 @@ struct StorageView: View {
                 Task { await storage.removeUnused() }
             }
         } message: {
-            Text("A local export that uses them compiles again when it next loads.")
+            Text("Local model exports may need to compile again.")
         }
         .task { await storage.refresh() }
     }
@@ -213,7 +215,7 @@ struct StorageView: View {
         if let checkpoint = model.checkpoint {
             parts.append("the \(checkpoint.repo) checkpoint (\(formatBytes(checkpoint.bytes)))")
         }
-        return "Deletes \(ListFormatter.localizedString(byJoining: parts)). Using it again downloads it again."
+        return "Deletes \(ListFormatter.localizedString(byJoining: parts)). Using this model again requires a download."
     }
 
     private func row(_ model: StorageReport.Model) -> some View {
@@ -251,7 +253,7 @@ struct StorageView: View {
                 }
                 Button(role: .destructive) { pending = model } label: { Image(systemName: "trash") }
                     .buttonStyle(.borderless)
-                    .help("Delete everything this model downloaded")
+                    .help("Delete model files and cached copies")
                     .disabled(!demo.storage.removing.isEmpty)
             }
         }

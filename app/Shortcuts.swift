@@ -154,13 +154,13 @@ struct RankedItem: TransientAppEntity {
 struct YesNoDecisionIntent: AppIntent {
     static let title: LocalizedStringResource = "Yes/No Decision"
     static let description = IntentDescription(
-        "Ask a yes/no question about text, images, or both, using the model selected in Tinkerbox. As text, the result reads like “Yes (93%)”. Its properties are the Boolean Answer, the Yes Probability (0–1), all probabilities, input tokens, and inference time. First run may download the runtime and model; open Tinkerbox once to finish setup."
+        "Ask a yes/no question about text, images, or both with the model selected in Tinkerbox. Returns a Boolean Answer, Yes Probability (0–1), all probabilities, input tokens and inference time (ms). Text output includes the answer and its probability, such as “Yes (93%)”. Open Tinkerbox to complete initial runtime and model setup."
     )
     static var supportedModes: IntentModes { .background }
 
     @Parameter(title: "Input Text") var text: String?
     @Parameter(title: "Question", description: "For example: Is this a refund request?") var question: String
-    @Parameter(title: "Images", description: "Optional pictures to decide about, if the model selected in Tinkerbox accepts images.",
+    @Parameter(title: "Images", description: "Images to evaluate. Requires a model that accepts images.",
                supportedContentTypes: [.image]) var images: [IntentFile]?
     @Parameter(title: "Yes Threshold", description: "Answer Yes when the Yes Probability is at least this value (0–1).",
                default: 0.5, inclusiveRange: (0, 1)) var threshold: Double
@@ -184,14 +184,14 @@ struct YesNoDecisionIntent: AppIntent {
 struct ChooseOptionIntent: AppIntent {
     static let title: LocalizedStringResource = "Choose Option"
     static let description = IntentDescription(
-        "Choose among at least two unique options for text, images, or both, using the model selected in Tinkerbox. Supply a List of option names. As text, the result reads like “Refund request (81%)”, or “Unsure: …” below the Minimum Confidence, when Chosen Option has no value. Its properties are the Chosen Option, the Most Likely Option, the Confidence (0–1), all probabilities, input tokens, and inference time. First run may download the runtime and model; open Tinkerbox once to finish setup."
+        "Choose among distinct options for text, images, or both with the model selected in Tinkerbox. Returns Chosen Option, Most Likely Option, Confidence (0–1), all probabilities, input tokens and inference time (ms). Below Minimum Confidence, Chosen Option is empty and text output starts with “Unsure”. Open Tinkerbox to complete initial runtime and model setup."
     )
     static var supportedModes: IntentModes { .background }
 
     @Parameter(title: "Input Text") var text: String?
     @Parameter(title: "Question", description: "For example: What is the topic of this message?") var question: String
-    @Parameter(title: "Options", description: "A list of at least two unique, nonempty option names.") var options: [String]
-    @Parameter(title: "Images", description: "Optional pictures to decide about, if the model selected in Tinkerbox accepts images.",
+    @Parameter(title: "Options", description: "At least two distinct, nonempty option names.") var options: [String]
+    @Parameter(title: "Images", description: "Images to evaluate. Requires a model that accepts images.",
                supportedContentTypes: [.image]) var images: [IntentFile]?
     @Parameter(title: "Minimum Confidence",
                description: "Leave Chosen Option empty when the most likely option's probability is below this value (0–1).",
@@ -215,14 +215,14 @@ struct ChooseOptionIntent: AppIntent {
 struct ScoreTextIntent: AppIntent {
     static let title: LocalizedStringResource = "Score Text"
     static let description = IntentDescription(
-        "Evaluate text, images, or both across 2–10 ordered levels, lowest to highest, using the model selected in Tinkerbox. Supply a List of levels. As text, the result reads like “Friendly (1.8 / 2)”. Its properties are the expected Score from 0 to the number of levels minus one (may be fractional), the Most Likely Level, all probabilities, input tokens, and inference time. First run may download the runtime and model; open Tinkerbox once to finish setup."
+        "Score text, images, or both across ordered levels with the model selected in Tinkerbox. Returns the expected Score (a probability-weighted average from 0 to the number of levels minus one), Maximum Score, Most Likely Level, all probabilities, input tokens and inference time (ms). Open Tinkerbox to complete initial runtime and model setup."
     )
     static var supportedModes: IntentModes { .background }
 
     @Parameter(title: "Input Text") var text: String?
     @Parameter(title: "Question", description: "For example: How urgent is this request?") var question: String
-    @Parameter(title: "Levels", description: "A list of 2–10 nonempty levels, ordered from lowest to highest.") var levels: [String]
-    @Parameter(title: "Images", description: "Optional pictures to decide about, if the model selected in Tinkerbox accepts images.",
+    @Parameter(title: "Levels", description: "2–10 nonempty levels, ordered from lowest to highest.") var levels: [String]
+    @Parameter(title: "Images", description: "Images to evaluate. Requires a model that accepts images.",
                supportedContentTypes: [.image]) var images: [IntentFile]?
 
     static var parameterSummary: some ParameterSummary {
@@ -242,13 +242,13 @@ struct ScoreTextIntent: AppIntent {
 struct AskQuestionsIntent: AppIntent {
     static let title: LocalizedStringResource = "Ask Several Questions"
     static let description = IntentDescription(
-        "Ask several yes/no questions about the same text, images, or both, using the model selected in Tinkerbox. Models with parallel decisions, such as d1-3B, read the input once and answer every question in one pass, so extra questions cost little; others, such as d3, answer them one after another. Returns one Yes/No Decision per question, in order. Each answer is independent, so several can be Yes: use it to tag an input with every label that applies."
+        "Ask several independent yes/no questions about the same text, images, or both with the model selected in Tinkerbox. Returns Yes/No Decisions in question order; multiple answers can be Yes. Models with parallel decisions share one input pass; other models reread the input for each question."
     )
     static var supportedModes: IntentModes { .background }
 
     @Parameter(title: "Input Text") var text: String?
     @Parameter(title: "Questions", description: "A list of nonempty yes/no questions.") var questions: [String]
-    @Parameter(title: "Images", description: "Optional pictures to decide about, if the model selected in Tinkerbox accepts images.",
+    @Parameter(title: "Images", description: "Images to evaluate. Requires a model that accepts images.",
                supportedContentTypes: [.image]) var images: [IntentFile]?
     @Parameter(title: "Yes Threshold", description: "Answer Yes when the Yes Probability is at least this value (0–1).",
                default: 0.5, inclusiveRange: (0, 1)) var threshold: Double
@@ -274,7 +274,7 @@ struct AskQuestionsIntent: AppIntent {
 struct FilterListIntent: AppIntent {
     static let title: LocalizedStringResource = "Filter List by Question"
     static let description = IntentDescription(
-        "Keep the items of a list for which the model selected in Tinkerbox answers Yes, in their original order. All items are sent together in one batch, which models without parallel decisions answer one after another; blank items are dropped."
+        "Keep list items for which the model selected in Tinkerbox answers Yes, preserving input order and skipping blank items. Items are submitted as one batch; models without parallel decisions process them sequentially."
     )
     static var supportedModes: IntentModes { .background }
 
@@ -298,13 +298,13 @@ struct FilterListIntent: AppIntent {
 struct SortListIntent: AppIntent {
     static let title: LocalizedStringResource = "Sort List by Score"
     static let description = IntentDescription(
-        "Score every item of a list across 2–10 ordered levels with the model selected in Tinkerbox, and sort by the expected score. Each ranked item reads as its original text and has Score, Maximum Score, and Most Likely Level properties. All items are sent together in one batch, which models without parallel decisions answer one after another; blank items are dropped."
+        "Sort list items by expected score with the model selected in Tinkerbox. Each result retains its original text and exposes Score, Maximum Score and Most Likely Level. Blank items are skipped; ties preserve input order. Items are submitted as one batch; models without parallel decisions process them sequentially."
     )
     static var supportedModes: IntentModes { .background }
 
     @Parameter(title: "List", description: "Text items to rank, for example from Split Text.") var items: [String]
     @Parameter(title: "Question", description: "Asked about each item. For example: How urgent is this request?") var question: String
-    @Parameter(title: "Levels", description: "A list of 2–10 nonempty levels, ordered from lowest to highest.") var levels: [String]
+    @Parameter(title: "Levels", description: "2–10 nonempty levels, ordered from lowest to highest.") var levels: [String]
     @Parameter(title: "Highest First", default: true) var highestFirst: Bool
 
     static var parameterSummary: some ParameterSummary {

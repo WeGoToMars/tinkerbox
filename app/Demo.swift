@@ -559,7 +559,7 @@ struct ModelToolbar: ToolbarContent {
         }
         ToolbarItem {
             Toggle("Model Settings", systemImage: "gearshape", isOn: $showingInspector)
-                .help("Show the model's settings")
+                .help("Model settings")
         }
     }
 }
@@ -572,7 +572,7 @@ struct ModelInspector: View {
         Form {
             Section("Settings") {
                 if demo.settings.isEmpty {
-                    Text(demo.ready ? "This model has no settings." : "Shown once the model loads.")
+                    Text(demo.ready ? "No model settings." : "Loading settings…")
                         .foregroundStyle(.secondary)
                 }
                 ForEach(demo.settings) { setting in
@@ -621,10 +621,10 @@ struct DecisionView: View {
             VStack(alignment: .leading, spacing: 22) {
                 if !demo.ready {
                     HStack {
-                        Text("First launch downloads Python, packages and model files.")
+                        Text("First launch downloads Python, dependencies and model files.")
                             .font(.caption).foregroundStyle(.secondary)
                         Spacer()
-                        Button("Setup log") { NSWorkspace.shared.open(Runtime.logURL) }
+                        Button("View log") { NSWorkspace.shared.open(Runtime.logURL) }
                         if !demo.loading {
                             Button("Retry") { Task { await demo.load() } }
                         }
@@ -642,7 +642,7 @@ struct DecisionView: View {
                         Button {
                             withAnimation { textCollapsed.toggle() }
                         } label: {
-                            Label("Input text · optional with images",
+                            Label("Input text (optional)",
                                   systemImage: textCollapsed ? "chevron.right" : "chevron.down")
                                 .font(.headline)
                         }
@@ -697,13 +697,11 @@ struct DecisionView: View {
                             .labelsHidden()
                             .fixedSize()
                             .disabled(demo.busy)
-                            .help("Parallel answers every question in one shared pass over the input; "
-                                  + "sequential gives each question its own pass.")
+                            .help("Parallel shares one pass across questions. Sequential runs each question separately.")
                         } else {
-                            Label("No parallel decisions", systemImage: "exclamationmark.triangle.fill")
-                                .font(.caption).foregroundStyle(.orange)
-                                .help("\(demo.current?.name ?? "This model") answers one question per pass, so these "
-                                      + "questions run one after another and each reads the whole input again.")
+                            Text("One pass per question")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .help("Each question runs sequentially and reads the full input again.")
                         }
                     }
                     if demo.busy { ProgressView().controlSize(.small) }
@@ -713,7 +711,7 @@ struct DecisionView: View {
                         Text(preview.tiles > 0 ? "\(preview.tokens.formatted()) tokens · \(preview.tiles) image tiles"
                              : "\(preview.tokens.formatted()) tokens")
                             .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                            .help("What the next run reads; each image tile is one vision pass")
+                            .help("Input for the next run; each image tile uses one vision pass")
                     }
                     Spacer()
                     if let setup = demo.setupMs {
@@ -737,7 +735,7 @@ struct DecisionView: View {
                     metric("Last run", duration(playground.lastRun?.elapsedMs))
                     metric("Compute", playground.computeRate.map { String(format: "%.1f TFLOPS", $0) } ?? "—")
                         .help(playground.lastRun?.neuralEngineMs.map {
-                            "Matmul, convolution and attention FLOPs counted from the model graph, padding included, over \(duration($0)) of Neural Engine time"
+                            "Matmul, convolution and attention FLOPs counted from the model graph, including padding, divided by \(duration($0)) of Neural Engine time"
                         } ?? "Neural Engine compute rate of the last run")
                     metric("Throughput", playground.throughput.map { String(format: "%.0f tok/s", $0) } ?? "—")
                     metric("Median", duration(playground.percentile(0.5)))
@@ -845,7 +843,7 @@ struct DecisionView: View {
                 playground.add(urls)
                 return true
             }
-            Text("Drop, paste or add pictures. Large pictures are split into tiles; see Model Settings.")
+            Text("Drop or paste images here.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(.bottom, 6)
@@ -871,7 +869,7 @@ struct QuestionCard: View {
             HStack(spacing: 10) {
                 Text("\(number)").font(.headline.monospacedDigit()).foregroundStyle(.secondary)
                 Picker("Type", selection: $draft.type) {
-                    ForEach(QuestionType.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    ForEach(QuestionType.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 .labelsHidden()
                 .fixedSize()
@@ -891,7 +889,7 @@ struct QuestionCard: View {
                 draft.elapsedMs = nil
             }
             if draft.type != .noul {
-                Text(draft.type == .choice ? "Options · one per line" : "Score levels · lowest to highest")
+                Text(draft.type == .choice ? "Options · one per line" : "Levels · one per line, lowest to highest")
                     .font(.subheadline.weight(.semibold))
                 TextEditor(text: draft.type == .choice ? $draft.choices : $draft.levels)
                     .font(.body)
@@ -901,9 +899,12 @@ struct QuestionCard: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
                     .frame(height: 80)
                     .accessibilityLabel(draft.type == .choice ? "Question \(number) options" : "Question \(number) levels")
-                Text(draft.validation ?? (draft.type == .choice
-                     ? "Each line is a named choice." : "Levels are numbered from 0; the answer is the expected score."))
-                    .font(.caption).foregroundStyle(draft.validation == nil ? Color.secondary : .red)
+                if let validation = draft.validation {
+                    Text(validation).font(.caption).foregroundStyle(.red)
+                } else if draft.type == .score {
+                    Text("Levels start at 0. The score is a probability-weighted average.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             if let answer = draft.answer {
                 Divider()
@@ -969,7 +970,7 @@ struct ModelsView: View {
         .navigationTitle("Models")
         .navigationSubtitle(demo.catalog.isRemote
                             ? "Catalog from github.com/WeGoToMars/tinkerbox"
-                            : "Offline · showing the models included with this app")
+                            : "Showing built-in catalog")
         .toolbar {
             Button("Refresh", systemImage: "arrow.clockwise") { Task { await demo.catalog.refresh() } }
         }
@@ -980,7 +981,7 @@ struct ModelsView: View {
             if let stored = demo.storage.report?.models.first(where: { $0.id == model.id }) {
                 Text(StorageView.removal(of: stored))
             } else {
-                Text("Deletes its bundle, its compiled copies and its checkpoint. Using it again downloads it again.")
+                Text("Deletes the model's bundles, compiled copies and checkpoint. Using this model again requires a download.")
             }
         }
         .task { await demo.catalog.refresh() }
@@ -989,7 +990,7 @@ struct ModelsView: View {
     private func row(_ model: CatalogModel) -> some View {
         let downloaded = demo.catalog.downloaded.contains(model.id)
         let inputs = model.inputs?.map { $0 == "image" ? "Images" : $0.capitalized }.joined(separator: " + ")
-        let details = [inputs, model.context.map { "\($0 / 1024)K context" },
+        let details = [inputs, model.context.map { "\($0 / 1024)K-token context" },
                        model.downloadBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) },
                        model.license].compactMap { $0 }
         return HStack(alignment: .center, spacing: 12) {
@@ -1021,7 +1022,7 @@ struct ModelsView: View {
             .help("Open on Hugging Face")
             if !model.isSupported {
                 Text(Catalog.isNewer(model.minVersion, than: Catalog.appVersion)
-                     ? "Requires Tinkerbox \(model.minVersion)" : "Requires a newer Tinkerbox")
+                     ? "Requires Tinkerbox \(model.minVersion)" : "Update Tinkerbox to use this model")
                     .font(.caption).foregroundStyle(.secondary)
             } else if model.id == demo.model && demo.loading {
                 VStack(alignment: .trailing, spacing: 4) {
@@ -1037,7 +1038,7 @@ struct ModelsView: View {
                 } else if downloaded {
                     Button(role: .destructive) { pending = model } label: { Image(systemName: "trash") }
                         .buttonStyle(.borderless)
-                        .help("Delete everything this model downloaded")
+                        .help("Delete model files and cached copies")
                         .disabled(!demo.storage.removing.isEmpty)
                 }
                 Button(downloaded ? "Use" : "Download") {
@@ -1114,7 +1115,7 @@ struct SystemFooter: View {
                      + " · Thermal: \(thermalDescription) · Low Power Mode: \(lowPowerMode ? "On" : "Off")")
                 Spacer()
                 if let newer = Updates.shared.available {
-                    Button("Version \(newer) is available!") { openURL(Updates.releases) }
+                    Button("Update to \(newer)") { openURL(Updates.releases) }
                         .buttonStyle(.plain)
                         .bold()
                         .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)

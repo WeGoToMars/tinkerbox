@@ -26,11 +26,10 @@ MAX_IMAGE_TILES = 6
 
 # Settings the app shows and sends with each request; each key is a writable attribute of the model.
 SETTINGS = [
-    {"key": "max_image_tiles", "title": "Image tiles", "type": "int", "min": 1, "max": 10,
+    {"key": "max_image_tiles", "title": "Maximum tiles per image", "type": "int", "min": 1, "max": 10,
      "default": MAX_IMAGE_TILES,
-     "help": "Most 512×512 tiles per image. Larger pictures get the grid closest to their shape within "
-             "this limit, so a 4:3 photo stops at 3×2, plus a thumbnail; each tile adds a vision pass and "
-             "about 256 tokens. 1 never splits."},
+     "help": "Up to this many 512×512 tiles per image, fitted to its aspect ratio. Each tile uses a vision "
+             "pass and 256 tokens; split images add a thumbnail. Set to 1 to disable tiling."},
 ]
 # Fixed properties the app shows beside the settings.
 INFO = [

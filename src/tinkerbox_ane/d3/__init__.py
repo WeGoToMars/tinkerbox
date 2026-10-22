@@ -30,10 +30,10 @@ MAX_IMAGE_TOKENS = PATCH_TIERS[-1] // 4
 
 # Settings the app shows and sends with each request; each key is a writable attribute of the model.
 SETTINGS = [
-    {"key": "max_image_tokens", "title": "Image tokens", "type": "int", "min": 64, "max": MAX_IMAGE_TOKENS,
+    {"key": "max_image_tokens", "title": "Maximum tokens per image", "type": "int", "min": 64, "max": MAX_IMAGE_TOKENS,
      "step": 64, "default": MAX_IMAGE_TOKENS,
-     "help": "Most tokens per image. Pictures keep their shape and are resized to multiples of 32 pixels, "
-             "one token per 32 × 32 block, within this budget; 1,600 is the official 1.6-megapixel limit."},
+     "help": "Images keep their aspect ratio and are resized to multiples of 32 pixels within this budget. "
+             "Each 32×32 block uses one token; 1,600 tokens is the official 1.6 MP limit."},
 ]
 # Fixed properties the app shows beside the settings.
 INFO = [

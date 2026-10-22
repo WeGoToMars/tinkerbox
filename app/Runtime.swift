@@ -3,6 +3,14 @@ import Foundation
 enum QuestionType: String, CaseIterable, Codable, Sendable {
     case noul, choice, score
 
+    var title: String {
+        switch self {
+        case .noul: "Yes/No"
+        case .choice: "Choice"
+        case .score: "Score"
+        }
+    }
+
     var example: String {
         switch self {
         case .noul: "Is this a refund request?"
