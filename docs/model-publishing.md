@@ -32,6 +32,8 @@ A model's `compile_model()` function can delegate to `tinkerbox_ane.coreai.compi
 - **Rebuilds:** Pass `force=True` to recompile an existing target when sources or build configurations change.
 - **Watchdog Protection:** Monitors compilation time, SSD write budgets, and free disk space, writing reports to `compile.json` and `compile.log` in the target's parent directory (pass `report=` to name them per asset).
 
+Exports write the upstream files their runtime reads into a `checkpoint` folder with `tinkerbox_ane.bundle.write_checkpoint()`: everything but the weights, plus a `model.safetensors` with only the named tensors. `compile_bundle()` and `install_bundle()` copy it into each bundle as an APFS clone, and `upload_release()` requires and publishes it.
+
 ## Publishing to Hugging Face Hub
 
 Stage release metadata (`README.md`, `LICENSE`, `NOTICE`) and compiled bundles in the staging directory, then publish:

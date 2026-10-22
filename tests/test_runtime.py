@@ -3,10 +3,9 @@ import subprocess
 import sys
 
 import pytest
-from huggingface_hub import try_to_load_from_cache
 
 import tinkerbox_ane
-from tinkerbox_ane.d1 import DEFAULT_ASSET, MODEL, REPO, REVISION
+from tinkerbox_ane.d1 import DEFAULT_ASSET, MODEL
 from tinkerbox_ane.host import (
     BINARY,
     SUPPORTED_ARCHITECTURES,
@@ -33,8 +32,7 @@ GREETING = {'type': 'noul', 'instructions': 'Is this a greeting?'}
 def model(monkeypatch):
     if sys.platform != 'darwin' or not (DEFAULT_ASSET / 'model.json').is_file():
         pytest.skip('requires the local Core AI bundle')
-    if not isinstance(try_to_load_from_cache(REPO, 'model.safetensors', revision=REVISION), str):
-        pytest.skip('requires the pinned checkpoint in the local cache')
+    # The bundle carries everything the runtime reads from the upstream checkpoint.
     monkeypatch.setenv('HF_HUB_OFFLINE', '1')
     with tinkerbox_ane.load(MODEL, DEFAULT_ASSET) as model:
         yield model

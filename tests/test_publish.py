@@ -26,6 +26,8 @@ def source(tmp_path):
                 conv_layers=[0], attention_layers=[1], asset=asset.name,
                 source_hash="11" * 32)
     (root / "model.json").write_text(json.dumps(spec))
+    (root / "checkpoint").mkdir()
+    (root / "checkpoint/model.safetensors").write_bytes(b"tensors")
     return root
 
 
@@ -69,6 +71,7 @@ def test_force_rebuilds_and_reuses_directory(source, tmp_path, native_tools):
     compiler.compile_model(source, out, architecture="h17s", force=True)
     assert not marker.exists()
     assert read_bundle(out, KIND)["architecture"] == "h17s"
+    assert (out / "checkpoint/model.safetensors").read_bytes() == b"tensors"
 
 
 def test_failed_compilation_can_be_retried(source, tmp_path, native_tools):
@@ -159,6 +162,7 @@ def test_upload_to_hub_assembles_release_and_synchronizes_patterns(release, monk
     assert "config.json" in kwargs["allow_patterns"]
     assert "macos27/h17s/model.json" in kwargs["allow_patterns"]
     assert "macos27/h17s/fused.h17s.aimodelc/**" in kwargs["allow_patterns"]
+    assert "macos27/h17s/checkpoint/**" in kwargs["allow_patterns"]
     assert kwargs["delete_patterns"] == ["macos27/**"]
 
     hub.create_tag.assert_called_once_with(

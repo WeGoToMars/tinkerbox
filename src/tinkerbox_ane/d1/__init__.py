@@ -8,6 +8,11 @@ MODEL = "d1-3b"
 KIND = "lfm2.5-vl"
 REPO = "LiquidAI/d1-3B"
 REVISION = "051bcc464b01b9f92942b364d9586b0ef5912432"
+# Loading imports the checkpoint's Python code, which bundles carry (bundle.code_digest).
+CODE = "e34c7a31ba59a17973e2923910a91d35dc7f7c41fb86ae187701662ba601f50d"
+# What the runtime reads from the checkpoint's weights; bundles keep only these.
+RUNTIME_TENSORS = ("model.language_model.embed_tokens.weight", "model.multi_modal_projector.",
+                   "model.vision_tower.vision_model.embeddings.position_embedding.weight")
 ARTIFACT_REPO, ARTIFACT_REVISION = entry(MODEL)["repo"], entry(MODEL)["revision"]
 RESIDUAL_SCALE = 64.0  # Keep ANE residual products above the subnormal threshold.
 CHUNK = 128

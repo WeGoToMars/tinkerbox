@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, wait
+import ctypes
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -65,13 +69,81 @@ def install_bundle(model: str, revision: str, source: Path, kind: str) -> Path:
     with tempfile.TemporaryDirectory(prefix=".install-", dir=CACHE / model) as temporary:
         staged = Path(temporary) / "bundle"
         staged.mkdir()
-        for name in [*asset_names(spec), "model.json"]:
-            copy = shutil.copytree if (Path(source) / name).is_dir() else shutil.copyfile
-            copy(Path(source) / name, staged / name)
+        for name in [*asset_names(spec), CHECKPOINT, "model.json"]:
+            clone(Path(source) / name, staged / name)
         if target.exists():
             shutil.rmtree(target)
         staged.rename(target)
     return target
+
+
+# The upstream files a runtime reads, kept in each bundle so loading downloads only the converted repository.
+CHECKPOINT = "checkpoint"
+
+
+def write_checkpoint(upstream: Path, out: Path, tensors: Iterable[str]) -> Path:
+    """Copy upstream's code, tokenizer, configs and other small files into `out/checkpoint`, with a
+    model.safetensors that keeps only `tensors`, by name; a name ending in "." keeps every tensor under it."""
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    upstream, out = Path(upstream), Path(out)
+    index = upstream / "model.safetensors.index.json"
+    weights = sorted(set(json.loads(index.read_text())["weight_map"].values())) if index.is_file() \
+        else ["model.safetensors"]
+    wanted = list(tensors)
+
+    def matches(key, name):
+        return key == name or (name.endswith(".") and key.startswith(name))
+
+    selected = {}
+    for name in weights:
+        with safe_open(upstream / name, "pt") as f:
+            selected.update({key: f.get_tensor(key) for key in f.keys() if any(matches(key, n) for n in wanted)})
+    if missing := [name for name in wanted if not any(matches(key, name) for key in selected)]:
+        raise ValueError(f"{upstream} lacks tensors {missing}")
+    staged = Path(tempfile.mkdtemp(prefix=f".{CHECKPOINT}-", dir=out))
+    try:
+        for path in sorted(upstream.rglob("*")):
+            relative = path.relative_to(upstream)
+            if (path.is_file() and path.name not in weights and path != index
+                    and not any(part.startswith(".") or part == "__pycache__" for part in relative.parts)):
+                (staged / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, staged / relative)
+        save_file(selected, staged / "model.safetensors", metadata={"format": "pt"})
+        shutil.rmtree(out / CHECKPOINT, ignore_errors=True)
+        staged.rename(out / CHECKPOINT)
+    except BaseException:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+    return out / CHECKPOINT
+
+
+def code_digest(checkpoint: Path) -> str:
+    """SHA-256 over a checkpoint's Python files, which loading imports."""
+    digest = hashlib.sha256()
+    for path in sorted(Path(checkpoint).rglob("*.py")):
+        relative = path.relative_to(checkpoint)
+        if not any(part.startswith(".") or part == "__pycache__" for part in relative.parts):
+            digest.update(str(relative).encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
+def clone(source: Path, target: Path) -> None:
+    """Copy a file or folder as an APFS clone, which shares blocks until either changes."""
+    if ctypes.CDLL(None, use_errno=True).clonefile(os.fsencode(source), os.fsencode(target), 0):
+        # Another volume, or a filesystem without clones.
+        (shutil.copytree if Path(source).is_dir() else shutil.copyfile)(source, target)
+
+
+def bundled_checkpoint(bundle: Path, code: str | None = None) -> Path:
+    """A bundle's checkpoint files; with `code`, only if its Python is that pinned upstream release's."""
+    path = Path(bundle) / CHECKPOINT
+    if not (path / "model.safetensors").is_file():
+        raise ValueError("bundle lacks its checkpoint files; re-export the model")
+    if code is not None and code_digest(path) != code:
+        raise ValueError("bundle's checkpoint code is not the pinned upstream release")
+    return path
 
 
 def check_asset_name(name: str) -> None:
@@ -139,6 +211,7 @@ def compile_bundle(
     spec = read_bundle(source, kind)
     if any(Path(name).suffix != ".aimodel" for name in asset_names(spec)):
         raise ValueError("compile requires a source .aimodel bundle")
+    checkpoint = bundled_checkpoint(source)
     if architecture is None:
         architecture = device_architecture()
     if (not architecture or Path(architecture).name != architecture
@@ -165,6 +238,11 @@ def compile_bundle(
                       min_deployment_version="27.0", expected_functions=spec.get("vision_functions", ("main",)),
                       force=force, report="compile-vision")
         spec.update(vision_asset=vision.name)
+    staged = out / f".{CHECKPOINT}"
+    shutil.rmtree(staged, ignore_errors=True)
+    clone(checkpoint, staged)
+    shutil.rmtree(out / CHECKPOINT, ignore_errors=True)
+    staged.rename(out / CHECKPOINT)
     manifest = out / ".model.json"
     manifest.write_text(json.dumps(spec, indent=2) + "\n")
     manifest.replace(out / "model.json")

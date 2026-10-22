@@ -12,6 +12,10 @@ VARIANTS = {
 }
 # Loading imports the checkpoint's Python code, so only these sources are trusted.
 REVISIONS = {repo: revision for repo, revision, _ in VARIANTS.values()}
+# Bundles carry that code; both revisions ship the same files (bundle.code_digest).
+CODE = "b7fc4617c548a51ec19fc21d3bafc68721429d06a1f463fef625f3f6b9400e7f"
+# What the runtime reads from the checkpoint's weights; bundles keep only these.
+RUNTIME_TENSORS = ("language_model.embed_tokens.weight", "visual.pos_embed.weight")
 RESIDUAL_SCALE = 64.0  # Keep ANE residual products above the subnormal threshold.
 CHUNK = 128
 # Short prompts run each stage in one call at the smallest of these widths that holds them: the DeltaNet

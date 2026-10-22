@@ -11,8 +11,8 @@ import torch
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
-from tinkerbox_ane.bundle import read_bundle
-from tinkerbox_ane.d1 import CHUNK, KIND, MAX_IMAGE_TILES, RESIDUAL_SCALE, checkpoint
+from tinkerbox_ane.bundle import bundled_checkpoint, read_bundle
+from tinkerbox_ane.d1 import CHUNK, CODE, KIND, MAX_IMAGE_TILES, RESIDUAL_SCALE
 from tinkerbox_ane.d1.vision import IMAGE_TOKEN_ID, VisionPipeline, as_rgb
 from tinkerbox_ane.host import Host
 from tinkerbox_ane.d1.tree import TreePlan, groups, shared_prefix
@@ -54,7 +54,7 @@ class Embeddings:
 
 
 def load(asset):
-    path = checkpoint()
+    path = bundled_checkpoint(asset, CODE)
     prompt, api = d1_code(path)
 
     class Model(api.SystemOneApi):

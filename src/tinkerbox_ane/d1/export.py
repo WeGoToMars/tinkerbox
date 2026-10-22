@@ -11,7 +11,9 @@ import torch
 from coreai_torch import TorchConverter, get_decomp_table
 
 from tinkerbox_ane.coreai import count_flops, source_hash
-from tinkerbox_ane.d1 import CHUNK, CONTEXT, INPUT, KIND, OUTPUT, REPO, REVISION, SOURCE, TIERS, checkpoint
+from tinkerbox_ane.bundle import write_checkpoint
+from tinkerbox_ane.d1 import (CHUNK, CONTEXT, INPUT, KIND, OUTPUT, REPO, REVISION, RUNTIME_TENSORS, SOURCE, TIERS,
+                              checkpoint)
 from tinkerbox_ane.d1.model import FusedBackbone, load_weights
 from tinkerbox_ane.d1.vision import export_vision_asset, load_vision_tower
 
@@ -82,6 +84,7 @@ def export(out: Path = SOURCE, include_vision: bool = True) -> Path:
             vision_parameter_bytes=sum(p.numel() * p.element_size() for p in tower.parameters()),
             vision_flops=vflops,
         )
+    write_checkpoint(checkpoint(), out, RUNTIME_TENSORS)
     (out / "model.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"exported fused backbone ({time.monotonic() - started:.1f}s): {out}", flush=True)
     return out

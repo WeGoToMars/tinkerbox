@@ -91,7 +91,7 @@ def upload_release(
 
     Release metadata (LICENSE, NOTICE, README.md) comes from `metadata_dir`, or else from staging and
     then the repository root; `license_file` is the LICENSE source relative to that directory."""
-    from tinkerbox_ane.bundle import asset_names, read_bundle, resources
+    from tinkerbox_ane.bundle import CHECKPOINT, asset_names, bundled_checkpoint, read_bundle, resources
 
     staging = Path(staging)
     if architectures is None:
@@ -108,8 +108,9 @@ def upload_release(
                 or any(not name.endswith(f".{architecture}.aimodelc") for name in names)):
             raise ValueError(f"{directory}: bundle does not target {architecture}")
         identities.add(tuple(entry[identity] for entry, name, identity in resources(spec) if name == "asset"))
+        bundled_checkpoint(directory)
         bundles[architecture] = f"macos27/{architecture}/model.json"
-        patterns.append(f"macos27/{architecture}/model.json")
+        patterns += [f"macos27/{architecture}/model.json", f"macos27/{architecture}/{CHECKPOINT}/**"]
         patterns.extend(f"macos27/{architecture}/{name}/**" for name in names)
     if len(identities) != 1:
         raise ValueError("release requires bundles with the same source identity")

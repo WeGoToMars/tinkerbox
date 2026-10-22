@@ -32,7 +32,7 @@ struct StorageReport: Decodable, Sendable {
         let id: String
         let name: String
         let bundles: [Bundle]
-        let checkpoint: Checkpoint?  // tokenizer, embeddings and readout, from the Hugging Face cache
+        let checkpoint: Checkpoint?  // upstream, in the Hugging Face cache: exports and earlier versions download it
         let bytes: Int64
     }
 
@@ -228,7 +228,7 @@ struct StorageView: View {
                     }
                 }
                 if let checkpoint = model.checkpoint {
-                    location("Checkpoint \(checkpoint.repo)", paths: [checkpoint.path], bytes: checkpoint.bytes)
+                    location("Upstream checkpoint \(checkpoint.repo)", paths: [checkpoint.path], bytes: checkpoint.bytes)
                 }
             }
             Spacer()

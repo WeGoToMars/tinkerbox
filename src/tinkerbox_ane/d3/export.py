@@ -10,8 +10,9 @@ import time
 import torch
 from coreai_torch import TorchConverter, get_decomp_table
 
+from tinkerbox_ane.bundle import write_checkpoint
 from tinkerbox_ane.coreai import count_flops, source_hash
-from tinkerbox_ane.d3 import CHUNK, INPUT, KIND, OUTPUT, PROMPT_WIDTHS, VARIANTS, checkpoint
+from tinkerbox_ane.d3 import CHUNK, INPUT, KIND, OUTPUT, PROMPT_WIDTHS, RUNTIME_TENSORS, VARIANTS, checkpoint
 from tinkerbox_ane.d3.model import AttendStage, PromptStage, ScanStage, load_weights, stage_ranges
 from tinkerbox_ane.d3.vision import export_vision_asset
 
@@ -86,6 +87,7 @@ def export(model: str, out: Path, include_vision: bool = True) -> Path:
     if include_vision:
         manifest.update(export_vision_asset(path, out / "vision.aimodel"))
         print(f"exported vision tower ({time.monotonic() - started:.1f}s)", flush=True)
+    write_checkpoint(path, out, RUNTIME_TENSORS)
     (out / "model.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"exported {model} ({time.monotonic() - started:.1f}s): {out}", flush=True)
     return out

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import math
@@ -15,8 +16,8 @@ import torch
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
-from tinkerbox_ane.bundle import read_bundle
-from tinkerbox_ane.d3 import CHUNK, KIND, MAX_IMAGE_TOKENS, RESIDUAL_SCALE, checkpoint
+from tinkerbox_ane.bundle import bundled_checkpoint, read_bundle
+from tinkerbox_ane.d3 import CHUNK, CODE, KIND, MAX_IMAGE_TOKENS, RESIDUAL_SCALE
 from tinkerbox_ane.d3.model import CheckpointReader, Config
 from tinkerbox_ane.d3.vision import IMAGE_TOKEN_ID, VisionPipeline
 from tinkerbox_ane.host import Host
@@ -57,7 +58,7 @@ def check_layout(spec: dict) -> None:
 
 
 def d3_code(checkpoint: Path) -> tuple[types.ModuleType, types.ModuleType]:
-    pkg = f"d3_remote_{checkpoint.name}"
+    pkg = f"d3_remote_{hashlib.sha256(str(checkpoint.resolve()).encode()).hexdigest()[:16]}"
     if pkg not in sys.modules:
         module = types.ModuleType(pkg)
         module.__path__ = [str(checkpoint)]
@@ -110,7 +111,7 @@ def rope_positions(ids: list[int], grids, merge: int) -> torch.Tensor:
 def load(asset: Path):
     spec = read_bundle(asset, KIND)
     source = spec["source"]
-    path = checkpoint(source["repo"], source["revision"])
+    path = bundled_checkpoint(asset, CODE)
     fmt, rt = d3_code(path)
 
     class Model:
