@@ -8,7 +8,7 @@ VARIANTS = {
     "d3-nano": ("vllm-sr/d3-nano", "462efc366229ea268cf4eed3738b3fc4415e4817",
                 (256, 512, 1024, 2048, 4096, 8192, 16384, 24576, 32768)),
     "d3-mini": ("vllm-sr/d3-mini", "bd0090dd758d32ba59ef5c749910a8e87fc4391f",
-                (256, 512, 1024, 2048, 4096)),
+                (256, 512, 1024, 2048, 4096, 8192, 16384, 24576, 32768)),
 }
 # Loading imports the checkpoint's Python code, so only these sources are trusted.
 REVISIONS = {repo: revision for repo, revision, _ in VARIANTS.values()}
