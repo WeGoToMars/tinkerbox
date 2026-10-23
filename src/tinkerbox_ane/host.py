@@ -99,7 +99,101 @@ def check_flops(counted) -> None:
         raise ValueError("bundle lacks FLOP counts for its functions; re-export the model")
 
 
-class Host:
+class _PipeHost:
+    _timeout = 300.0
+
+    def _read(self, count: int) -> bytes:
+        import select
+        import time
+
+        deadline = time.monotonic() + self._timeout
+        data = bytearray()
+        while len(data) < count:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([self._process.stdout], [], [], remaining)[0]:
+                self._process.kill()
+                raise RuntimeError(f'Core AI host did not respond within {self._timeout:g} seconds')
+            chunk = os.read(self._process.stdout.fileno(), min(count - len(data), 1024 * 1024))
+            if not chunk:
+                raise RuntimeError(f'the Core AI host exited (status {self._process.poll()})')
+            data.extend(chunk)
+        return bytes(data)
+
+    def _u32(self) -> int:
+        return struct.unpack("<I", self._read(4))[0]
+
+    def _reply(self) -> None:
+        if self._read(1) != b"\0":
+            raise RuntimeError(f"Core AI host: {self._read(self._u32()).decode()}")
+
+    def _send(self, *payloads) -> None:
+        try:
+            for payload in payloads:
+                self._process.stdin.write(payload)
+            self._process.stdin.flush()
+        except BrokenPipeError as error:
+            raise RuntimeError(f"the Core AI host exited (status {self._process.poll()})") from error
+
+    def close(self) -> None:
+        process = getattr(self, "_process", None)
+        if process is not None and process.poll() is None:
+            try:
+                process.stdin.write(b"Q")
+                process.stdin.close()
+                process.wait(timeout=10)
+            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                process.kill()
+                process.wait()
+        if process is not None:
+            process.wait()
+            for stream in (process.stdin, process.stdout):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        self._directory.cleanup()
+
+
+class TensorHost(_PipeHost):
+    """Stateless named FP16 tensor calls through the shared native host."""
+
+    def __init__(self, asset: Path, timeout: float = 300):
+        asset = Path(asset).resolve()
+        if asset.suffix != '.aimodelc':
+            raise ValueError('TensorHost requires an AOT asset')
+        self._timeout = timeout
+        self._directory = tempfile.TemporaryDirectory(prefix='.host-', dir=asset.parent)
+        clones = Path(self._directory.name) / 'clones'
+        clones.mkdir()
+        environment = dict(os.environ, COW_CLIENT_DEST=str(clones), COW_ASSET_PREFIX=str(asset))
+        try:
+            self._process = subprocess.Popen([str(BINARY), '--tensor', str(asset)],
+                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment)
+            ready = json.loads(self._read(self._u32()))
+            if not ready.get('ready'):
+                raise RuntimeError(ready.get('error', 'native tensor host failed to load'))
+        except BaseException:
+            self.close()
+            raise
+
+    def run(self, function: str, inputs: dict):
+        import numpy as np
+
+        encoded = function.encode()
+        payload = [b'F' + struct.pack('<I', len(encoded)) + encoded + struct.pack('<I', len(inputs))]
+        for name, value in inputs.items():
+            array = np.ascontiguousarray(value, dtype=np.float16)
+            key = name.encode()
+            payload += [struct.pack('<I', len(key)) + key + struct.pack('<I', array.size),
+                        memoryview(array).cast('B')]
+        self._send(*payload)
+        self._reply()
+        rank = self._u32()
+        shape = struct.unpack(f'<{rank}I', self._read(4 * rank))
+        return np.frombuffer(self._read(2 * int(np.prod(shape))), dtype=np.float16).reshape(shape).copy()
+
+
+class Host(_PipeHost):
     def __init__(self, asset: str | Path, kind: str, check=check_layout):
         """`check` validates the manifest fields the bundle's runner allocates state for."""
         from tinkerbox_ane.bundle import compiled, read_bundle
@@ -139,27 +233,6 @@ class Host:
         except BaseException:
             self.close()
             raise
-
-    def _read(self, count: int) -> bytes:
-        data = self._process.stdout.read(count)
-        if len(data) != count:
-            raise RuntimeError(f"the Core AI host exited (status {self._process.poll()})")
-        return data
-
-    def _u32(self) -> int:
-        return struct.unpack("<I", self._read(4))[0]
-
-    def _reply(self) -> None:
-        if self._read(1) != b"\0":
-            raise RuntimeError(f"Core AI host: {self._read(self._u32()).decode()}")
-
-    def _send(self, *payloads) -> None:
-        try:
-            for payload in payloads:
-                self._process.stdin.write(payload)
-            self._process.stdin.flush()
-        except BrokenPipeError as error:
-            raise RuntimeError(f"the Core AI host exited (status {self._process.poll()})") from error
 
     def vision(self, inputs: dict, function: str = "main"):
         """Run a function of the bundle's vision asset on named FP16 inputs, each row-major in its
@@ -225,22 +298,3 @@ class Host:
                 self._process.kill()
             self.close()
             raise
-
-    def close(self) -> None:
-        process = getattr(self, "_process", None)
-        if process is not None and process.poll() is None:
-            try:
-                process.stdin.write(b"Q")
-                process.stdin.close()
-                process.wait(timeout=10)
-            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
-                process.kill()
-                process.wait()
-        if process is not None:
-            process.wait()
-            for stream in (process.stdin, process.stdout):
-                try:
-                    stream.close()
-                except OSError:
-                    pass
-        self._directory.cleanup()

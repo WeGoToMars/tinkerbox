@@ -240,11 +240,32 @@ func forEachOffset(_ shape: [Int], _ strides: [Int], _ body: (Int, Int) -> Void)
   }
 }
 
+// Copy the largest contiguous suffix at once while honoring padded outer strides.
+func forEachContiguousBlock(_ shape: [Int], _ strides: [Int], _ body: (Int, Int, Int) -> Void) {
+  var axis = shape.count
+  var block = 1
+  while axis > 0 {
+    let next = axis - 1
+    if shape[next] != 1 && strides[next] != block { break }
+    block *= shape[next]
+    axis = next
+  }
+  forEachOffset(Array(shape.prefix(axis)), Array(strides.prefix(axis))) { linear, offset in
+    body(linear * block, offset, block)
+  }
+}
+
 @main struct Host {
   static func main() async {
     let args = CommandLine.arguments
     if args.count == 2 && args[1] == "--architecture" {
       print(AIModel.deviceArchitectureName)
+      exit(0)
+    }
+    if args.count == 3 && args[1] == "--tensor" {
+      protectReplies()
+      installStaging()
+      await tensorHost(URL(fileURLWithPath: args[2]))
       exit(0)
     }
     guard args.count == 2 else {
@@ -329,5 +350,72 @@ func forEachOffset(_ shape: [Int], _ strides: [Int], _ body: (Int, Int) -> Void)
       }
     }
     exit(0)
+  }
+}
+
+// Stateless named-tensor entry points, shared by diffusion and other non-cached tasks.
+// Swift owns each output so the Python bindings cannot retain ANE output buffers.
+func tensorHost(_ asset: URL) async {
+  let model: AIModel
+  do {
+    model = try await loadAsset(asset)
+    sendJSON(["ready": true])
+  } catch {
+    sendJSON(["error": "\(error)"])
+    return
+  }
+  var functions: [String: InferenceFunction] = [:]
+  while let op = readExact(1)?.first {
+    if op == UInt8(ascii: "Q") { return }
+    guard op == UInt8(ascii: "F"), let n = readExact(4),
+          let nameBytes = readExact(u32(n, 0)), let count = readExact(4) else { return }
+    let name = String(decoding: nameBytes, as: UTF8.self)
+    var values: [String: [Float16]] = [:]
+    for _ in 0..<u32(count, 0) {
+      guard let length = readExact(4), let key = readExact(u32(length, 0)),
+            let size = readExact(4), let value = readHalves(u32(size, 0)) else { return }
+      values[String(decoding: key, as: UTF8.self)] = value
+    }
+    do {
+      if functions[name] == nil {
+        guard let function = try model.loadFunction(named: name) else {
+          throw HostError("missing function \(name)")
+        }
+        functions[name] = function
+      }
+      let function = functions[name]!
+      var inputs: [String: NDArray] = [:]
+      for (key, value) in values {
+        var array = NDArray(descriptor: try descriptor(function.descriptor.inputDescriptor(of: key), key))
+        var matches = false
+        write4(&array) { p, shape, strides in
+          matches = shape.reduce(1, *) == value.count
+          if matches {
+            value.withUnsafeBufferPointer { source in
+              forEachContiguousBlock(shape, strides) { linear, offset, count in
+                p.advanced(by: offset).update(from: source.baseAddress!.advanced(by: linear), count: count)
+              }
+            }
+          }
+        }
+        guard matches else { throw HostError("wrong element count for \(key)") }
+        inputs[key] = array
+      }
+      var outputs = try await function.run(inputs: inputs)
+      guard let result = outputs.remove("logits")?.ndArray else {
+        throw HostError("missing logits output")
+      }
+      read4(result) { p, shape, strides in
+        var flat = [Float16](repeating: 0, count: shape.reduce(1, *))
+        flat.withUnsafeMutableBufferPointer { target in
+          forEachContiguousBlock(shape, strides) { linear, offset, count in
+            target.baseAddress!.advanced(by: linear).update(from: p.advanced(by: offset), count: count)
+          }
+        }
+        var reply: [UInt8] = [0] + le32(shape.count) + shape.flatMap(le32)
+        flat.withUnsafeBytes { reply += $0 }
+        writeAll(reply)
+      }
+    } catch { sendError("\(error)") }
   }
 }
