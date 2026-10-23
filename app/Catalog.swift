@@ -3,16 +3,19 @@ import Foundation
 // What a model does. Each task has its own page in the app and its own selected model.
 enum ModelTask: String, CaseIterable, Sendable {
     case decision
+    case speech
 
     var title: String {
         switch self {
         case .decision: "Decision (System One)"
+        case .speech: "Text to Speech"
         }
     }
 
     var symbol: String {
         switch self {
         case .decision: "arrow.triangle.branch"
+        case .speech: "waveform"
         }
     }
 
@@ -20,6 +23,7 @@ enum ModelTask: String, CaseIterable, Sendable {
     var heading: String {
         switch self {
         case .decision: "Decision"
+        case .speech: "Speech"
         }
     }
 }
@@ -42,6 +46,7 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     let context: Int?
     let downloadBytes: Int64?
     let license: String?
+    let localOnly: Bool?
     let minVersion: String
 
     var kind: ModelTask? { ModelTask(rawValue: task) }
@@ -115,6 +120,10 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
         let files = FileManager.default
         // Only the catalog's revision counts; an older one would be downloaded again on load.
         downloaded = Set(models.filter { model in
+            if let local = UserDefaults.standard.string(forKey: "asset.\(model.id)"),
+               files.fileExists(atPath: URL(fileURLWithPath: local).appending(path: "model.json").path) {
+                return true
+            }
             let folder = Self.cacheURL.appending(path: model.id).appending(path: model.revision).appending(path: "macos27")
             let bundles = (try? files.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
             return bundles.contains { files.fileExists(atPath: $0.appending(path: "model.json").path) }

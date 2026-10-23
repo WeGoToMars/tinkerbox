@@ -50,6 +50,14 @@ TINKERBOX_ASSET="$PWD/artifacts/d1_fp16_fused128_ctx32768" uv run --no-project -
 
 Each question is configured as a card. With multiple questions, models supporting decision trees offer **Parallel** execution (a single shared pass over the input) or **Sequential** execution (independent passes per question).
 
+## Text to Speech
+
+OmniVoice supports automatic voice, voice design, reference-audio cloning and saved
+voice prompts. The Text to Speech page provides generation controls, playback and
+WAV export, and displays the seed for replay. Select a verified local bundle in
+the page toolbar or set `TINKERBOX_ASSET` before launch. Bundles are not distributed
+yet; see [local setup and validation](../docs/models/omnivoice.md).
+
 ## Model Management
 
 The sidebar **Models** view displays the catalog grouped by task, fetched from `models.json` on the main branch (falling back to the bundled catalog offline). Downloaded models can be activated or removed; entries requiring a newer app version remain disabled until updated. Downloads run in the background.

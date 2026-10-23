@@ -74,6 +74,7 @@ struct RunTotals {
     var questionTrees = false
     var settings: [ModelSetting] = []
     var info: [ModelInfo] = []
+    var speechParameters: [SpeechParameter] = []
     // Only values that differ from the defaults are kept.
     var settingValues: [String: Int] = [:] {
         didSet { Runtime.store(settings: settingValues, for: model) }
@@ -95,6 +96,7 @@ struct RunTotals {
     // Downloads run beside the runtime, so they never hold up requests or model switches.
     private func fetch(_ id: String) async throws {
         // The worker loads a local bundle given at launch instead.
+        if UserDefaults.standard.string(forKey: "asset.\(id)") != nil { return }
         guard !isDownloaded(id), ProcessInfo.processInfo.environment["TINKERBOX_ASSET"] == nil else { return }
         defer {
             catalog.scanDownloads()
@@ -126,6 +128,7 @@ struct RunTotals {
             questionTrees = reply.questionTrees == true
             settings = reply.settings ?? []
             info = reply.info ?? []
+            speechParameters = reply.speechParameters ?? []
         } catch is CancellationError {
             // Its download was stopped to remove the model.
         } catch {
@@ -140,23 +143,24 @@ struct RunTotals {
         architecture = nil
         settings = []
         info = []
+        speechParameters = []
         settingValues = Runtime.settings(for: model)
     }
 
     // The previous model keeps serving Shortcuts until the chosen one has downloaded.
-    func choose(_ choice: CatalogModel) async {
+    func choose(_ choice: CatalogModel, asset: URL? = nil) async {
         guard let task = choice.kind, choice.isSupported, !storage.removing.contains(choice.id),
-              choice.id != model || !ready else { return }
+              choice.id != model || !ready || asset != nil else { return }
         generation += 1
         let current = generation
         model = choice.id  // reserve its files before yielding to the runtime
         forgetLoadedModel()  // its settings are not the chosen model's
-        do { try await fetch(choice.id) } catch {
+        do { if asset == nil { try await fetch(choice.id) } } catch {
             if current == generation && !(error is CancellationError) { self.error = error.localizedDescription }
             return
         }
         guard current == generation else { return }
-        await runtime.select(model: choice.id, for: task)
+        await runtime.select(model: choice.id, for: task, asset: asset?.path)
         guard current == generation else { return }
         setupMs = nil
         await load()
@@ -177,6 +181,11 @@ struct RunTotals {
         if !outdated {
             guard !keeps(id) else { return }
             await downloads.stop(id)
+            if UserDefaults.standard.string(forKey: "asset.\(id)") != nil {
+                UserDefaults.standard.removeObject(forKey: "asset.\(id)")
+                catalog.scanDownloads()
+                return
+            }
         }
         await storage.remove(id, outdated: outdated)
         catalog.scanDownloads()
@@ -522,17 +531,25 @@ struct AppView: View {
                 StorageSummary(storage: demo.storage) { destination = .storage }
             }
             .navigationSplitViewColumnWidth(min: 160, ideal: 180)
+            .disabled(demo.busy)
         } detail: {
             Group {
                 switch destination ?? .task(.decision) {
                 case .task(.decision): DecisionView(playground: decisions) { destination = .models }
+                case .task(.speech): SpeechView(demo: demo) { destination = .models }
                 case .models: ModelsView(demo: demo)
                 case .storage: StorageView(demo: demo)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { SystemFooter() }
         }
-        .task { await demo.load() }
+        .task(id: destination) {
+            if case .task(let task) = destination {
+                let selected = Runtime.selectedModel(for: task)
+                if demo.model == selected { if !demo.ready { await demo.load() } }
+                else if let model = demo.catalog.models.first(where: { $0.id == selected }) { await demo.choose(model) }
+            }
+        }
         .task { await demo.catalog.refresh() }
         .task { await Updates.shared.check() }
         .onChange(of: demo.model) { decisions.reset() }
@@ -994,6 +1011,7 @@ struct QuestionCard: View {
 // Every catalog model, grouped by task, with downloads in progress shown in their row.
 struct ModelsView: View {
     let demo: Demo
+    @State private var removalError: String?
     @State private var pending: CatalogModel?
     @Environment(\.openURL) private var openURL
 
@@ -1022,6 +1040,8 @@ struct ModelsView: View {
         .toolbar {
             Button("Refresh", systemImage: "arrow.clockwise") { Task { await demo.catalog.refresh() } }
         }
+        .alert("Model files", isPresented: Binding(get: { removalError != nil }, set: { if !$0 { removalError = nil } })) {
+        } message: { Text(removalError ?? "") }
         .confirmationDialog("Delete \(pending?.name ?? "")?", isPresented: Binding(
             get: { pending != nil }, set: { if !$0 { pending = nil } }), presenting: pending) { model in
             Button("Delete", role: .destructive) { Task { await demo.remove(model.id) } }
@@ -1057,7 +1077,7 @@ struct ModelsView: View {
             Spacer()
             Menu("Hugging Face", systemImage: "arrow.up.right.square") {
                 let repositories = [("Base model", model.baseModel), ("Original model", model.originalModel),
-                                    ("Converted model", model.repo)]
+                                    (model.localOnly == true ? "Model source" : "Converted model", model.repo)]
                 ForEach(repositories, id: \.0) { title, repository in
                     if let repository {
                         Button("\(title) · \(repository)") {
@@ -1090,7 +1110,10 @@ struct ModelsView: View {
                 } else if model.id == demo.model {
                     Label("Selected", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(demo.ready ? .green : .secondary)
-                        .help("Used by Decision and Shortcuts")
+                        .help("Selected for \(model.kind?.title ?? model.task)")
+                    if model.localOnly == true {
+                        Button("Choose bundle…") { chooseBundle(model) }.disabled(demo.busy)
+                    }
                 }
                 if demo.storage.removing.contains(model.id) {
                     ProgressView().controlSize(.small)
@@ -1101,12 +1124,24 @@ struct ModelsView: View {
                         .disabled(!demo.storage.removing.isEmpty)
                 }
                 if model.id != demo.model {
-                    Button(downloaded ? "Select" : "Download & Select") {
-                        Task { await demo.choose(model) }
+                    Button(downloaded ? "Select" : model.localOnly == true ? "Choose bundle…" : "Download & Select") {
+                        if model.localOnly == true && !downloaded { chooseBundle(model) }
+                        else { Task { await demo.choose(model) } }
                     }
                     .disabled(demo.busy || demo.storage.removing.contains(model.id))
                 }
             }
+        }
+    }
+    private func chooseBundle(_ model: CatalogModel) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.message = "Choose the compiled model bundle directory containing model.json."
+        if panel.runModal() == .OK, let url = panel.url {
+            if FileManager.default.fileExists(atPath: url.appending(path: "model.json").path) {
+                Task { await demo.choose(model, asset: url) }
+            } else { removalError = "Choose a compiled bundle directory containing model.json." }
         }
     }
 }
