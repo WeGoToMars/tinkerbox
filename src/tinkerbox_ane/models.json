@@ -54,6 +54,22 @@
       "download_bytes": 9254462596,
       "license": "Apache-2.0",
       "min_version": "2.1.0"
+    },
+    {
+      "id": "omnivoice",
+      "name": "OmniVoice",
+      "publisher": "k2-fsa",
+      "summary": "Multilingual speech synthesis, voice cloning and voice design.",
+      "task": "speech",
+      "base_model": "Qwen/Qwen3-0.6B-Base",
+      "original_model": "k2-fsa/OmniVoice",
+      "module": "tinkerbox_ane.omnivoice",
+      "repo": "k2-fsa/OmniVoice",
+      "revision": "ane-dev-1",
+      "local_only": true,
+      "inputs": ["text", "audio"],
+      "license": "CC-BY-NC-4.0",
+      "min_version": "2.1.0"
     }
   ]
 }

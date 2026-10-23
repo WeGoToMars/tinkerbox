@@ -114,7 +114,7 @@ def write_checkpoint(upstream: Path, out: Path, tensors: Iterable[str]) -> Path:
     try:
         for path in sorted(upstream.rglob("*")):
             relative = path.relative_to(upstream)
-            if (path.is_file() and path.name not in weights and path != index
+            if (path.is_file() and str(relative) not in weights and path != index
                     and not any(part.startswith(".") or part == "__pycache__" for part in relative.parts)):
                 (staged / relative).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(path, staged / relative)

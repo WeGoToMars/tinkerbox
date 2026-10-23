@@ -24,3 +24,11 @@ Neural Engine; tokenization, image preprocessing, position tables,
 token-embedding lookup and option readout run on the host CPU. The models
 have not been retrained. This project is not affiliated with or endorsed by
 vllm-sr or Qwen.
+
+OmniVoice integration:
+Upstream code: https://github.com/k2-fsa/OmniVoice (Apache-2.0).
+Checkpoint: https://huggingface.co/k2-fsa/OmniVoice
+Revision: c5fdb5ccb189668d56333f77ba2629f4cd7535f4
+OmniVoice checkpoint and derived weights are licensed CC-BY-NC.
+The Qwen3 transformer is converted independently; CPU speech processing and
+sampling use the separately installed upstream omnivoice package.

@@ -25,6 +25,16 @@ def download(model: str, progress=None) -> Path:
     from tinkerbox_ane.bundle import download_bundle
 
     item = entry(model)
+    if item.get('local_only'):
+        from tinkerbox_ane.bundle import CACHE, read_bundle
+        from tinkerbox_ane.host import device_architecture
+        bundle = CACHE / model / item['revision'] / 'macos27' / device_architecture()
+        if not (bundle / 'model.json').is_file():
+            raise RuntimeError('OmniVoice currently requires a local ANE bundle. Export and compile it, '
+                               'then run python -m tinkerbox_ane.install omnivoice <bundle>, '
+                               'or set TINKERBOX_ASSET to the compiled bundle directory.')
+        read_bundle(bundle, importlib.import_module(item['module']).KIND)
+        return bundle
     return download_bundle(item["id"], item["repo"], item["revision"], progress)
 
 

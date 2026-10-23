@@ -8,6 +8,7 @@ Run models on Apple's Neural Engine through Core AI. Critical inference always r
 | --- | --- | --- |
 | [LiquidAI/d1-3B](https://huggingface.co/LiquidAI/d1-3B) (`d1-3b`) | Decisions over text and images | [docs/models/d1.md](docs/models/d1.md) |
 | [vllm-sr/d3-nano](https://huggingface.co/vllm-sr/d3-nano) (`d3-nano`), [vllm-sr/d3-mini](https://huggingface.co/vllm-sr/d3-mini) (`d3-mini`) | Decisions over text and images, one question per pass | [docs/models/d3.md](docs/models/d3.md) |
+| [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) (`omnivoice`) | Speech synthesis, voice cloning and voice design | [Local bundle setup](docs/models/omnivoice.md) |
 
 Requires Apple Silicon (M4 or newer), macOS 27, and Python 3.12 or 3.13. Earlier generations (M1–M3) are not supported due to Neural Engine hardware and offline compiler constraints.
 
@@ -35,6 +36,8 @@ with tinkerbox_ane.load("d1-3b") as model:
 `python -m tinkerbox_ane.storage` reports, as JSON, each model's bundles, Core AI's compiled copies of their assets, and any upstream checkpoint in the Hugging Face cache, which exports and earlier versions download, then the compiled copies no downloaded bundle uses and the Python and packages the models share. `--remove MODEL` deletes all of a model's files; add `--outdated` to delete only bundle revisions the catalog no longer loads. `--remove-unused` deletes unused compiled copies, such as those of local exports, which compile again on their next load.
 
 Decision models expose the System One API: `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries, plus `count_tokens`. Models with parallel decisions (`question_trees` in the catalog, such as d1-3B) answer several questions about one input in a shared pass; the others answer them one after another and warn when a call asks more than one. Inputs, limits, and execution details are in each model's notes.
+
+OmniVoice exposes `generate`, reusable voice prompts, and CPU transcription. It currently requires a locally compiled bundle and the `speech` dependency extra; the app includes a Text to Speech page with playback and WAV export.
 
 ## Tinkerbox app
 
