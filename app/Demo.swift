@@ -752,7 +752,7 @@ struct DecisionView: View {
                                 .help("Each question runs sequentially and reads the full input again.")
                         }
                     }
-                    if demo.busy && !demo.unloading { ProgressView().controlSize(.small) }
+                    if demo.busy && !demo.unloading { LogoActivity().frame(width: 36, height: 36).transition(.opacity) }
                     if let error = playground.previewError {
                         Text(error).font(.caption).foregroundStyle(.red).lineLimit(2)
                     } else if let preview = playground.preview {
