@@ -31,19 +31,29 @@ lists. Omitted mode selects automatic, design or cloning from the supplied
 instruction/reference. Explicit mode selects exactly the advertised behavior.
 Unsupported controls and incompatible combinations return errors.
 
-| Capability | OmniVoice |
-| --- | --- |
-| Modes | Automatic, voice design, cloning |
-| Duration | Native numeric target, in seconds |
-| Speed | Numeric factor used by the duration estimator |
-| Instructions | Supported comma-separated voice attributes |
-| Audio | 24 kHz |
+| Capability | OmniVoice | VoxCPM2 |
+| --- | --- | --- |
+| Modes | Automatic, voice design, cloning | Automatic, design, cloning, continuation, combined cloning/continuation |
+| Duration | Native numeric target, in seconds | Unsupported |
+| Speed | Numeric factor used by the duration estimator | Descriptive instruction |
+| Instructions | Supported comma-separated voice attributes | Natural-language voice or delivery description |
+| Reference transcript | Used for reference cloning; transcribed if absent | Not used for reference-only cloning; required for continuation |
+| Language | Explicit selection or automatic | Detected from text |
+| Audio | 24 kHz | 48 kHz |
 
 For example, OmniVoice accepts `controls={"duration": 3.0}` or
 `controls={"speed": 1.25}`. Its existing direct `duration` and `speed` arguments
 remain native API options. Other backends can advertise different fields and
 categorical controls. The shared task does not approximate unsupported controls
 through audio postprocessing.
+
+Each reference-capable mode may advertise `reference_transcript="none"` or
+`"required"`. The app hides transcription controls for `"none"`; an omitted
+field preserves transcript-based preparation. `create_voice` accepts `mode` so
+the backend can prepare the corresponding representation. Saved voices may be
+specific to a conditioning mode as well as a model; incompatible combinations
+return an error. Audio preparation and any missing-transcript recognition are
+owned by the backend, so Python, the worker, and app automation share behavior.
 
 The worker protocol carries per-item intent separately from request-wide
 generation settings:

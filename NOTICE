@@ -32,3 +32,13 @@ Revision: c5fdb5ccb189668d56333f77ba2629f4cd7535f4
 OmniVoice checkpoint and derived weights are licensed CC-BY-NC.
 The Qwen3 transformer is converted independently; CPU speech processing and
 sampling use the separately installed upstream omnivoice package.
+
+VoxCPM2 speech integration:
+Upstream: https://github.com/OpenBMB/VoxCPM
+Source revision: cce58a5b59303c9bd63d12f23afe6a49a4a80c59
+Checkpoint: https://huggingface.co/openbmb/VoxCPM2
+Revision: 32279effe8c19989596f05d353d1447f51d9e915
+Copyright 2026 OpenBMB. Code and weights are Apache-2.0 licensed;
+see LICENSES/VoxCPM-Apache-2.0.txt. The non-streaming AudioVAE V2 codec
+is retained from upstream. MiniCPM transformers are independently converted
+for ANE; task conditioning and sampling follow the pinned upstream contract.

@@ -1646,6 +1646,7 @@ dependencies = [
 [package.optional-dependencies]
 speech = [
     { name = "omnivoice" },
+    { name = "pydantic" },
     { name = "torchaudio" },
 ]
 
@@ -1662,6 +1663,7 @@ requires-dist = [
     { name = "numpy", specifier = "==2.4.6" },
     { name = "omnivoice", marker = "extra == 'speech'", specifier = "==0.2.1" },
     { name = "pillow", specifier = ">=10.0.0" },
+    { name = "pydantic", marker = "extra == 'speech'", specifier = ">=2,<3" },
     { name = "safetensors", specifier = "==0.8.0" },
     { name = "torch", specifier = "==2.9.0" },
     { name = "torchaudio", marker = "extra == 'speech'", specifier = "==2.9.0" },

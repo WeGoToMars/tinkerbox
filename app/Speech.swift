@@ -44,6 +44,9 @@ struct SpeechView: View {
     private var usesReference: Bool {
         activeMode?.reference == "required" || (activeMode?.reference == "optional" && useReference)
     }
+    private var needsTranscript: Bool {
+        activeMode?.referenceTranscript != "none"
+    }
     private var nativeControls: [SpeechParameter] {
         (demo.speechCapabilities?.controls ?? []) + (activeMode?.controls ?? [])
     }
@@ -144,7 +147,7 @@ struct SpeechView: View {
                         }
                             .padding(.vertical, 8)
                     }
-                    if prompt == nil {
+                    if prompt == nil && needsTranscript {
                         Picker("Reference language", selection: $referenceLocale) {
                             Text("System language").tag("")
                             ForEach(referenceLocales, id: \.identifier) { locale in
@@ -186,7 +189,7 @@ struct SpeechView: View {
                         Text(prompt?.lastPathComponent ?? "Reusable voice prompt").foregroundStyle(.secondary)
                         if reference != nil {
                             Button("Save voice…") { Task { await saveVoice() } }
-                                .disabled(demo.loading || demo.compatibilityIssue != nil || demo.current?.kind != .speech || recorder.active || transcriptionStatus != nil || isBlank(transcript))
+                                .disabled(demo.loading || demo.compatibilityIssue != nil || demo.current?.kind != .speech || recorder.active || transcriptionStatus != nil || (needsTranscript && isBlank(transcript)))
                         }
                     }
                 }
@@ -257,7 +260,7 @@ struct SpeechView: View {
             } catch is CancellationError { }
             catch { self.error = error.localizedDescription }
         }
-        .task(id: [String(usesReference), reference?.path ?? "", referenceLocale, String(transcriptionAttempt)]) {
+        .task(id: [String(usesReference), String(needsTranscript), reference?.path ?? "", referenceLocale, String(transcriptionAttempt)]) {
             await transcribeReference()
         }
         .onChange(of: referenceLocale) { transcript = ""; transcriptionCancelled = false }
@@ -334,7 +337,7 @@ struct SpeechView: View {
         transcriptionID = id
         transcriptionStatus = nil
         transcriptionError = nil
-        guard usesReference, let reference, prompt == nil, isBlank(transcript), !transcriptionCancelled else { return }
+        guard usesReference, needsTranscript, let reference, prompt == nil, isBlank(transcript), !transcriptionCancelled else { return }
         transcriptionStatus = "Preparing speech recognition…"
         defer { if transcriptionID == id { transcriptionStatus = nil } }
         do {
@@ -445,10 +448,12 @@ struct SpeechView: View {
         demo.busy = true
         defer { demo.busy = false }
         do {
-            let preprocess = values["preprocess_prompt"] ?? .boolean(true)
+            let preprocess = values["preprocess_prompt"] ?? demo.speechParameters.first {
+                $0.key == "preprocess_prompt"
+            }?.defaultValue ?? .boolean(true)
             let data = try await demo.runtime.createVoice(SpeechVoiceRequest(
                 refAudio: referenceURL.path, refText: isBlank(transcript) ? nil : transcript,
-                preprocessPrompt: preprocess == .boolean(true)))
+                preprocessPrompt: preprocess == .boolean(true), mode: activeMode?.id))
             try data.write(to: url)
             prompt = url
             reference = nil

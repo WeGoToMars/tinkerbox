@@ -285,10 +285,10 @@ func forEachContiguousBlock(_ shape: [Int], _ strides: [Int], _ body: (Int, Int,
         exit(1)
       }
     }
-    if args.count == 3 && args[1] == "--tensor" {
+    if (args.count == 3 || args.count == 4) && args[1] == "--tensor" {
       protectReplies()
       installStaging()
-      await tensorHost(URL(fileURLWithPath: args[2]))
+      await tensorHost(URL(fileURLWithPath: args[2]), output: args.count == 4 ? args[3] : "logits")
       exit(0)
     }
     guard args.count == 2 else {
@@ -378,7 +378,7 @@ func forEachContiguousBlock(_ shape: [Int], _ strides: [Int], _ body: (Int, Int,
 
 // Stateless named-tensor entry points, shared by diffusion and other non-cached tasks.
 // Swift owns each output so the Python bindings cannot retain ANE output buffers.
-func tensorHost(_ asset: URL) async {
+func tensorHost(_ asset: URL, output: String) async {
   let model: AIModel
   do {
     model = try await loadAsset(asset)
@@ -425,8 +425,8 @@ func tensorHost(_ asset: URL) async {
         inputs[key] = array
       }
       var outputs = try await function.run(inputs: inputs)
-      guard let result = outputs.remove("logits")?.ndArray else {
-        throw HostError("missing logits output")
+      guard let result = outputs.remove(output)?.ndArray else {
+        throw HostError("missing \(output) output")
       }
       read4(result) { p, shape, strides in
         var flat = [Float16](repeating: 0, count: shape.reduce(1, *))

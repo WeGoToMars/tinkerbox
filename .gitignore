@@ -8,5 +8,7 @@ dist/
 *.aimodel
 *.aimodelc
 artifacts/
+# Generated validation reports stay local.
+/docs/models/*-validation.json
 src/tinkerbox_ane/**/tinkerbox-ane-host
 src/tinkerbox_ane/.host-*/

@@ -223,6 +223,7 @@ struct SpeechMode: Decodable, Identifiable, Sendable {
     let id: String
     let title: String
     let reference: String?
+    let referenceTranscript: String?
     let language: Bool?
     let instructionTitle: String?
     let instructionHint: String?
@@ -230,6 +231,7 @@ struct SpeechMode: Decodable, Identifiable, Sendable {
     let controls: [SpeechParameter]?
     enum CodingKeys: String, CodingKey {
         case id, title, reference, language, controls
+        case referenceTranscript = "reference_transcript"
         case instructionTitle = "instruction_title", instructionHint = "instruction_hint"
         case instructionRequired = "instruction_required"
     }
@@ -268,8 +270,9 @@ struct SpeechVoiceRequest: Encodable, Sendable {
     let refAudio: String
     var refText: String?
     let preprocessPrompt: Bool
+    var mode: String? = nil
     enum CodingKeys: String, CodingKey {
-        case operation, refAudio = "ref_audio", refText = "ref_text", preprocessPrompt = "preprocess_prompt"
+        case operation, mode, refAudio = "ref_audio", refText = "ref_text", preprocessPrompt = "preprocess_prompt"
     }
 }
 
@@ -500,23 +503,14 @@ actor Runtime {
         guard !request.items.isEmpty, request.items.allSatisfy({ !isBlank($0.text) }) else {
             throw DecisionError.invalid("Enter text to speak.")
         }
-        var request = request
-        for index in request.items.indices {
-            let item = request.items[index]
-            if let path = item.refAudio, item.voiceClonePrompt == nil, isBlank(item.refText ?? "") {
-                request.items[index].refText = try await ReferenceTranscription.transcribe(URL(fileURLWithPath: path))
-            }
-        }
+        // Reference preparation belongs to the backend: some modes need a
+        // transcript while others use only the audio.
         let reply = try await speechReply(request)
         guard reply.audio?.count == request.items.count else { throw DecisionError.invalidReply }
         return reply
     }
 
     func createVoice(_ request: SpeechVoiceRequest) async throws -> Data {
-        var request = request
-        if isBlank(request.refText ?? "") {
-            request.refText = try await ReferenceTranscription.transcribe(URL(fileURLWithPath: request.refAudio))
-        }
         let reply = try await speechReply(request)
         guard let prompt = reply.voicePrompt else { throw DecisionError.invalidReply }
         return prompt

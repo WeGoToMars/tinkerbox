@@ -140,7 +140,7 @@ class _PipeHost:
 class TensorHost(_PipeHost):
     """Stateless named FP16 tensor calls through the shared native host."""
 
-    def __init__(self, asset: Path, timeout: float = 300):
+    def __init__(self, asset: Path, timeout: float = 300, *, output: str = 'logits'):
         asset = Path(asset).resolve()
         if asset.suffix != '.aimodelc':
             raise ValueError('TensorHost requires an AOT asset')
@@ -150,7 +150,7 @@ class TensorHost(_PipeHost):
         clones.mkdir()
         environment = dict(os.environ, COW_CLIENT_DEST=str(clones), COW_ASSET_PREFIX=str(asset))
         try:
-            self._process = subprocess.Popen([str(BINARY), '--tensor', str(asset)],
+            self._process = subprocess.Popen([str(BINARY), '--tensor', str(asset), output],
                                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment)
             ready = json.loads(self._read(self._u32()))
             if not ready.get('ready'):

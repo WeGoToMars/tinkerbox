@@ -69,13 +69,17 @@ def synthesize(model, entry, request):
     """Generate an ordered batch of PCM WAVs for the app/automation protocol."""
     import soundfile as sf
 
+    preprocess_default = next((field['default'] for field in model.capabilities.get('parameters', [])
+                               if field['key'] == 'preprocess_prompt'), True)
+
     if request.get('operation') == 'create_voice':
         if not request.get('ref_audio'):
             raise ValueError('Choose reference audio to save a voice.')
         started = time.perf_counter()
+        preparation = {'mode': request['mode']} if request.get('mode') else {}
         prompt = model.create_voice_clone_prompt(
             ref_audio=request['ref_audio'], ref_text=request.get('ref_text') or None,
-            preprocess_prompt=request.get('preprocess_prompt', True))
+            preprocess_prompt=request.get('preprocess_prompt', preprocess_default), **preparation)
         output = io.BytesIO()
         prompt.save(output)
         return dict(voicePrompt=base64.b64encode(output.getvalue()).decode(),
@@ -114,9 +118,10 @@ def synthesize(model, entry, request):
             if path := item.get('voice_clone_prompt'):
                 arguments['voice_clone_prompt'] = model.load_voice_clone_prompt(path)
             elif path := item.get('ref_audio'):
+                preparation = {'mode': item['mode']} if item.get('mode') else {}
                 arguments['voice_clone_prompt'] = model.create_voice_clone_prompt(
                     ref_audio=path, ref_text=item.get('ref_text') or None,
-                    preprocess_prompt=options.get('preprocess_prompt', True))
+                    preprocess_prompt=options.get('preprocess_prompt', preprocess_default), **preparation)
             clone_seconds += time.perf_counter() - preparing
             audio.extend(model.generate(text=item['text'], seed=seed + index,
                                         **arguments, **options))

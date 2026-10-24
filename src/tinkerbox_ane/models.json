@@ -152,6 +152,28 @@
         "h13s",
         "h13g"
       ]
+    },
+    {
+      "id": "voxcpm2",
+      "name": "VoxCPM2",
+      "publisher": "OpenBMB",
+      "summary": "Multilingual speech synthesis, voice design, reference cloning and audio continuation.",
+      "task": "speech",
+      "base_model": "openbmb/MiniCPM4",
+      "original_model": "openbmb/VoxCPM2",
+      "module": "tinkerbox_ane.voxcpm2",
+      "repo": "wegotomars/VoxCPM2-CoreAI-ANE",
+      "revision": "v2.2.0",
+      "local_only": true,
+      "inputs": [
+        "text",
+        "audio"
+      ],
+      "license": "Apache-2.0",
+      "min_version": "2.2.0",
+      "architectures": [
+        "h17s"
+      ]
     }
   ]
 }

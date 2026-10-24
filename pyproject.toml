@@ -21,7 +21,7 @@ Homepage = "https://github.com/WeGoToMars/tinkerbox"
 Issues = "https://github.com/WeGoToMars/tinkerbox/issues"
 
 [project.optional-dependencies]
-speech = ["omnivoice==0.2.1", "torchaudio==2.9.0"]
+speech = ["omnivoice==0.2.1", "torchaudio==2.9.0", "pydantic>=2,<3"]
 
 [dependency-groups]
 dev = [

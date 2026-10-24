@@ -191,7 +191,9 @@ class Speech:
         from omnivoice import VoiceClonePrompt
         return VoiceClonePrompt.load(path)
 
-    def create_voice_clone_prompt(self, *args, **kwargs):
+    def create_voice_clone_prompt(self, *args, mode=None, **kwargs):
+        if mode not in (None, 'clone', 'design'):
+            raise ValueError('Choose a reference-based OmniVoice mode.')
         with self._lock:
             return self.engine.create_voice_clone_prompt(*args, **kwargs)
 

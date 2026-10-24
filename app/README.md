@@ -59,19 +59,23 @@ Each question is configured as a card. With multiple questions, models supportin
 
 ## Text to Speech
 
-OmniVoice supports automatic voice, voice design, reference-audio cloning and saved
+OmniVoice and VoxCPM2 support automatic voice, voice design, reference-audio cloning and saved
 voice prompts. The Text to Speech page provides generation controls, playback and
 WAV/M4A export, and displays the seed for replay. Voice preparation and speech
 generation times are shown separately. Select a verified local bundle in
 the page toolbar or set `TINKERBOX_ASSET` before launch. Bundles are not distributed
-yet; see [local setup and validation](../docs/models/omnivoice.md).
+yet; see local setup and validation for [OmniVoice](../docs/models/omnivoice.md)
+and [VoxCPM2](../docs/models/voxcpm2.md).
 Saved voices are specific to the selected model.
 Synthesis modes and control fields come from the backend's [speech capabilities](../docs/speech.md).
 The page shows native numeric, categorical, text and optional controls as supported
 by the selected model; switching models clears incompatible values and saved prompts.
 
 Reference audio, including M4A and WAV, is decoded using Apple's AVFoundation codecs.
-Choosing reference audio transcribes it on-device using Apple's SpeechTranscriber.
+Modes that need a reference transcript transcribe it on-device using Apple's
+SpeechTranscriber. VoxCPM2's reference-only clone mode uses the audio directly;
+its continuation modes show the transcript controls. Saved voice preparation
+retains the selected conditioning mode.
 Choose the recording's language and review or edit its transcript before cloning.
 The system downloads speech recognition assets when needed; setup and transcription
 status appear beside the transcript. You can also enter the transcript manually.
