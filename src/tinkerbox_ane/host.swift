@@ -113,7 +113,7 @@ func descriptor(_ value: InferenceValue.Descriptor?, _ name: String) throws -> N
   return nd
 }
 
-func loadAsset(_ url: URL) async throws -> AIModel {
+func loadAsset(_ url: URL, preloadFunctions: Bool = true) async throws -> AIModel {
   // Core AI rejects an asset directory that is itself a symbolic link.
   let canonicalURL = url.resolvingSymlinksInPath()
   var options = SpecializationOptions(preferredComputeUnitKind: .neuralEngine)
@@ -123,7 +123,7 @@ func loadAsset(_ url: URL) async throws -> AIModel {
     do {
       let model = try await AIModel.specialize(
         contentsOf: canonicalURL, options: options, cachePolicy: .persistent)
-      for name in model.functionNames {
+      for name in preloadFunctions ? model.functionNames : [] {
         guard try model.loadFunction(named: name) != nil else {
           throw HostError("missing function \(name)")
         }
@@ -140,6 +140,42 @@ func loadAsset(_ url: URL) async throws -> AIModel {
   }
   fatalError("unreachable")
 }
+// Lazily specialize only the entry points a tensor runner actually uses.
+final class TensorFunctions {
+  let url: URL
+  var model: AIModel?
+  var functions: [String: InferenceFunction] = [:]
+
+  init(url: URL, names: Set<String>? = nil) async throws {
+    self.url = url
+    model = try await loadAsset(url, preloadFunctions: false)
+    if let names, Set(model!.functionNames) != names { throw HostError("tensor functions differ from the manifest") }
+  }
+
+  func get(_ name: String) async throws -> InferenceFunction {
+    if let function = functions[name] { return function }
+    for attempt in 0..<2 {
+      do {
+        if model == nil { model = try await loadAsset(url, preloadFunctions: false) }
+        guard let function = try model!.loadFunction(named: name) else {
+          throw HostError("missing cached tensor function \(name)")
+        }
+        functions[name] = function
+        return function
+      } catch {
+        if attempt == 1 || !String(reflecting: error).contains("nilError") { throw error }
+        functions.removeAll()
+        model = nil
+        var options = SpecializationOptions(preferredComputeUnitKind: .neuralEngine)
+        options.expectFrequentReshapes = false
+        try AIModelCache.default.deleteEntry(for: url.resolvingSymlinksInPath(), options: options)
+      }
+    }
+    fatalError("unreachable")
+  }
+
+}
+
 @_silgen_name("installStaging") func installStaging()
 
 func column(_ array: NDArray, _ column: Int) -> [Float16] {
@@ -291,6 +327,18 @@ func forEachContiguousBlock(_ shape: [Int], _ strides: [Int], _ body: (Int, Int,
       await tensorHost(URL(fileURLWithPath: args[2]), output: args.count == 4 ? args[3] : "logits")
       exit(0)
     }
+    if args.count == 4 && args[1] == "--cached-tensor" {
+      protectReplies()
+      installStaging()
+      await cachedTensorHost(URL(fileURLWithPath: args[2]), configuration: args[3])
+      exit(0)
+    }
+    if args.count == 4 && args[1] == "--bidirectional-tensor" {
+      protectReplies()
+      installStaging()
+      await bidirectionalTensorHost(URL(fileURLWithPath: args[2]), configuration: args[3])
+      exit(0)
+    }
     guard args.count == 2 else {
       FileHandle.standardError.write("usage: tinkerbox-ane-host <bundle>\n".data(using: .utf8)!)
       exit(2)
@@ -378,16 +426,48 @@ func forEachContiguousBlock(_ shape: [Int], _ strides: [Int], _ body: (Int, Int,
 
 // Stateless named-tensor entry points, shared by diffusion and other non-cached tasks.
 // Swift owns each output so the Python bindings cannot retain ANE output buffers.
+func evaluateTensor(_ function: InferenceFunction, values: [String: [Float16]], output: String) async throws -> ([Int], [Float16]) {
+  var inputs: [String: NDArray] = [:]
+  for (key, value) in values {
+    var array = NDArray(descriptor: try descriptor(function.descriptor.inputDescriptor(of: key), key))
+    var matches = false
+    write4(&array) { p, shape, strides in
+      matches = shape.reduce(1, *) == value.count
+      if matches {
+        value.withUnsafeBufferPointer { source in
+          forEachContiguousBlock(shape, strides) { linear, offset, count in
+            p.advanced(by: offset).update(from: source.baseAddress!.advanced(by: linear), count: count)
+          }
+        }
+      }
+    }
+    guard matches else { throw HostError("wrong element count for \(key)") }
+    inputs[key] = array
+  }
+  var outputs = try await function.run(inputs: inputs)
+  guard let result = outputs.remove(output)?.ndArray else {
+    throw HostError("missing \(output) output")
+  }
+  return read4(result) { p, shape, strides in
+    var flat = [Float16](repeating: 0, count: shape.reduce(1, *))
+    flat.withUnsafeMutableBufferPointer { target in
+      forEachContiguousBlock(shape, strides) { linear, offset, count in
+        target.baseAddress!.advanced(by: linear).update(from: p.advanced(by: offset), count: count)
+      }
+    }
+    return (shape, flat)
+  }
+}
+
 func tensorHost(_ asset: URL, output: String) async {
-  let model: AIModel
+  let executable: TensorFunctions
   do {
-    model = try await loadAsset(asset)
+    executable = try await TensorFunctions(url: asset)
     sendJSON(["ready": true])
   } catch {
     sendJSON(["error": "\(error)"])
     return
   }
-  var functions: [String: InferenceFunction] = [:]
   while let op = readExact(1)?.first {
     if op == UInt8(ascii: "Q") { return }
     guard op == UInt8(ascii: "F"), let n = readExact(4),
@@ -400,45 +480,11 @@ func tensorHost(_ asset: URL, output: String) async {
       values[String(decoding: key, as: UTF8.self)] = value
     }
     do {
-      if functions[name] == nil {
-        guard let function = try model.loadFunction(named: name) else {
-          throw HostError("missing function \(name)")
-        }
-        functions[name] = function
-      }
-      let function = functions[name]!
-      var inputs: [String: NDArray] = [:]
-      for (key, value) in values {
-        var array = NDArray(descriptor: try descriptor(function.descriptor.inputDescriptor(of: key), key))
-        var matches = false
-        write4(&array) { p, shape, strides in
-          matches = shape.reduce(1, *) == value.count
-          if matches {
-            value.withUnsafeBufferPointer { source in
-              forEachContiguousBlock(shape, strides) { linear, offset, count in
-                p.advanced(by: offset).update(from: source.baseAddress!.advanced(by: linear), count: count)
-              }
-            }
-          }
-        }
-        guard matches else { throw HostError("wrong element count for \(key)") }
-        inputs[key] = array
-      }
-      var outputs = try await function.run(inputs: inputs)
-      guard let result = outputs.remove(output)?.ndArray else {
-        throw HostError("missing \(output) output")
-      }
-      read4(result) { p, shape, strides in
-        var flat = [Float16](repeating: 0, count: shape.reduce(1, *))
-        flat.withUnsafeMutableBufferPointer { target in
-          forEachContiguousBlock(shape, strides) { linear, offset, count in
-            target.baseAddress!.advanced(by: linear).update(from: p.advanced(by: offset), count: count)
-          }
-        }
-        var reply: [UInt8] = [0] + le32(shape.count) + shape.flatMap(le32)
-        flat.withUnsafeBytes { reply += $0 }
-        writeAll(reply)
-      }
+      let function = try await executable.get(name)
+      let (shape, flat) = try await evaluateTensor(function, values: values, output: output)
+      var reply: [UInt8] = [0] + le32(shape.count) + shape.flatMap(le32)
+      flat.withUnsafeBytes { reply += $0 }
+      writeAll(reply)
     } catch { sendError("\(error)") }
   }
 }

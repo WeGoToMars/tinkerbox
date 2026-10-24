@@ -67,6 +67,14 @@ class Speech:
                     ref_audio = read_audio(ref_audio)
                 return super().create_voice_clone_prompt(ref_audio, ref_text, preprocess_prompt)
 
+            def _prepare_inference_inputs(self, *args, **kwargs):
+                inputs = super()._prepare_inference_inputs(*args, **kwargs)
+                length = inputs['input_ids'].shape[-1]
+                if length > max(capacities):
+                    # Reject before upstream allocates the square batch mask.
+                    raise ValueError(f'speech context needs {length} positions; bundle limit is {max(capacities)}')
+                return inputs
+
             def _preprocess_all(self, **kwargs):
                 text = kwargs['text']
                 kwargs['text'] = (add_punctuation(text) if isinstance(text, str)
@@ -112,16 +120,48 @@ class Speech:
                                  context_positions=max(capacities))
         self._lock = threading.Lock()
         self.ane_seconds = 0.0
-        self.host = TensorHost(asset / self.spec['asset'])
+        bidirectional = None
+        if self.spec.get('attention_width'):
+            bidirectional = dict(hidden=self.spec['hidden'], heads=self.spec['heads'], kvHeads=self.spec['kv_heads'],
+                headDim=self.spec['head_dim'], width=self.spec['attention_width'],
+                logits=self.spec['codebooks']*self.spec['audio_vocab'], projections=self.spec['projections'],
+                finishes=self.spec['finishes'], attention=self.spec['attention'], head=self.spec['head_function'])
+        assets = {stage['role']: stage for stage in self.spec.get('assets', [])}
+        diffusion_asset = assets['diffusion']['asset'] if assets else self.spec['asset']
+        self.host = TensorHost(asset/diffusion_asset, bidirectional=bidirectional)
+        self.short_host = None
+        try:
+            if assets:
+                self.short_host = TensorHost(asset/assets['short']['asset'])
+        except BaseException:
+            self.host.close()
+            raise
 
     @torch.inference_mode()
     def logits(self, embeddings, attention_mask):
         """Evaluate independent conditioned/unconditioned sequences in input order."""
         batch, length, _ = embeddings.shape
         try:
-            capacity = next(n for n in self.spec['capacities'] if n >= length)
+            pool = self.spec['short_capacities'] if length <= max(self.spec.get('short_capacities', [0])) else self.spec['capacities']
+            capacity = next(n for n in pool if n >= length)
         except StopIteration:
             raise ValueError(f'speech context needs {length} positions; bundle limit is {max(self.spec["capacities"])}') from None
+        if self.spec.get('attention_width') and length > max(self.spec.get('short_capacities', [0])):
+            dim = self.spec['head_dim']
+            inverse = self.spec['rope_theta'] ** (-np.arange(0, dim, 2, dtype=np.float32)/dim)
+            angles = np.arange(length, dtype=np.float32)[:, None] * inverse
+            angles = np.concatenate([angles, angles], axis=1).T[None, None]
+            values = dict(cos=np.cos(angles), sin=np.sin(angles))
+            results = []
+            for index in range(batch):
+                visible = int(attention_mask[index, 0, 0].sum()) if attention_mask is not None else length
+                values['hidden'] = embeddings[index].half().T[None, :, None].numpy()
+                started = time.perf_counter()
+                output = self.host.full_attention(values, length, visible)
+                self.ane_seconds += time.perf_counter()-started
+                row = output[0, :, 0].T.copy()
+                results.append(torch.from_numpy(row).float().reshape(length, self.spec['codebooks'], self.spec['audio_vocab']).permute(1, 0, 2))
+            return torch.stack(results)
         dim = self.spec['head_dim']
         inverse = self.spec['rope_theta'] ** (-np.arange(0, dim, 2, dtype=np.float32) / dim)
         angles = np.arange(capacity, dtype=np.float32)[:, None] * inverse
@@ -137,7 +177,8 @@ class Speech:
             allowed = attention_mask[i, 0].numpy() if attention_mask is not None else np.ones((length, length), bool)
             mask[0, 0, :length, :length] = np.where(allowed, 0, -30000)
             started = time.perf_counter()
-            output = self.host.run(f's{capacity}', dict(hidden=hidden, cos=cos, sin=sin, mask=mask))
+            function = f'omnivoice_s{capacity}' if self.spec.get('short_capacities') else f's{capacity}'
+            output = (self.short_host or self.host).run(function, dict(hidden=hidden, cos=cos, sin=sin, mask=mask))
             self.ane_seconds += time.perf_counter() - started
             row = output[0, :, 0, :length].T.copy()
             results.append(torch.from_numpy(row).float().reshape(length, self.spec['codebooks'], self.spec['audio_vocab']).permute(1, 0, 2))
@@ -209,6 +250,8 @@ class Speech:
 
     def close(self):
         self.host.close()
+        if self.short_host is not None:
+            self.short_host.close()
 
     def __enter__(self):
         return self

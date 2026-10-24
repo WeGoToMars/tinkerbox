@@ -78,11 +78,10 @@ import AVFoundation
             _ = try await runtime.speak(SpeechRequest(items: [SpeechItem(text: "Hello.", speed: 0)]))
             preconditionFailure("invalid speed was accepted")
         } catch { }
-        var oversizedParameters = parameters
-        oversizedParameters["audio_chunk_threshold"] = .number(120)
         do {
-            _ = try await runtime.speak(SpeechRequest(items: [SpeechItem(text: "Hello.", duration: 60)],
-                                                      parameters: oversizedParameters, seed: 42))
+            _ = try await runtime.speak(SpeechRequest(items: [SpeechItem(
+                text: String(repeating: "Hello ", count: 50_000), duration: 1)],
+                                                      parameters: parameters, seed: 42))
             preconditionFailure("oversized speech context was accepted")
         } catch {
             precondition(error.localizedDescription.contains("bundle limit"))

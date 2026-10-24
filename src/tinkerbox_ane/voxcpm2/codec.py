@@ -1,7 +1,7 @@
 """CPU AudioVAE V2 from OpenBMB/VoxCPM (Apache-2.0).
 
-Pinned upstream cce58a5b59303c9bd63d12f23afe6a49a4a80c59. The unused streaming
-wrapper is omitted; encoding and complete-waveform decoding are unchanged.
+Pinned upstream cce58a5b59303c9bd63d12f23afe6a49a4a80c59. Encoding, offline
+decoding, and the stateful causal decoder match that source.
 See LICENSES/VoxCPM-Apache-2.0.txt and NOTICE.
 """
 
@@ -479,6 +479,20 @@ class AudioVAE(nn.Module):
                 sr_cond = torch.tensor([self.out_sample_rate], device=z.device, dtype=torch.int32)
         return self.decoder(z, sr_cond)
 
+    def streaming_decode(self):
+        """Return a ``StreamingVAEDecoder`` context manager for stateful
+        chunk-by-chunk decoding.  Each call to ``decode_chunk`` processes only
+        the new latent patch and carries causal-conv state internally, avoiding
+        the redundant overlap decode used previously.
+
+        Usage::
+
+            with vae.streaming_decode() as dec:
+                for patch in patches:
+                    audio_chunk = dec.decode_chunk(patch)
+        """
+        return StreamingVAEDecoder(self)
+
     def encode(self, audio_data: torch.Tensor, sample_rate: int):
         """
         Args:
@@ -536,3 +550,81 @@ def trim_reference(
     new_start = max(0, start - max_silence_samples)
     new_end = min(n, end + max_silence_samples)
     return audio[:, new_start:new_end]
+
+
+class StreamingVAEDecoder:
+    """Stateful streaming wrapper for :class:`AudioVAE`.
+
+    Carries causal-convolution padding buffers between calls so that each
+    ``decode_chunk`` processes only the new latent patch — no overlap needed.
+    """
+
+    def __init__(self, vae: AudioVAE):
+        self._vae = vae
+        self._states: dict = {}
+        self._originals: list = []
+
+    # -- context manager --------------------------------------------------
+    def __enter__(self):
+        self._states.clear()
+        self._install()
+        return self
+
+    def __exit__(self, *exc):
+        self._restore()
+        self._states.clear()
+
+    # -- public API --------------------------------------------------------
+    def decode_chunk(self, z_chunk: torch.Tensor) -> torch.Tensor:
+        """Decode a single latent chunk and return the audio waveform."""
+        return self._vae.decode(z_chunk)
+
+    # -- internals ---------------------------------------------------------
+    def _install(self):
+        for name, mod in self._vae.decoder.named_modules():
+            if isinstance(mod, CausalConv1d):
+                pad = mod._CausalConv1d__padding * 2 - mod._CausalConv1d__output_padding
+                if pad > 0:
+                    self._patch_causal_conv(mod, pad)
+            elif isinstance(mod, CausalTransposeConv1d):
+                trim = mod._CausalTransposeConv1d__padding * 2 - mod._CausalTransposeConv1d__output_padding
+                ctx = (mod.kernel_size[0] - 1) // mod.stride[0]
+                if ctx > 0:
+                    self._patch_transpose_conv(mod, ctx, trim)
+
+    def _patch_causal_conv(self, mod, pad_size):
+        states = self._states
+        key = id(mod)
+        orig = mod.forward
+
+        def fwd(x, _k=key, _p=pad_size, _m=mod):
+            x_pad = torch.cat([states[_k], x], dim=-1) if _k in states else F.pad(x, (_p, 0))
+            if x.shape[-1] >= _p:
+                states[_k] = x[:, :, -_p:].detach()
+            else:
+                prev = states.get(_k, torch.zeros(x.shape[0], x.shape[1], _p, device=x.device, dtype=x.dtype))
+                states[_k] = torch.cat([prev, x], dim=-1)[:, :, -_p:].detach()
+            return nn.Conv1d.forward(_m, x_pad)
+
+        mod.forward = fwd
+        self._originals.append((mod, orig))
+
+    def _patch_transpose_conv(self, mod, ctx, trim):
+        states = self._states
+        key = id(mod)
+        orig = mod.forward
+
+        def fwd(x, _k=key, _c=ctx, _t=trim, _m=mod):
+            x_full = torch.cat([states[_k], x], dim=-1) if _k in states else F.pad(x, (_c, 0))
+            states[_k] = x[:, :, -_c:].detach()
+            out = nn.ConvTranspose1d.forward(_m, x_full)
+            left = _c * _m.stride[0]
+            return out[..., left:-_t] if _t > 0 else out[..., left:]
+
+        mod.forward = fwd
+        self._originals.append((mod, orig))
+
+    def _restore(self):
+        for mod, orig in self._originals:
+            mod.forward = orig
+        self._originals.clear()

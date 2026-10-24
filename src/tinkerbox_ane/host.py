@@ -138,9 +138,9 @@ class _PipeHost:
 
 
 class TensorHost(_PipeHost):
-    """Stateless named FP16 tensor calls through the shared native host."""
+    """Named FP16 calls, optionally with native transformer state."""
 
-    def __init__(self, asset: Path, timeout: float = 300, *, output: str = 'logits'):
+    def __init__(self, asset: Path, timeout: float = 300, *, output: str = 'logits', cached=None, bidirectional=None):
         asset = Path(asset).resolve()
         if asset.suffix != '.aimodelc':
             raise ValueError('TensorHost requires an AOT asset')
@@ -149,8 +149,16 @@ class TensorHost(_PipeHost):
         clones = Path(self._directory.name) / 'clones'
         clones.mkdir()
         environment = dict(os.environ, COW_CLIENT_DEST=str(clones), COW_ASSET_PREFIX=str(asset))
+        self._cached = cached is not None
+        self._bidirectional = bidirectional is not None
+        if self._cached and self._bidirectional:
+            raise ValueError('choose causal caching or bidirectional attention')
+        arguments = ['--tensor', str(asset), output] if cached is None else [
+            '--cached-tensor', str(asset), json.dumps(dict(cached, output=output))]
+        if bidirectional is not None:
+            arguments = ['--bidirectional-tensor', str(asset), json.dumps(bidirectional)]
         try:
-            self._process = subprocess.Popen([str(BINARY), '--tensor', str(asset), output],
+            self._process = subprocess.Popen([str(BINARY), *arguments],
                                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment)
             ready = json.loads(self._read(self._u32()))
             if not ready.get('ready'):
@@ -160,10 +168,29 @@ class TensorHost(_PipeHost):
             raise
 
     def run(self, function: str, inputs: dict):
+        return self._tensor_call(b'F', function, inputs)
+
+    def reset(self):
+        if not self._cached:
+            raise ValueError('reset requires a cached tensor host')
+        self._send(b'R')
+        self._reply()
+
+    def step(self, function: str, inputs: dict, count: int):
+        if not self._cached:
+            raise ValueError('step requires a cached tensor host')
+        return self._tensor_call(b'C' + struct.pack('<I', count), function, inputs)
+
+    def full_attention(self, inputs: dict, count: int, visible: int):
+        if not self._bidirectional:
+            raise ValueError('full_attention requires a bidirectional tensor host')
+        return self._tensor_call(b'B' + struct.pack('<II', count, visible), '', inputs)
+
+    def _tensor_call(self, prefix, function, inputs):
         import numpy as np
 
         encoded = function.encode()
-        payload = [b'F' + struct.pack('<I', len(encoded)) + encoded + struct.pack('<I', len(inputs))]
+        payload = [prefix + struct.pack('<I', len(encoded)) + encoded + struct.pack('<I', len(inputs))]
         for name, value in inputs.items():
             array = np.ascontiguousarray(value, dtype=np.float16)
             key = name.encode()

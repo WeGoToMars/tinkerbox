@@ -97,7 +97,8 @@ def test_installed_speech_runs_without_an_upstream_checkpoint(speech, tmp_path, 
     portable = tmp_path / 'portable'
     portable.mkdir()
     spec = bundle.read_bundle(source, KIND)
-    bundle.clone(source / spec['asset'], portable / spec['asset'])
+    for name in bundle.asset_names(spec):
+        bundle.clone(source / name, portable / name)
     cpu = bundle.write_checkpoint(Path(os.environ['TINKERBOX_OMNIVOICE_CHECKPOINT']), portable,
                                   ['llm.embed_tokens.weight', 'audio_embeddings.weight'])
     spec['checkpoint_hash'] = bundle.checkpoint_digest(cpu)

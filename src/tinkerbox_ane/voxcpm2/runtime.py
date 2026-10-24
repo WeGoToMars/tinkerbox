@@ -72,8 +72,9 @@ class Speech:
             raise ValueError('VoxCPM2 CPU checkpoint identity mismatch; re-export the bundle')
         self.config = json.loads((weights / 'config.json').read_text())
         self.capacities = self.spec['capacities']
-        if (len(self.capacities) != 1 or self.capacities != sorted(set(self.capacities))
-                or any(type(n) is not int or not 4 <= n <= 8192 for n in self.capacities)):
+        self.prefill_width = self.spec.get('prefill_width')
+        if (not self.capacities or self.prefill_width != 128 or self.capacities != sorted(set(self.capacities))
+                or any(type(n) is not int or not self.prefill_width <= n <= 8192 for n in self.capacities)):
             raise ValueError('Invalid VoxCPM2 context capacities')
         self.base_roles = [f'base-{i}' for i in range(self.config['lm_config']['num_hidden_layers'])]
         expected = self.base_roles + ['residual', 'encoder', 'dit']
@@ -106,7 +107,15 @@ class Speech:
         self.hosts = {}
         try:
             for stage in self.spec['assets']:
-                self.hosts[stage['role']] = TensorHost(asset/stage['asset'], output='features')
+                cfg = stage['config']
+                cached = None
+                if stage['cached']:
+                    cached = dict(hidden=cfg['hidden'], channels=2*(stage['end']-stage['start'])*cfg['kv_heads']*cfg['head_dim'],
+                                  functions=stage['cache_functions'])
+                    expected = {(capacity, width) for capacity in self.capacities for width in (self.prefill_width, 1)}
+                    if {(row['capacity'], row['width']) for row in cached['functions']} != expected:
+                        raise ValueError('VoxCPM2 bundle is missing cache tier functions')
+                self.hosts[stage['role']] = TensorHost(asset/stage['asset'], output='features', cached=cached)
         except BaseException:
             self.close()
             raise
@@ -115,45 +124,44 @@ class Speech:
         return F.linear(x, self.cpu[name+'.weight'], self.cpu.get(name+'.bias'))
 
     def _run(self, role, x, *, state=None):
-        stage = self.stages[role]
+        stage, host = self.stages[role], self.hosts[role]
         cfg = stage['config']
-        n = x.shape[1]
         if stage['cached']:
-            capacity = next((c for c in self.capacities if c >= n), None) if state is None else 1
-            if capacity is None:
-                raise ValueError(f'VoxCPM2 context needs {n} positions; bundle limit is {max(self.capacities)}')
-        else:
-            capacity = n
-        values = dict(hidden=x.transpose(1, 2).unsqueeze(2).numpy())
-        if capacity != n:
-            values['hidden'] = np.pad(values['hidden'], ((0, 0), (0, 0), (0, 0), (0, capacity-n)))
-        positions = np.arange(capacity) if state is None else np.array([state['position']])
-        values['cos'] = self.cos[positions].T[None, None] if cfg['rope'] else np.ones((1, 1, cfg['head_dim'], capacity), np.float16)
-        values['sin'] = self.sin[positions].T[None, None] if cfg['rope'] else np.zeros((1, 1, cfg['head_dim'], capacity), np.float16)
-        if state is not None:
-            mask = np.arange(max(self.capacities)+1) < state['position']
-            mask[-1] = True  # current key is appended after the cache capacity
-            values.update(cache=state['cache'], mask=np.where(mask, 0, -np.inf).astype(np.float16)[None, None, None])
-            function = stage['functions'][-1]
-        else:
-            allowed = np.arange(capacity)[None, :] <= np.arange(capacity)[:, None] if stage['cached'] else np.ones((capacity, capacity), bool)
-            values['mask'] = np.where(allowed, 0, -np.inf).astype(np.float16)[None, None]
-            function = stage['functions'][0]
+            if state is None:
+                host.reset()
+                state = dict(position=0)
+            if state['position']+x.shape[1] > max(self.capacities):
+                raise ValueError('VoxCPM2 context exceeds the compiled cache limit')
+            parts = []
+            for offset in range(0, x.shape[1], self.prefill_width):
+                chunk = x[:, offset:offset+self.prefill_width]
+                count = chunk.shape[1]
+                width = 1 if count == 1 else self.prefill_width
+                capacity = next(c for c in self.capacities if c >= state['position']+count)
+                values = dict(hidden=np.pad(chunk.transpose(1, 2).unsqueeze(2).numpy(),
+                    ((0, 0), (0, 0), (0, 0), (0, width-count))))
+                values['cos'] = np.ones((1, 1, cfg['head_dim'], width), np.float16)
+                values['sin'] = np.zeros_like(values['cos'])
+                if cfg['rope']:
+                    positions = slice(state['position'], state['position']+count)
+                    values['cos'][..., :count] = self.cos[positions].T[None, None]
+                    values['sin'][..., :count] = self.sin[positions].T[None, None]
+                function = next(row['name'] for row in stage['cache_functions']
+                                if row['capacity'] == capacity and row['width'] == width)
+                started = time.perf_counter()
+                output = host.step(function, values, count)
+                self.ane_seconds += time.perf_counter()-started
+                parts.append(torch.from_numpy(output[:, :, 0].copy()).transpose(1, 2))
+                state['position'] += count
+            return torch.cat(parts, dim=1), state
+        n = x.shape[1]
+        values = dict(hidden=x.transpose(1, 2).unsqueeze(2).numpy(),
+                      cos=self.cos[:n].T[None, None], sin=self.sin[:n].T[None, None],
+                      mask=np.zeros((1, 1, n, n), np.float16))
         started = time.perf_counter()
-        output = self.hosts[role].run(function, values)
+        output = host.run(stage['functions'][0], values)
         self.ane_seconds += time.perf_counter()-started
-        hidden = torch.from_numpy(output[:, :cfg['hidden'], 0, :n].copy()).transpose(1, 2)
-        if not stage['cached']:
-            return hidden
-        present = output[:, cfg['hidden']:, :, :n]
-        if state is None:
-            cache = np.zeros((*present.shape[:-1], max(self.capacities)), np.float16)
-            cache[..., :n] = present
-            state = dict(position=n, cache=cache)
-        else:
-            state['cache'][..., state['position']:state['position']+1] = present
-            state['position'] += 1
-        return hidden, state
+        return torch.from_numpy(output[:, :, 0].copy()).transpose(1, 2)
 
     def _lm(self, role, x, states=None):
         roles = self.base_roles if role == 'base' else ['residual']
@@ -265,7 +273,11 @@ class Speech:
         if context is not None:
             generated = torch.cat((context, generated), dim=1)
         latent = generated.reshape(1, -1, 64).transpose(1, 2).float()
-        waveform = self.codec.decode(latent)[0, 0]
+        # Bound the VAE's working activations for long clips using upstream's
+        # stateful causal decoder. The API still returns one complete waveform.
+        with self.codec.streaming_decode() as decoder:
+            waveform = torch.cat([decoder.decode_chunk(chunk)[0, 0]
+                                  for chunk in latent.split(64, dim=-1)])
         if context is not None:
             waveform = waveform[context.shape[1]*4*self.codec.decode_chunk_size:]
         if not torch.isfinite(waveform).all():

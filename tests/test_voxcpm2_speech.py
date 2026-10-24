@@ -36,7 +36,7 @@ def test_modes_batch_replay_and_request_limits(speech):
         with pytest.raises(ValueError):
             speech.generate('Hello.', **arguments)
     with pytest.raises(ValueError, match='context|limit'):
-        speech.generate('A long input. '*1000, seed=42)
+        speech.generate('A long input. '*10000, seed=42)
     assert standalone['audio'] == synthesize(speech, {}, dict(items=[request['items'][0]], seed=42))['audio']
 
 

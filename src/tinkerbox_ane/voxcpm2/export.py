@@ -31,7 +31,11 @@ def stage_configs(data):
     return stages
 
 
-def export(out=SOURCE, weights=None, capacities=(1024,), stages=None):
+PREFILL_WIDTH = 128
+CAPACITIES = (512, 1024, 2048, 4096, 8192)
+
+
+def export(out=SOURCE, weights=None, capacities=CAPACITIES, stages=None):
     from coreai_torch import TorchConverter, get_decomp_table, ExternalizeSpec
     from coreai_torch.composite_ops import RMSNormImpl
 
@@ -42,8 +46,9 @@ def export(out=SOURCE, weights=None, capacities=(1024,), stages=None):
     data = json.loads((weights / 'config.json').read_text())
     if data['architecture'] != 'voxcpm2' or data['patch_size'] != 4 or data['feat_dim'] != 64:
         raise ValueError('expected the pinned VoxCPM2 architecture')
-    if len(capacities) != 1 or not 4 <= capacities[0] <= data['max_length']:
-        raise ValueError('VoxCPM2 needs one valid prefill capacity per bundle')
+    if (not capacities or tuple(sorted(set(capacities))) != tuple(capacities)
+            or any(n < PREFILL_WIDTH or n > data['max_length'] for n in capacities)):
+        raise ValueError('VoxCPM2 needs increasing cache capacities within its native context')
     assets = []
     for role, prefix, cfg, start, end, cached in stage_configs(data):
         if stages and role not in stages:
@@ -52,42 +57,35 @@ def export(out=SOURCE, weights=None, capacities=(1024,), stages=None):
         with safe_open(weights / 'model.safetensors', framework='pt') as tensors:
             model.load_hf(tensors, prefix)
         converter = TorchConverter()
-        lengths = capacities if cached else [5 if role == 'encoder' else 11]
-        # Identical entry names on structurally identical stages can reuse a
-        # specialization with incorrect constant bindings. Keep them distinct.
+        # Match D3: stage and capacity identify each specialization, while all
+        # functions use the same Parameter objects and weight resources.
         function_prefix = 'voxcpm2_' + role.replace('-', '_') + '_'
-        functions = []
-        for n in lengths:
-            args = (torch.zeros(1, cfg.hidden, 1, n, dtype=torch.float16),
-                    torch.ones(1, 1, cfg.head_dim, n, dtype=torch.float16),
-                    torch.zeros(1, 1, cfg.head_dim, n, dtype=torch.float16),
-                    torch.zeros(1, 1, n, n, dtype=torch.float16))
-            name = function_prefix + (f'p{n}' if cached else 'main')
+        functions, cache_functions = [], []
+        variants = [(n, width) for n in capacities for width in (PREFILL_WIDTH, 1)] if cached else [(0, 5 if role == 'encoder' else 11)]
+        for capacity, width in variants:
+            args = (torch.zeros(1, cfg.hidden, 1, width, dtype=torch.float16),
+                    torch.ones(1, 1, cfg.head_dim, width, dtype=torch.float16),
+                    torch.zeros(1, 1, cfg.head_dim, width, dtype=torch.float16),
+                    torch.zeros(1, 1, width, capacity+width, dtype=torch.float16))
+            inputs = ['hidden', 'cos', 'sin', 'mask']
+            name = function_prefix + 'main'
+            if cached:
+                args += (torch.zeros(1, 2*(end-start)*cfg.kv_heads*cfg.head_dim, 1, capacity, dtype=torch.float16),)
+                inputs.append('cache')
+                name = function_prefix + f'c{capacity}w{width}'
+                cache_functions.append(dict(name=name, capacity=capacity, width=width))
             converter.add_pytorch_module(
                 model, export_fn=lambda module, args=args: torch.export.export(module, args).run_decompositions(get_decomp_table()),
                 externalize_modules=[ExternalizeSpec(RMSNormImpl, composite_op_name='rms_norm',
                                                      composite_attrs=['eps', 'axes', 'version'])],
-                input_names=['hidden', 'cos', 'sin', 'mask'], output_names=['features'], entrypoint_name=name)
+                input_names=inputs, output_names=['features'], entrypoint_name=name)
             functions.append(name)
             print(f'{role}: staged {name}', flush=True)
-        if cached:
-            n = capacities[-1]
-            args = (torch.zeros(1, cfg.hidden, 1, 1, dtype=torch.float16),
-                    torch.ones(1, 1, cfg.head_dim, 1, dtype=torch.float16),
-                    torch.zeros(1, 1, cfg.head_dim, 1, dtype=torch.float16),
-                    torch.zeros(1, 1, 1, n+1, dtype=torch.float16),
-                    torch.zeros(1, 2*(end-start)*cfg.kv_heads*cfg.head_dim, 1, n, dtype=torch.float16))
-            converter.add_pytorch_module(
-                model, export_fn=lambda module, args=args: torch.export.export(module, args).run_decompositions(get_decomp_table()),
-                externalize_modules=[ExternalizeSpec(RMSNormImpl, composite_op_name='rms_norm',
-                                                     composite_attrs=['eps', 'axes', 'version'])],
-                input_names=['hidden', 'cos', 'sin', 'mask', 'cache'],
-                output_names=['features'], entrypoint_name=function_prefix+f'decode{n}')
-            functions.append(function_prefix+f'decode{n}')
         path = out / f'{role}.aimodel'
         converter.to_coreai().save_asset(path)
         assets.append(dict(role=role, asset=path.name, source_hash=source_hash(path), functions=functions,
-                           config=asdict(cfg), start=start, end=end, cached=cached))
+                           config=asdict(cfg), start=start, end=end, cached=cached,
+                           cache_functions=cache_functions))
         del converter, model
         print(f'{role}: exported', flush=True)
     cpu = write_checkpoint(weights, out, ['base_lm.embed_tokens.weight', 'fsq_layer.',
@@ -96,7 +94,7 @@ def export(out=SOURCE, weights=None, capacities=(1024,), stages=None):
         'feat_decoder.estimator.in_proj.', 'feat_decoder.estimator.cond_proj.',
         'feat_decoder.estimator.out_proj.', 'feat_decoder.estimator.time_mlp.',
         'feat_decoder.estimator.delta_time_mlp.'])
-    spec = dict(kind=KIND, version=2, assets=assets, capacities=list(capacities),
+    spec = dict(kind=KIND, version=2, assets=assets, capacities=list(capacities), prefill_width=PREFILL_WIDTH,
                 checkpoint_hash=checkpoint_digest(cpu),
                 source=dict(repo=REPO, revision=REVISION, code_revision=UPSTREAM_REVISION))
     (out / 'model.json').write_text(json.dumps(spec, indent=2)+'\n')
@@ -107,7 +105,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, default=SOURCE)
     parser.add_argument('--checkpoint', type=Path)
-    parser.add_argument('--capacities', type=int, nargs='+', default=[1024])
+    parser.add_argument('--capacities', type=int, nargs='+', default=list(CAPACITIES))
     parser.add_argument('--stages', nargs='+')
     parser.add_argument('--compile-to', type=Path)
     parser.add_argument('--architecture')

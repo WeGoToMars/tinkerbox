@@ -62,7 +62,7 @@ class Block(nn.Module):
         self.k_norm = CompositeRMSNorm(cfg.head_dim, cfg.eps, axis=2)
         self.mlp = MLP(cfg, splits)
 
-    def forward(self, x, cos, sin, mask):
+    def project(self, x, cos, sin):
         cfg, b, n = self.cfg, x.shape[0], x.shape[-1]
         h = self.input_norm(x)
         q = self.q_norm(self.q(h).reshape(b, cfg.heads, cfg.head_dim, n))
@@ -72,11 +72,18 @@ class Block(nn.Module):
             a, b = t.chunk(2, dim=2)
             return (t * cos + torch.cat((-b, a), dim=2) * sin).transpose(2, 3)
         q, k = rope(q), rope(k)
-        group = cfg.heads // cfg.kv_heads
+        return q, k, v
+
+    def finish(self, x, attended):
+        x = x + self.o(attended / self.value_scale)
+        return x + self.mlp(self.post_norm(x))
+
+    def forward(self, x, cos, sin, mask):
+        q, k, v = self.project(x, cos, sin)
+        group = self.cfg.heads // self.cfg.kv_heads
         h = F.scaled_dot_product_attention(q, k.repeat_interleave(group, dim=1),
                                           v.repeat_interleave(group, dim=1), attn_mask=mask)
-        x = x + self.o(h.transpose(2, 3).reshape(b, cfg.heads * cfg.head_dim, 1, n) / self.value_scale)
-        return x + self.mlp(self.post_norm(x))
+        return self.finish(x, h.transpose(2, 3).reshape(x.shape[0], -1, 1, x.shape[-1]))
 
 
 class Backbone(nn.Module):

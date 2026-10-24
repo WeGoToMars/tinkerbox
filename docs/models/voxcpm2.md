@@ -86,8 +86,12 @@ tokenizer/configuration files, and AudioVAE weights, so installed loading is
 offline. The existing compiler/watchdog retains full ANE-placement verification.
 
 The 28-layer main model uses one asset per layer. The eight-layer residual
-model has its own asset. Both expose prefill and cached decoding; each request
-owns its KV buffers. The local encoder and diffusion transformer reuse the same
+model has its own asset. Both expose 128-position prefill and single-position
+decoding at cache tiers
+512/1024/2048/4096/8192. Swift owns the KV buffers, grows them only when needed,
+and copies valid rows across tiers. Each utterance resets its cache. Hidden
+rows and RoPE inputs cross the Python/native pipe; the complete KV does not.
+The local encoder and diffusion transformer reuse the same
 MiniCPM blocks with bidirectional attention. The residual model omits RoPE as
 specified by the checkpoint. Projection weights retain their original FP16
 range.
@@ -100,13 +104,19 @@ Renaming the affected stage's entry points fixed its direct FP16 comparison.
 This is consistent with a specialization collision. Distinct names fixed the
 complete-model numerical and speech checks as well.
 
-Export currently uses one prefill capacity per bundle. The default is 1024;
-this is an implementation limit, while the upstream runtime is configured for
-8192 positions. Text, reference features, and generated patches share the
-compiled budget. Combined conditioning stores the reference twice, once for
-cloning and once for continuation. Each remaining position permits 160 ms of
-generated audio; a long reference and its transcript reduce that room. No
+The default export supports the upstream runtime's full 8,192-position context.
+Text, reference features, and generated patches share that budget. Combined
+conditioning stores the reference twice, once for cloning and once for
+continuation. Each remaining position permits 160 ms of generated audio. The
+upstream default decode budget remains 4,096 patches (655.36 seconds); callers
+can raise `max_decode_steps` to 8,192, subject to the remaining context. No
 additional duration cap or hidden sentence splitting is applied.
+
+The main and residual KV together use 36 KiB per context position: 18 MiB at
+512 and 288 MiB at 8,192, excluding model/runtime allocations. All functions in
+a stage share its weights. AudioVAE uses upstream's causal streaming decoder
+internally in 64-frame blocks to bound working activations. The API still
+returns one complete waveform after generation finishes.
 
 Only the M5 Pro (`h17s`) bundle is being validated here. Other chips require
 their own compilation and on-device correctness/performance checks; standard
@@ -179,27 +189,52 @@ Build the wheel and app before the worker check. Native transcription checks
 require Apple's English and Chinese speech assets. Validation results and the
 tested bundle identities are recorded separately from these reproduction steps.
 
+## Full-context checks
+
+After preparing the independent upstream environment above, compare cache
+expansion through all tier boundaries and position 8,192:
+
+```sh
+PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.guard artifacts/voxcpm2/cache-run -- \
+  artifacts/voxcpm2/reference-env/bin/python -u scripts/voxcpm2/validate_cache.py \
+  --asset /path/to/verified-bundle
+
+.venv/bin/python -m tinkerbox_ane.guard artifacts/voxcpm2/full-length-run -- \
+  .venv/bin/python -u scripts/voxcpm2/full_length.py --asset /path/to/verified-bundle \
+  --mode clone --paragraphs 4 --max-patches 2048
+```
+
+The cache comparison evaluates one main-model layer against the unchanged
+upstream FP16 layer, including single-position decoding around every capacity
+transition. It complements the six complete-model FP16/content cases; it is
+not a complete 8,192-position full-model or maximum-duration speech benchmark.
+The long-speech gate requires normal stopping, finite audio longer than sixty
+seconds, and at most 20% normalized character error against its input text.
+
 ## Recorded result
 
-The fresh 1,024-position export passed all six practical FP16/content cases on
-Apple M5 Pro, 24 GB, macOS 27.0.1 (`h17s`). All compiled entries passed full ANE
-placement verification. Main-model prefill cosine was at least 0.999994 and
-cached decode cosine at least 0.999986. All six clips had zero normalized
-character error against separately transcribed upstream audio. Five clips had
-the same duration; the greeting was one 160 ms patch shorter.
+The fresh tiered 8,192-position export passed all six practical FP16/content
+cases on Apple M5 Pro, 24 GB, macOS 27.0.1 (`h17s`). All 292 compiled entries
+passed full ANE placement verification. Main-model prefill cosine was at least
+0.999994 and cached decode cosine at least 0.999986. All six clips had zero
+normalized character error against separately transcribed upstream audio.
+Five clips had the same duration; the greeting was one 160 ms patch shorter.
 
-The long-reference reproduction exhausted the old 512-position context after
-7.2 seconds. The 1,024-position bundle completed the 9.92-second passage with
-zero transcription error. The actual Swift worker passed with the larger
-bundle, including replay after unloading and all three saved reference modes.
-The two public API regressions passed on the original validated 512-position
-bundle. OmniVoice's existing bundle also passed its real Swift-worker check
-after the shared API changes. SwiftUI and App Intent metadata builds passed.
+The native growing-cache comparison passed through position 8,192 with cosine
+0.999859 and relative L2 error 0.017408. A neutral four-paragraph passage with a
+3.68-second cloning reference completed as 100.96 seconds of speech, with
+approximately 0.46% normalized character error. Public API, actual Swift worker,
+and SwiftUI/App Intent build results are recorded with the bundle identities in
+local validation reports under `artifacts/voxcpm2/`.
 
-First load can take several minutes to populate persistent ANE specialization
-caches. The six short clips on the 1,024-position bundle generated in roughly
-2–4 seconds each after loading. These measurements use ten diffusion steps.
-No M4 bundle or CUDA reference was tested.
+An intentionally repeated 184-second reference in combined mode did not stop
+before its remaining 4,877-patch context budget. It returned an explicit error,
+not a truncated clip. A separate identical-input comparison at its 3,315-position
+prefix still matched independent FP16 closely (main prefill cosine 0.999985;
+four main decode steps at least 0.999982). These checks do not establish the
+cause of that stopping failure or promise reliable speech for arbitrarily long,
+repetitive references. Short reference recordings remain the practical choice.
 
-The full metrics, source identities, tested bundle hashes, and long-reference
-result are in local validation reports under `artifacts/voxcpm2/`.
+First use can take several minutes to populate persistent ANE specializations.
+Only the changed `h17s` bundle was compiled and tested for this extension; no
+M4 bundle, CUDA reference, or other-device performance was tested.

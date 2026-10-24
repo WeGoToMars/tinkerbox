@@ -53,30 +53,35 @@ PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.omnivoice.export \
 ```
 
 Use fresh output directories. The compiler selects the host architecture and
-verifies full ANE placement under the existing watchdog. Capacities default to
-96/128/256/512/1024 positions; use `--architecture h16g` for standard M4
-cross-compilation. Correctness and performance require execution on the target Mac.
+verifies full ANE placement under the existing watchdog. The default export
+contains two assets: a fused short-input transformer with capacities
+96/128/256/512/1024, and a blockwise transformer with attention tiers
+128/256/512/1024/2048/4096/8192/16384/32768/40960. Use `--architecture h16g`
+for standard M4 cross-compilation. Correctness and performance require execution
+on the target Mac.
 
-The selected release export is `artifacts/omnivoice/export`: centered audio
-projection, attention value scale 16, source hash
-`493992810aa448c799f42f61b90ea00f488ebcbbc73a25ccdff79cda9a36fc0d`.
-Stage all supported architectures without publishing:
+The blockwise path projects all keys and values for a layer before attending
+128-query blocks over the complete visible prefix. Large attention tiers use
+4,096-key blocks merged by their softmax masses. It composes the same Qwen3
+projections, norms and MLP with the full-attention block shared by D3. All
+transformer and audio-head computation stays on ANE. Diffusion steps recompute
+each layer's keys and values; a causal decode cache cannot be reused between
+those steps. Sequences up to 1,024 positions use the fused asset for latency.
+
+The validated full-context source is `artifacts/omnivoice/full-context-v2-export`;
+the deployment bundle is `artifacts/omnivoice/full-context-v2-ane`. Its centered
+audio head and attention value scale 16 are retained. Both assets passed full
+ANE placement on M5 Pro (`h17s`), and only that architecture was compiled for
+this extension. The previously staged five-capacity release across 21 targets
+predates this change and does not establish full-context support on those chips.
+New release staging must use this export and separately validate the targets:
 
 ```sh
-PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.omnivoice.publish --no-upload
+PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.omnivoice.publish \
+  --source artifacts/omnivoice/full-context-v2-export --arch h17s --no-upload
 ```
 
-Release files are staged in `artifacts/huggingface/OmniVoice-CoreAI-ANE`, including
-the model card, notices, licenses and `config.json` architecture index. Metadata
-must already be present there, or supplied with `--metadata`. Publishing uses
-`python -m tinkerbox_ane.omnivoice.publish --upload-only` and creates
-`wegotomars/OmniVoice-CoreAI-ANE@v2.2.0`. The catalog remains `local_only` until
-that release is published; remove that flag when enabling downloads.
-The staged release covers 21 Core AI targets across M1–M6. All five capacities
-pass full ANE placement checks on each target. Only M5 Pro has been checked
-on-device; earlier generations and other variants are cross-compiled. Max/Ultra
-variants and the two M3 Max CPU configurations are listed separately in the
-shared catalog, following the [SoC architecture reference](https://github.com/freedomtan/coreml_to_ane_hwx/blob/main/hwx_dump/README.md#soc-architecture-reference-table).
+The catalog remains local-only until publishing is explicitly requested.
 
 Run public speech regressions with `TINKERBOX_SPEECH_TEST_ASSET` and
 `TINKERBOX_OMNIVOICE_CHECKPOINT` set. Transcription checks use Apple's system
@@ -84,12 +89,45 @@ speech assets. Build the current wheel and
 app, then run `app/test_speech.py` with `TINKERBOX_ASSET` to check the Swift worker.
 Run ANE checks under `python -m tinkerbox_ane.guard`.
 
+## Full-context validation
+
+Capture upstream `omnivoice==0.2.1` CPU FP16 logits independently, then compare
+the ANE output and the 40,960-position attention kernel. The optional speech
+case exercises a complete 28-second request beyond the old 1,024-position cap:
+
+```sh
+.venv/bin/python scripts/omnivoice/reference_logits.py \
+  --checkpoint artifacts/omnivoice/checkpoint
+
+PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.guard artifacts/omnivoice/context-run -- \
+  .venv/bin/python -u scripts/omnivoice/validate_context.py \
+  --asset artifacts/omnivoice/full-context-v2-ane --speech
+```
+
+On Apple M5 Pro, 24 GB, macOS 27.0.1 (`h17s`), independent full-transformer
+comparisons at lengths 96 and 1,100 had cosine at least 0.999986 and relative
+L2 at most 0.005131. The full 40,960-key attention kernel passed both fully
+visible and mostly masked cases with cosine at least 0.999998 and relative L2
+at most 0.001561. The 28-second passage finished with zero normalized
+transcription error in roughly 14 seconds including transcription. These are
+FP16 arithmetic/content checks, not bitwise waveform equivalence or a full
+40,960-position transformer performance benchmark. The watchdog passed.
+Full identities and app checks are in
+local validation reports under `artifacts/omnivoice/`.
+
 ## Limits
 
-The combined context limit is 1024 text, reference and generated-audio positions
-per call. Upstream chunks long-form generation; oversized references or unchunked
-requests return an error. Automatic unreferenced speech gains missing terminal
-punctuation and at least three seconds of generation context at normal speed to
-avoid short-input noise. Explicit durations bypass that minimum; speed scales it.
-Pynini-based number/date normalization is not exposed by the app. Write numbers
-as spoken words when pronunciation needs to be explicit.
+The combined context limit is now the checkpoint's 40,960 text, reference and
+generated-audio positions per diffusion call. Upstream still chunks long-form
+generation above its default thirty-second threshold into roughly fifteen-second
+text chunks. Oversized conditioning is rejected before allocating upstream's
+square batch mask. The upstream scheduler still creates a CPU mask proportional
+to the square of its active batch length, and returned logits also grow with
+context: maximum context is not negligible total RAM or a constant-latency
+operation. Native blockwise attention avoids a full square ANE attention graph.
+
+Automatic unreferenced speech gains missing terminal punctuation and at least
+three seconds of generation context at normal speed to avoid short-input noise.
+Explicit durations bypass that minimum; speed scales it. Pynini-based number/date
+normalization is not exposed. Write numbers as spoken words when pronunciation
+needs to be explicit.
