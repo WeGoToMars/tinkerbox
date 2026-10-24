@@ -11,7 +11,14 @@ Requires macOS 27 on Apple Silicon.
 
 The app bundles a standalone `uv` binary. On first run, it configures an isolated Python 3.12 environment, installs the precompiled `tinkerbox-ane` wheel, and fetches the selected model's weights from Hugging Face. Subsequent launches reuse the cached environment.
 
-The app downloads the bundle matching the host Mac's Core AI architecture (`h16g`/`h16s`/`h16c` for M4/Pro/Max, `h17g`/`h17s`/`h17c`/`h17d` for M5/Pro/Max/Ultra). The Ultra mapping follows compiler research; Core AI detection and inference on an Ultra remain unverified. Setup progress and logs are written to `~/Library/Logs/tinkerbox-ane/demo.log`.
+The app detects the Mac's Core AI architecture directly and supports M1–M6.
+Each model declares its available architectures in the shared catalog. Models
+without a bundle for this Mac explain why and offer a local bundle picker;
+another chip's cached bundle never counts as downloaded. Compatible local
+bundles can be used before an architecture's release is published. The picker
+rejects mismatched bundles before changing the selection. On-device correctness
+and performance are checked on M5 Pro; other targets are cross-compiled.
+Setup progress and logs are written to `~/Library/Logs/tinkerbox-ane/demo.log`.
 
 ## Building from Source
 
@@ -54,9 +61,23 @@ Each question is configured as a card. With multiple questions, models supportin
 
 OmniVoice supports automatic voice, voice design, reference-audio cloning and saved
 voice prompts. The Text to Speech page provides generation controls, playback and
-WAV export, and displays the seed for replay. Select a verified local bundle in
+WAV/M4A export, and displays the seed for replay. Voice preparation and speech
+generation times are shown separately. Select a verified local bundle in
 the page toolbar or set `TINKERBOX_ASSET` before launch. Bundles are not distributed
 yet; see [local setup and validation](../docs/models/omnivoice.md).
+Saved voices are specific to the selected model.
+Synthesis modes and control fields come from the backend's [speech capabilities](../docs/speech.md).
+The page shows native numeric, categorical, text and optional controls as supported
+by the selected model; switching models clears incompatible values and saved prompts.
+
+Reference audio, including M4A and WAV, is decoded using Apple's AVFoundation codecs.
+Choosing reference audio transcribes it on-device using Apple's SpeechTranscriber.
+Choose the recording's language and review or edit its transcript before cloning.
+The system downloads speech recognition assets when needed; setup and transcription
+status appear beside the transcript. You can also enter the transcript manually.
+Click **Arm microphone**, then hold Space to record and release to finish.
+Click again to disarm. Samples show the same waveform player
+as generated speech. Recording stops at 20 seconds or when the app loses focus.
 
 ## Model Management
 

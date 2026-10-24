@@ -168,18 +168,22 @@ struct Reply: Decodable, Sendable {
     let elapsedMs: Double?
     let error: String?
     let speechParameters: [SpeechParameter]?
+    let speechCapabilities: SpeechCapabilities?
     let audio: [SpeechAudio]?
     let aneMs: Double?
+    let cloneMs: Double?
+    let audioMs: Double?
     let voicePrompt: Data?
     let seed: Int64?
 }
 
 enum SpeechValue: Codable, Sendable, Equatable {
-    case number(Double), boolean(Bool)
+    case number(Double), boolean(Bool), text(String)
 
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if let value = try? container.decode(Bool.self) { self = .boolean(value) }
+        else if let value = try? container.decode(String.self) { self = .text(value) }
         else { self = .number(try container.decode(Double.self)) }
     }
 
@@ -188,6 +192,7 @@ enum SpeechValue: Codable, Sendable, Equatable {
         switch self {
         case .number(let value): try container.encode(value)
         case .boolean(let value): try container.encode(value)
+        case .text(let value): try container.encode(value)
         }
     }
 }
@@ -198,9 +203,41 @@ struct SpeechParameter: Decodable, Identifiable, Sendable {
     let type: String
     let min: Double?
     let max: Double?
-    let defaultValue: SpeechValue
+    let defaultValue: SpeechValue?
+    let choices: [SpeechChoice]?
+    let optional: Bool?
+    let help: String?
     var id: String { key }
-    enum CodingKeys: String, CodingKey { case key, title, type, min, max, defaultValue = "default" }
+    enum CodingKeys: String, CodingKey {
+        case key, title, type, min, max, choices, optional, help, defaultValue = "default"
+    }
+}
+
+struct SpeechChoice: Decodable, Identifiable, Sendable {
+    let value: String
+    let title: String
+    var id: String { value }
+}
+
+struct SpeechMode: Decodable, Identifiable, Sendable {
+    let id: String
+    let title: String
+    let reference: String?
+    let language: Bool?
+    let instructionTitle: String?
+    let instructionHint: String?
+    let instructionRequired: Bool?
+    let controls: [SpeechParameter]?
+    enum CodingKeys: String, CodingKey {
+        case id, title, reference, language, controls
+        case instructionTitle = "instruction_title", instructionHint = "instruction_hint"
+        case instructionRequired = "instruction_required"
+    }
+}
+
+struct SpeechCapabilities: Decodable, Sendable {
+    let modes: [SpeechMode]
+    let controls: [SpeechParameter]
 }
 
 struct SpeechItem: Encodable, Sendable {
@@ -212,14 +249,16 @@ struct SpeechItem: Encodable, Sendable {
     var voiceClonePrompt: String?
     var duration: Double?
     var speed: Double?
+    var mode: String?
+    var controls: [String: SpeechValue]?
     enum CodingKeys: String, CodingKey {
-        case text, language, instruct, duration, speed
+        case text, language, instruct, duration, speed, mode, controls
         case refAudio = "ref_audio", refText = "ref_text", voiceClonePrompt = "voice_clone_prompt"
     }
 }
 
 struct SpeechRequest: Encodable, Sendable {
-    let items: [SpeechItem]
+    var items: [SpeechItem]
     var parameters: [String: SpeechValue] = [:]
     var seed: Int64?
 }
@@ -227,7 +266,7 @@ struct SpeechRequest: Encodable, Sendable {
 struct SpeechVoiceRequest: Encodable, Sendable {
     let operation = "create_voice"
     let refAudio: String
-    let refText: String?
+    var refText: String?
     let preprocessPrompt: Bool
     enum CodingKeys: String, CodingKey {
         case operation, refAudio = "ref_audio", refText = "ref_text", preprocessPrompt = "preprocess_prompt"
@@ -353,6 +392,11 @@ actor Runtime {
     // One model is loaded at a time; a request for another one replaces it.
     private func prepare(model: String) async throws -> Reply {
         if let readyReply, readyReply.modelId == model, process?.isRunning == true, replies != nil { return readyReply }
+        if let selected = Catalog.bundled.first(where: { $0.id == model }),
+           let issue = Catalog.availabilityIssue(for: selected, asset:
+                ProcessInfo.processInfo.environment["TINKERBOX_ASSET"].map { URL(fileURLWithPath: $0) }) {
+            throw DecisionError.invalid(issue)
+        }
         readyReply = nil
         await MainActor.run {
             state.model = model
@@ -456,12 +500,23 @@ actor Runtime {
         guard !request.items.isEmpty, request.items.allSatisfy({ !isBlank($0.text) }) else {
             throw DecisionError.invalid("Enter text to speak.")
         }
+        var request = request
+        for index in request.items.indices {
+            let item = request.items[index]
+            if let path = item.refAudio, item.voiceClonePrompt == nil, isBlank(item.refText ?? "") {
+                request.items[index].refText = try await ReferenceTranscription.transcribe(URL(fileURLWithPath: path))
+            }
+        }
         let reply = try await speechReply(request)
         guard reply.audio?.count == request.items.count else { throw DecisionError.invalidReply }
         return reply
     }
 
     func createVoice(_ request: SpeechVoiceRequest) async throws -> Data {
+        var request = request
+        if isBlank(request.refText ?? "") {
+            request.refText = try await ReferenceTranscription.transcribe(URL(fileURLWithPath: request.refAudio))
+        }
         let reply = try await speechReply(request)
         guard let prompt = reply.voicePrompt else { throw DecisionError.invalidReply }
         return prompt

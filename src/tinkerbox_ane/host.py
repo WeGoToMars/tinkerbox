@@ -13,52 +13,35 @@ from pathlib import Path
 BINARY = Path(__file__).with_name("tinkerbox-ane-host")
 
 
-SUPPORTED_ARCHITECTURES: dict[str, str] = {
-    "h18g": "Apple M6",
-    "h17d": "Apple M5 Ultra",
-    "h17c": "Apple M5 Max",
-    "h17s": "Apple M5 Pro",
-    "h17g": "Apple M5",
-    "h16c": "Apple M4 Max",
-    "h16s": "Apple M4 Pro",
-    "h16g": "Apple M4",
-}
+def native_command(*arguments, timeout=300):
+    """Run a native host command and read its framed JSON reply."""
+    result = subprocess.run([str(BINARY), *arguments], stdin=subprocess.DEVNULL,
+                            capture_output=True, timeout=timeout)
+    if len(result.stdout) < 4:
+        raise RuntimeError(result.stderr.decode(errors='replace').strip() or 'Native audio command failed.')
+    size = struct.unpack('<I', result.stdout[:4])[0]
+    reply = json.loads(result.stdout[4:4 + size])
+    if result.returncode or 'error' in reply:
+        raise RuntimeError(reply.get('error', 'Native audio command failed.'))
+    return reply
 
-UNSUPPORTED_ARCHITECTURES: dict[str, str] = {
-    "h15s": "Apple M3 Pro / Max",
-    "h15g": "Apple M3",
-    "h15m": "Apple M3",
-    "h14s": "Apple M2 Pro / Max",
-    "h14g": "Apple M2",
-    "h13s": "Apple M1 Pro / Max",
-    "h13g": "Apple M1",
-}
+
+SUPPORTED_ARCHITECTURES: dict[str, str] = json.loads(
+    Path(__file__).with_name("models.json").read_text()
+)["architectures"]
 
 
 def chip_name(architecture: str) -> str:
-    """Return a human-readable chip name for an Apple Silicon architecture code."""
-    if architecture in SUPPORTED_ARCHITECTURES:
-        return SUPPORTED_ARCHITECTURES[architecture]
-    if architecture in UNSUPPORTED_ARCHITECTURES:
-        return UNSUPPORTED_ARCHITECTURES[architecture]
-    return f"Apple Silicon ({architecture})"
+    """Return the compiler's chip label for an Apple Silicon architecture code."""
+    return SUPPORTED_ARCHITECTURES.get(architecture, f"Apple Silicon ({architecture})")
 
 
 def validate_architecture(architecture: str) -> None:
-    """Validate that the given architecture is supported by tinkerbox-ane."""
-    if architecture in UNSUPPORTED_ARCHITECTURES:
-        chip = UNSUPPORTED_ARCHITECTURES[architecture]
-        supported = ", ".join(SUPPORTED_ARCHITECTURES.values())
-        raise RuntimeError(
-            f"{chip} ({architecture}) is not supported. tinkerbox-ane requires "
-            f"Apple Silicon M4 or newer due to Neural Engine hardware and offline compiler constraints "
-            f"(supported: {supported})."
-        )
+    """Validate that the architecture is recognized; bundle availability is per model."""
     if architecture not in SUPPORTED_ARCHITECTURES:
-        supported = ", ".join(f"{name} [{code}]" for code, name in SUPPORTED_ARCHITECTURES.items())
         raise RuntimeError(
-            f"Architecture '{architecture}' is not supported. tinkerbox-ane requires "
-            f"Apple Silicon M4 or newer (supported: {supported})."
+            f"This Mac's Neural Engine architecture ({architecture}) is not supported by this version "
+            "of tinkerbox-ane. Update tinkerbox-ane to use this Mac."
         )
 
 
@@ -207,11 +190,8 @@ class Host(_PipeHost):
         if spec.get("architecture") and spec["architecture"] != current:
             target_chip = chip_name(spec["architecture"])
             current_chip = chip_name(current)
-            hint = ""
-            if current in UNSUPPORTED_ARCHITECTURES:
-                hint = f" Note that {current_chip} ({current}) is not supported by tinkerbox-ane (requires M4 or newer)."
             raise ValueError(
-                f"Bundle targets {target_chip} ({spec['architecture']}), but this Mac is {current_chip} ({current}).{hint}"
+                f"Bundle targets {target_chip} ({spec['architecture']}), but this Mac is {current_chip} ({current}). Choose a bundle compiled for this Mac."
             )
         # Stage on the asset volume: APFS clones must stay on the same filesystem.
         self._directory = tempfile.TemporaryDirectory(prefix=".host-", dir=asset.parent)

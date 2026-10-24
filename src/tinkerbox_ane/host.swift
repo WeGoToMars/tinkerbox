@@ -262,6 +262,29 @@ func forEachContiguousBlock(_ shape: [Int], _ strides: [Int], _ body: (Int, Int,
       print(AIModel.deviceArchitectureName)
       exit(0)
     }
+    if args.count == 4 && args[1] == "--convert-audio" {
+      protectReplies()
+      do {
+        try convertAudio(URL(fileURLWithPath: args[2]), to: URL(fileURLWithPath: args[3]))
+        sendJSON(["ready": true])
+        exit(0)
+      } catch {
+        sendJSON(["error": error.localizedDescription])
+        exit(1)
+      }
+    }
+    if (args.count == 3 || args.count == 4) && args[1] == "--transcribe" {
+      protectReplies()
+      do {
+        let locale = args.count == 4 ? Locale(identifier: args[3]) : Locale.current
+        let text = try await ReferenceTranscription.transcribe(URL(fileURLWithPath: args[2]), locale: locale)
+        sendJSON(["text": text])
+        exit(0)
+      } catch {
+        sendJSON(["error": error.localizedDescription])
+        exit(1)
+      }
+    }
     if args.count == 3 && args[1] == "--tensor" {
       protectReplies()
       installStaging()

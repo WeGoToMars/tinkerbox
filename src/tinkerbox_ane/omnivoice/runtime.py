@@ -13,14 +13,16 @@ from torch import nn
 from safetensors import safe_open
 
 from tinkerbox_ane.bundle import bundled_checkpoint, read_bundle
+from tinkerbox_ane.audio import read_audio
 from tinkerbox_ane.host import TensorHost, device_architecture
+from tinkerbox_ane.transcription import transcribe
 from . import KIND, REVISION
 
 _GENERATION_LOCK = threading.Lock()  # torch's CPU RNG is shared across model instances.
 
 
 class Speech:
-    def __init__(self, asset, weights=None, asr_model_name=None):
+    def __init__(self, asset, weights=None):
         from omnivoice import OmniVoice, OmniVoiceConfig
         from omnivoice.models.omnivoice import OmniVoiceModelOutput
         from omnivoice.utils.duration import RuleDurationEstimator
@@ -60,6 +62,11 @@ class Speech:
                 return self.embed_tokens
 
         class ANEOmniVoice(OmniVoice):
+            def create_voice_clone_prompt(self, ref_audio, ref_text=None, preprocess_prompt=True):
+                if isinstance(ref_audio, (str, Path)):
+                    ref_audio = read_audio(ref_audio)
+                return super().create_voice_clone_prompt(ref_audio, ref_text, preprocess_prompt)
+
             def _preprocess_all(self, **kwargs):
                 text = kwargs['text']
                 kwargs['text'] = (add_punctuation(text) if isinstance(text, str)
@@ -93,10 +100,16 @@ class Speech:
         self.engine.feature_extractor = AutoFeatureExtractor.from_pretrained(codec)
         self.engine.sampling_rate = self.engine.feature_extractor.sampling_rate
         self.engine.duration_estimator = RuleDurationEstimator()
-        if asr_model_name:
-            self.engine._asr_model_name = asr_model_name
-        self.engine._asr_device = 'cpu'
+        # Supply the upstream pipeline's ASR contract with native transcription.
+        # Keeping it installed also prevents upstream's lazy Whisper download.
+        def native_asr(audio):
+            source = audio if isinstance(audio, str) else (audio['array'], audio['sampling_rate'])
+            return {'text': transcribe(source)}
+        self.engine._asr_pipe = native_asr
         self.sampling_rate = self.engine.sampling_rate
+        from .parameters import CAPABILITIES, PARAMETERS
+        self.capabilities = dict(CAPABILITIES, parameters=PARAMETERS, sampling_rate=self.sampling_rate,
+                                 context_positions=max(capacities))
         self._lock = threading.Lock()
         self.ane_seconds = 0.0
         self.host = TensorHost(asset / self.spec['asset'])
@@ -130,7 +143,37 @@ class Speech:
             results.append(torch.from_numpy(row).float().reshape(length, self.spec['codebooks'], self.spec['audio_vocab']).permute(1, 0, 2))
         return torch.stack(results)
 
-    def generate(self, text, *, seed=None, **kwargs):
+    def generate(self, text, *, seed=None, mode=None, controls=None, **kwargs):
+        from tinkerbox_ane.speech import speech_controls
+
+        size = len(text) if isinstance(text, list) else 1
+        def batch(value, name):
+            if isinstance(value, list):
+                if len(value) != size:
+                    raise ValueError(f'{name} must have one value per text')
+                return value
+            return [value] * size
+        modes, fields = batch(mode, 'mode'), batch(controls, 'controls')
+        instructions = batch(kwargs.get('instruct'), 'instruct')
+        voices = batch(kwargs.get('voice_clone_prompt'), 'voice_clone_prompt')
+        references = batch(kwargs.get('ref_audio'), 'ref_audio')
+        native = []
+        for i in range(size):
+            if fields[i] is not None and not isinstance(fields[i], dict):
+                raise ValueError('Speech controls must be an object.')
+            supplied = dict(fields[i] or {})
+            for key in ('duration', 'speed'):
+                if key in kwargs:
+                    value = batch(kwargs[key], key)[i]
+                    if value is not None:
+                        if key in supplied:
+                            raise ValueError(f'Provide {key} once, either directly or in controls.')
+                        supplied[key] = value
+            _, values = speech_controls(self.capabilities, modes[i], instructions[i], supplied,
+                                         voices[i] is not None or references[i] is not None)
+            native.append(values)
+        for key in ('duration', 'speed'):
+            kwargs[key] = [values.get(key) for values in native]
         # A request's random sampling must not advance another caller's RNG state.
         with _GENERATION_LOCK, self._lock, torch.random.fork_rng(devices=[]) if seed is not None else nullcontext():
             if seed is not None:
@@ -158,13 +201,9 @@ class Speech:
     def supported_language_names(self):
         return self.engine.supported_language_names()
 
-    def load_asr_model(self, model_name=None):
+    def transcribe(self, audio, *, locale=None):
         with self._lock:
-            self.engine.load_asr_model(model_name=model_name, device='cpu')
-
-    def transcribe(self, audio):
-        with self._lock:
-            return self.engine.transcribe(audio)
+            return transcribe(audio, locale=locale)
 
     def close(self):
         self.host.close()

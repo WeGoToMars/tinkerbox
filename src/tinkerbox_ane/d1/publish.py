@@ -10,9 +10,9 @@ from pathlib import Path
 from tinkerbox_ane import publish
 from tinkerbox_ane.d1 import ARTIFACT_REPO, ARTIFACT_REVISION, KIND, REPO, REVISION, SOURCE
 from tinkerbox_ane.d1.compile import compile_model
-from tinkerbox_ane.host import SUPPORTED_ARCHITECTURES
+from tinkerbox_ane.models import entry
 
-DEFAULT_ARCHITECTURES = tuple(SUPPORTED_ARCHITECTURES)
+DEFAULT_ARCHITECTURES = tuple(entry('d1-3b')['architectures'])
 DEFAULT_STAGING = Path("artifacts/huggingface/d1-3B-CoreAI-ANE")
 
 

@@ -14,25 +14,23 @@ PARAMETERS = [
     dict(key='audio_chunk_threshold', title='Long-form threshold seconds', type='float', default=30.0, min=0.1, max=120),
     dict(key='pad_duration', title='Silence padding seconds', type='float', default=0.1, min=0, max=5),
     dict(key='fade_duration', title='Fade seconds', type='float', default=0.1, min=0, max=5),
-    dict(key='normalize_text', title='Normalize numbers and dates', type='bool', default=False),
 ]
+
+CAPABILITIES = dict(
+    instruction_mode='design',
+    modes=[dict(id='auto', title='Automatic voice'),
+           dict(id='design', title='Voice design', instruction_title='Voice description',
+                instruction_required=True, reference='optional',
+                instruction_hint='female, low pitch, british accent'),
+           dict(id='clone', title='Voice clone', reference='required')],
+    controls=[dict(key='duration', title='Target duration (seconds)', type='float',
+                   default=None, optional=True, min=0.01,
+                   help='Conditions the generated audio length; overrides the speed estimate.'),
+              dict(key='speed', title='Speaking speed factor', type='float', default=1.0, min=0.01,
+                   help='Native duration estimate: above 1 is faster; below 1 is slower.')])
 
 
 def validate(parameters):
     """Reject misspellings and invalid arithmetic before expensive model work."""
-    import math
-
-    definitions = {p['key']: p for p in PARAMETERS}
-    for key, value in parameters.items():
-        if key not in definitions:
-            raise ValueError(f'unknown speech generation parameter: {key}')
-        definition = definitions[key]
-        if definition['type'] == 'bool':
-            if not isinstance(value, bool):
-                raise ValueError(f'{key} must be a boolean')
-        elif (isinstance(value, bool) or not isinstance(value, (int, float))
-              or not math.isfinite(value)
-              or (definition['type'] == 'int' and not isinstance(value, int))
-              or value < definition['min']):
-            raise ValueError(f'invalid {key}: {value}')
-    return dict(parameters)
+    from tinkerbox_ane.speech import validate_fields
+    return validate_fields(PARAMETERS, parameters)

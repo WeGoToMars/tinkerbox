@@ -10,7 +10,6 @@ from tinkerbox_ane import publish
 from tinkerbox_ane.bundle import read_bundle
 from tinkerbox_ane.d3 import KIND, VARIANTS
 from tinkerbox_ane.d3.compile import compile_model
-from tinkerbox_ane.host import SUPPORTED_ARCHITECTURES
 from tinkerbox_ane.models import entry
 
 
@@ -22,7 +21,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="Release directory (defaults to artifacts/huggingface/<artifact repo name>)")
     parser.add_argument("--repo", default=None, help="Artifact repository (defaults to the catalog's)")
     parser.add_argument("--tag", default=None, help="New release tag to create (defaults to the catalog revision)")
-    parser.add_argument("--arch", nargs="+", default=list(SUPPORTED_ARCHITECTURES))
+    parser.add_argument("--arch", nargs="+")
     parser.add_argument("--force", action="store_true", help="Recompile existing bundles")
     parser.add_argument("--allow-unsupported", action="store_true")
     parser.add_argument("--metadata", type=Path, default=None,
@@ -33,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--continue-on-error", action="store_true")
     args = parser.parse_args(argv)
     item = entry(args.model)
+    args.arch = args.arch or item['architectures']
     repo, tag = args.repo or item["repo"], args.tag or item["revision"]
     staging = args.staging or Path("artifacts/huggingface") / repo.split("/")[-1]
     upstream, revision, _ = VARIANTS[args.model]

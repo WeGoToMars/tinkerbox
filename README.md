@@ -10,7 +10,12 @@ Run models on Apple's Neural Engine through Core AI. Critical inference always r
 | [vllm-sr/d3-nano](https://huggingface.co/vllm-sr/d3-nano) (`d3-nano`), [vllm-sr/d3-mini](https://huggingface.co/vllm-sr/d3-mini) (`d3-mini`) | Decisions over text and images, one question per pass | [docs/models/d3.md](docs/models/d3.md) |
 | [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) (`omnivoice`) | Speech synthesis, voice cloning and voice design | [Local bundle setup](docs/models/omnivoice.md) |
 
-Requires Apple Silicon (M4 or newer), macOS 27, and Python 3.12 or 3.13. Earlier generations (M1–M3) are not supported due to Neural Engine hardware and offline compiler constraints.
+Requires Apple Silicon (M1–M6), macOS 27, and Python 3.12 or 3.13. Bundle availability
+varies by model and chip. OmniVoice has fully ANE-compiled bundles across M1–M6;
+the published decision-model releases currently cover M4, M4 Pro, M5, M5 Pro and
+M6. Older-chip OmniVoice bundles are cross-compiled; on-device correctness and
+performance have been checked on M5 Pro. The app shows unavailable models before
+downloading and accepts compatible local bundles.
 
 ## Quickstart
 
@@ -37,7 +42,11 @@ with tinkerbox_ane.load("d1-3b") as model:
 
 Decision models expose the System One API: `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries, plus `count_tokens`. Models with parallel decisions (`question_trees` in the catalog, such as d1-3B) answer several questions about one input in a shared pass; the others answer them one after another and warn when a call asks more than one. Inputs, limits, and execution details are in each model's notes.
 
-OmniVoice exposes `generate`, reusable voice prompts, and CPU transcription. It currently requires a locally compiled bundle and the `speech` dependency extra; the app includes a Text to Speech page with playback and WAV export.
+OmniVoice exposes `generate`, reusable voice prompts, and on-device transcription. It currently requires a locally compiled bundle and the `speech` dependency extra; the app includes a Text to Speech page with playback and WAV/M4A export. Saved voices belong to the model that created them.
+
+The [speech API](docs/speech.md) advertises each model's native modes and controls.
+The UI uses those capabilities to display supported controls. OmniVoice supplies
+native numeric duration and speed controls.
 
 ## Tinkerbox app
 

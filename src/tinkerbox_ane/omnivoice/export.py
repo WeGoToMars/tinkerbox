@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import tempfile
 import time
 
 import torch
@@ -13,7 +14,7 @@ from tinkerbox_ane.blocks import conv1x1
 from tinkerbox_ane.architectures.qwen3 import Backbone, Config
 from tinkerbox_ane.coreai import compile_asset, source_hash
 from tinkerbox_ane.bundle import (CHECKPOINT, bundled_checkpoint, checkpoint_digest, clone,
-                                  read_bundle, write_checkpoint)
+                                  read_bundle, replace_directory, write_checkpoint)
 from . import KIND, REPO, REVISION, SOURCE, checkpoint
 
 
@@ -75,7 +76,7 @@ def export(out=SOURCE, weights=None, capacities=(96, 128, 256, 512, 1024), split
     return out
 
 
-def compile(source, out, architecture=None):
+def compile(source, out, architecture=None, *, force=False):
     from tinkerbox_ane.host import device_architecture, validate_architecture
 
     architecture = architecture or device_architecture()
@@ -89,9 +90,12 @@ def compile(source, out, architecture=None):
     target = out / f'diffusion.{architecture}.aimodelc'
     compile_asset(Path(source) / spec['asset'], target, architecture=architecture,
                   min_deployment_version='27.0', expected_functions=[f's{n}' for n in spec['capacities']],
-                  timeout=1500)
+                  timeout=1500, force=force)
     spec.update(asset=target.name, architecture=architecture, min_os='27.0')
-    clone(cpu, out / CHECKPOINT)
+    with tempfile.TemporaryDirectory(prefix='.checkpoint-', dir=out) as temporary:
+        staged = Path(temporary) / CHECKPOINT
+        clone(cpu, staged)
+        replace_directory(staged, out / CHECKPOINT)
     (out / 'model.json').write_text(json.dumps(spec, indent=2) + '\n')
     return out
 

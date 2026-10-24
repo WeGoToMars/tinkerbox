@@ -24,7 +24,7 @@ def checkpoint():
     return Path(snapshot_download(REPO, revision=REVISION))
 
 
-def load(asset=None, *, asr_model_name=None):
+def load(asset=None):
     from .runtime import Speech
     from tinkerbox_ane.models import download
-    return Speech(download(MODEL) if asset is None else Path(asset), asr_model_name=asr_model_name)
+    return Speech(download(MODEL) if asset is None else Path(asset))

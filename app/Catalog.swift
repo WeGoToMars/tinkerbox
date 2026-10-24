@@ -1,4 +1,5 @@
 import Foundation
+import CoreAI
 
 // What a model does. Each task has its own page in the app and its own selected model.
 enum ModelTask: String, CaseIterable, Sendable {
@@ -43,10 +44,12 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     let repo: String
     let revision: String
     let inputs: [String]?
+    let nonVerbalTags: [String]?
     let context: Int?
     let downloadBytes: Int64?
     let license: String?
     let localOnly: Bool?
+    let architectures: [String]?
     let minVersion: String
 
     var kind: ModelTask? { ModelTask(rawValue: task) }
@@ -61,13 +64,61 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     // Matches tinkerbox_ane.bundle.CACHE: <model>/<revision>/macos27/<architecture>/model.json.
     nonisolated static let cacheURL = FileManager.default.homeDirectoryForCurrentUser
         .appending(path: "Library/Caches/tinkerbox-ane/models")
+    nonisolated static let deviceArchitecture = AIModel.deviceArchitectureName
+    nonisolated private static let bundledData = Bundle.main.url(forResource: "models", withExtension: "json")
+        .flatMap { try? Data(contentsOf: $0) }
+    nonisolated static let architectures: [String: String] = {
+        guard let data = bundledData,
+              let catalog = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return catalog["architectures"] as? [String: String] ?? [:]
+    }()
 
     // The bundled catalog lists exactly the models this app's Python package can run.
     nonisolated static let bundled: [CatalogModel] = {
-        guard let url = Bundle.main.url(forResource: "models", withExtension: "json"),
-              let data = try? Data(contentsOf: url) else { return [] }
+        guard let data = bundledData else { return [] }
         return (try? decode(data)) ?? []
     }()
+
+    nonisolated static func bundleIssue(at url: URL, architecture: String = deviceArchitecture) -> String? {
+        guard let data = try? Data(contentsOf: url.appending(path: "model.json")),
+              let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              manifest["version"] as? Int == 2,
+              let target = manifest["architecture"] as? String else {
+            return "Choose a compiled bundle directory containing model.json."
+        }
+        guard target == architecture else {
+            return "This bundle targets \(architectures[target] ?? target). Choose a bundle compiled for this Mac."
+        }
+        return nil
+    }
+
+    nonisolated static func cachedBundle(for model: CatalogModel, architecture: String = deviceArchitecture) -> URL {
+        cacheURL.appending(path: model.id).appending(path: model.revision)
+            .appending(path: "macos27").appending(path: architecture)
+    }
+
+    nonisolated static func localBundle(for model: CatalogModel, architecture: String = deviceArchitecture) -> URL? {
+        let candidate = UserDefaults.standard.string(forKey: "asset.\(model.id)").map { URL(fileURLWithPath: $0) }
+            ?? cachedBundle(for: model, architecture: architecture)
+        return bundleIssue(at: candidate, architecture: architecture) == nil ? candidate : nil
+    }
+
+    nonisolated static func availabilityIssue(for model: CatalogModel, asset: URL? = nil,
+                                             architecture: String = deviceArchitecture) -> String? {
+        guard architectures[architecture] != nil else {
+            return "This Mac's Neural Engine is not supported by this version of Tinkerbox. Update Tinkerbox to use this Mac."
+        }
+        if let asset { return bundleIssue(at: asset, architecture: architecture) }
+        if let selected = UserDefaults.standard.string(forKey: "asset.\(model.id)") {
+            return bundleIssue(at: URL(fileURLWithPath: selected), architecture: architecture)
+        }
+        if localBundle(for: model, architecture: architecture) != nil { return nil }
+        if let supported = model.architectures, !supported.contains(architecture) {
+            return "No \(model.name) bundle is available for this Mac. Choose another model or a matching local bundle."
+        }
+        if model.localOnly == true { return "Choose a local \(model.name) bundle to use this model." }
+        return nil
+    }
 
     var models = Catalog.bundled
     var isRemote = false
@@ -117,17 +168,8 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     }
 
     func scanDownloads() {
-        let files = FileManager.default
         // Only the catalog's revision counts; an older one would be downloaded again on load.
-        downloaded = Set(models.filter { model in
-            if let local = UserDefaults.standard.string(forKey: "asset.\(model.id)"),
-               files.fileExists(atPath: URL(fileURLWithPath: local).appending(path: "model.json").path) {
-                return true
-            }
-            let folder = Self.cacheURL.appending(path: model.id).appending(path: model.revision).appending(path: "macos27")
-            let bundles = (try? files.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
-            return bundles.contains { files.fileExists(atPath: $0.appending(path: "model.json").path) }
-        }.map(\.id))
+        downloaded = Set(models.filter { Self.localBundle(for: $0) != nil }.map(\.id))
     }
 }
 

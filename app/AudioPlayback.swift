@@ -1,8 +1,39 @@
 import SwiftUI
 import AVFoundation
 
+struct AudioWaveform: View {
+    let peaks: [Float]
+    var progress: Double?
+
+    var body: some View {
+        Canvas { context, size in
+            let maximum = max(0.01, peaks.max() ?? 0)
+            let count = min(peaks.count, max(1, Int(size.width / 3)))
+            for index in 0..<count {
+                let start = index * peaks.count / count
+                let end = (index + 1) * peaks.count / count
+                let peak = (peaks[start..<end].max() ?? 0) / maximum
+                let x = (Double(index) + 0.5) * size.width / Double(count)
+                let height = max(2, Double(peak) * (size.height - 12))
+                let bar = CGRect(x: x - 1, y: (size.height - height) / 2, width: 2, height: height)
+                context.fill(Path(roundedRect: bar, cornerRadius: 1),
+                             with: .color(progress == nil || x <= size.width * (progress ?? 0)
+                                          ? .accentColor : .secondary.opacity(0.45)))
+            }
+            if let progress {
+                let x = min(size.width - 1, max(1, size.width * progress))
+                context.fill(Path(CGRect(x: x - 1, y: 0, width: 2, height: size.height)), with: .color(.accentColor))
+            }
+        }
+    }
+}
+
 struct AudioPlayback: View {
     let data: Data
+    var spacebarEnabled = true
+    var fileExtension = "wav"
+    var suspended = false
+    var onInteraction: () -> Void = {}
     @State private var player: AVAudioPlayer?
     @State private var peaks: [Float] = []
     @State private var playing = false
@@ -16,22 +47,7 @@ struct AudioPlayback: View {
             let time = playing ? player?.currentTime ?? position : position
             VStack(spacing: 12) {
                 GeometryReader { geometry in
-                    Canvas { context, size in
-                        let count = min(peaks.count, max(1, Int(size.width / 3)))
-                        let progress = duration > 0 ? time / duration : 0
-                        for index in 0..<count {
-                            let start = index * peaks.count / count
-                            let end = (index + 1) * peaks.count / count
-                            let peak = peaks[start..<end].max() ?? 0
-                            let x = (Double(index) + 0.5) * size.width / Double(count)
-                            let height = max(2, Double(peak) * (size.height - 12))
-                            let bar = CGRect(x: x - 1, y: (size.height - height) / 2, width: 2, height: height)
-                            context.fill(Path(roundedRect: bar, cornerRadius: 1),
-                                         with: .color(x <= size.width * progress ? .accentColor : .secondary.opacity(0.45)))
-                        }
-                        let x = min(size.width - 1, max(1, size.width * progress))
-                        context.fill(Path(CGRect(x: x - 1, y: 0, width: 2, height: size.height)), with: .color(.accentColor))
-                    }
+                    AudioWaveform(peaks: peaks, progress: duration > 0 ? time / duration : 0)
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0).onChanged { value in
                         seek(value.location.x / max(1, geometry.size.width) * duration)
@@ -53,6 +69,7 @@ struct AudioPlayback: View {
                 HStack(spacing: 32) {
                     Button("Back 15 seconds", systemImage: "gobackward.15") { seek(time - 15) }
                     Button(playing ? "Pause" : "Play", systemImage: playing ? "pause.fill" : "play.fill") {
+                        onInteraction()
                         guard let player else { return }
                         if playing {
                             position = player.currentTime
@@ -65,7 +82,7 @@ struct AudioPlayback: View {
                         }
                     }
                     .font(.system(size: 30)).frame(width: 44, height: 44)
-                    .keyboardShortcut(.space, modifiers: [])
+                    .keyboardShortcut(spacebarEnabled ? KeyboardShortcut(.space, modifiers: []) : nil)
                     Button("Forward 15 seconds", systemImage: "goforward.15") { seek(time + 15) }
                 }
                 .font(.title2).labelStyle(.iconOnly).buttonStyle(.plain)
@@ -87,7 +104,7 @@ struct AudioPlayback: View {
             peaks = []
             error = nil
             do {
-                let samples = try await Task.detached { try Self.envelope(data) }.value
+                let samples = try await Task.detached { try Self.envelope(data, fileExtension: fileExtension) }.value
                 try Task.checkCancellation()
                 player = try AVAudioPlayer(data: data)
                 player?.prepareToPlay()
@@ -100,9 +117,17 @@ struct AudioPlayback: View {
             player?.pause()
             playing = false
         }
+        .onChange(of: suspended) {
+            if suspended {
+                position = player?.currentTime ?? position
+                player?.pause()
+                playing = false
+            }
+        }
     }
 
     private func seek(_ time: Double) {
+        onInteraction()
         position = min(duration, max(0, time))
         player?.currentTime = position
         if position >= duration { player?.pause(); playing = false }
@@ -113,8 +138,8 @@ struct AudioPlayback: View {
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 
-    nonisolated private static func envelope(_ data: Data) throws -> [Float] {
-        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".wav")
+    nonisolated private static func envelope(_ data: Data, fileExtension: String) throws -> [Float] {
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + "." + fileExtension)
         defer { try? FileManager.default.removeItem(at: url) }
         try data.write(to: url)
         let file = try AVAudioFile(forReading: url)
@@ -131,7 +156,6 @@ struct AudioPlayback: View {
                 }
             }
         }
-        let maximum = max(0.01, peaks.max() ?? 0)
-        return peaks.map { $0 / maximum }
+        return peaks
     }
 }

@@ -37,6 +37,10 @@ def download_bundle(model: str, repo: str, revision: str, progress=None) -> Path
     bundle = root / folder
 
     def fetch():
+        index = json.loads(Path(hf_hub_download(repo, 'config.json', revision=revision, local_dir=root)).read_text())
+        if architecture not in index.get('bundles', {architecture: None}):
+            raise RuntimeError(f'No bundle for {chip_name(architecture)} ({architecture}) is available '
+                               f'in {repo}@{revision}. Choose another model or install a matching local bundle.')
         # The manifest comes last, so a bundle that has one is complete.
         snapshot_download(repo, revision=revision, allow_patterns=["config.json", f"{folder}/*"],
                           ignore_patterns=[f"{folder}/model.json"], local_dir=root)

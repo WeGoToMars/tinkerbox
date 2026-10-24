@@ -111,6 +111,7 @@ def main():
               "questionTrees": entry.get("question_trees", False),
               "settings": package.SETTINGS, "info": package.INFO,
               "speechParameters": getattr(package, "SPEECH_PARAMETERS", []),
+              "speechCapabilities": getattr(model, "capabilities", None),
               "setupMs": (time.perf_counter() - started) * 1000})
         for line in sys.stdin:
             try:

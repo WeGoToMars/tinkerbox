@@ -1,5 +1,28 @@
 {
   "schema": 1,
+  "architectures": {
+    "h18g": "Apple M6",
+    "h17d": "Apple M5 Ultra",
+    "h17c": "Apple M5 Max",
+    "h17s": "Apple M5 Pro",
+    "h17g": "Apple M5",
+    "h16c": "Apple M4 Max",
+    "h16s": "Apple M4 Pro",
+    "h16g": "Apple M4",
+    "h15d": "Apple M3 Ultra",
+    "h15c": "Apple M3 Max (16-core CPU)",
+    "h15m": "Apple M3 Max (14-core CPU)",
+    "h15s": "Apple M3 Pro",
+    "h15g": "Apple M3",
+    "h14d": "Apple M2 Ultra",
+    "h14c": "Apple M2 Max",
+    "h14s": "Apple M2 Pro",
+    "h14g": "Apple M2",
+    "h13d": "Apple M1 Ultra",
+    "h13c": "Apple M1 Max",
+    "h13s": "Apple M1 Pro",
+    "h13g": "Apple M1"
+  },
   "models": [
     {
       "id": "d1-3b",
@@ -17,7 +40,14 @@
       "context": 32768,
       "download_bytes": 6321785067,
       "license": "LFM Open License v1.0",
-      "min_version": "2.1.0"
+      "min_version": "2.1.0",
+      "architectures": [
+        "h18g",
+        "h17s",
+        "h17g",
+        "h16s",
+        "h16g"
+      ]
     },
     {
       "id": "d3-nano",
@@ -35,7 +65,14 @@
       "context": 32768,
       "download_bytes": 4571108246,
       "license": "Apache-2.0",
-      "min_version": "2.1.0"
+      "min_version": "2.1.0",
+      "architectures": [
+        "h18g",
+        "h17s",
+        "h17g",
+        "h16s",
+        "h16g"
+      ]
     },
     {
       "id": "d3-mini",
@@ -53,7 +90,14 @@
       "context": 32768,
       "download_bytes": 9254462596,
       "license": "Apache-2.0",
-      "min_version": "2.1.0"
+      "min_version": "2.1.0",
+      "architectures": [
+        "h18g",
+        "h17s",
+        "h17g",
+        "h16s",
+        "h16g"
+      ]
     },
     {
       "id": "omnivoice",
@@ -64,12 +108,50 @@
       "base_model": "Qwen/Qwen3-0.6B-Base",
       "original_model": "k2-fsa/OmniVoice",
       "module": "tinkerbox_ane.omnivoice",
-      "repo": "k2-fsa/OmniVoice",
-      "revision": "ane-dev-1",
+      "repo": "wegotomars/OmniVoice-CoreAI-ANE",
+      "revision": "v2.2.0",
       "local_only": true,
       "inputs": ["text", "audio"],
+      "non_verbal_tags": [
+        "[laughter]",
+        "[sigh]",
+        "[confirmation-en]",
+        "[question-en]",
+        "[question-ah]",
+        "[question-oh]",
+        "[question-ei]",
+        "[question-yi]",
+        "[surprise-ah]",
+        "[surprise-oh]",
+        "[surprise-wa]",
+        "[surprise-yo]",
+        "[dissatisfaction-hnn]"
+      ],
       "license": "CC-BY-NC-4.0",
-      "min_version": "2.1.0"
+      "min_version": "2.2.0",
+      "architectures": [
+        "h18g",
+        "h17d",
+        "h17c",
+        "h17s",
+        "h17g",
+        "h16c",
+        "h16s",
+        "h16g",
+        "h15d",
+        "h15c",
+        "h15m",
+        "h15s",
+        "h15g",
+        "h14d",
+        "h14c",
+        "h14s",
+        "h14g",
+        "h13d",
+        "h13c",
+        "h13s",
+        "h13g"
+      ]
     }
   ]
 }

@@ -31,6 +31,7 @@ with tempfile.TemporaryDirectory(prefix="shortcuts-", dir=root / "artifacts/swif
     subprocess.run([
         "xcrun", "swiftc", "-O", "-parse-as-library", "-target", "arm64-apple-macos27.0",
         str(source / "Catalog.swift"), str(source / "Runtime.swift"), str(source / "Shortcuts.swift"),
+        str(root / "src/tinkerbox_ane/transcription.swift"),
         str(root / "tests/swiftui/ShortcutsSmoke.swift"), "-o", str(executable),
     ], check=True)
     subprocess.run([str(executable)], check=True, timeout=600)

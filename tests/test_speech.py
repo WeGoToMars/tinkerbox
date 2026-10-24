@@ -26,11 +26,14 @@ def test_speech_modes_batch_order_and_request_isolation(speech, tmp_path):
     options = dict(num_step=4, position_temperature=0, class_temperature=0,
                    postprocess_output=False, pad_duration=0, fade_duration=0)
     first = speech.generate('Hello.', duration=1.0, seed=42, **options)[0]
+    native = speech.generate('Hello.', mode='auto', controls={'duration': 1.0}, seed=42, **options)[0]
+    assert np.array_equal(native, first)
     assert len(first) == speech.sampling_rate
     assert np.isfinite(first).all() and np.max(np.abs(first)) > 0
     request = dict(items=[dict(text='Hello.', duration=1.0), dict(text='Welcome.', duration=1.4)],
                    parameters=options, seed=42)
     reply = synthesize(speech, {}, request)
+    assert reply['cloneMs'] == 0 and reply['audioMs'] > 0
     decoded = [sf.read(io.BytesIO(__import__('base64').b64decode(item['wav'])))[0] for item in reply['audio']]
     assert [len(wave) for wave in decoded] == [24000, 33600]
     assert np.allclose(decoded[0], first, atol=1 / 32768)
@@ -48,6 +51,8 @@ def test_speech_modes_batch_order_and_request_isolation(speech, tmp_path):
         items=[dict(text='Welcome.', voice_clone_prompt=str(saved), duration=1.0),
                dict(text='Hello.', duration=1.4)], parameters=options, seed=42))
     assert [item['duration'] for item in mixed['audio']] == [1.0, 1.4]
+    assert mixed['cloneMs'] > 0 and mixed['audioMs'] > 0
+    assert mixed['elapsedMs'] == pytest.approx(mixed['cloneMs'] + mixed['audioMs'])
     mixed_clone = sf.read(io.BytesIO(__import__('base64').b64decode(mixed['audio'][0]['wav'])))[0]
     assert np.allclose(mixed_clone, cloned, atol=1 / 32768)
     assert np.array_equal(speech.generate('Hello.', duration=1.0, seed=42, **options)[0], first)
@@ -62,18 +67,16 @@ def test_speech_modes_batch_order_and_request_isolation(speech, tmp_path):
 
 
 def test_short_speech_is_intelligible_and_can_be_transcribed_for_cloning(speech):
-    asr = os.environ.get('TINKERBOX_SPEECH_TEST_ASR')
-    if not asr:
-        pytest.skip('requires a local Whisper checkpoint for independent speech recognition')
     import re
 
-    speech.load_asr_model(asr)
     for text, instruction, seed in [('Hello! Welcome to Tinkerbox.', 'female, low pitch, british accent', 42),
                                     ('fuck yeah', None, 7), ('Hello', None, 7)]:
         audio = speech.generate(text, instruct=instruction, seed=seed)[0]
         transcript = speech.transcribe((audio, speech.sampling_rate))
         expected = re.sub(r'[^a-z]', '', text.lower())
         assert expected in re.sub(r'[^a-z]', '', transcript.lower())
+    with pytest.raises(RuntimeError, match='manually'):
+        speech.transcribe((audio, speech.sampling_rate), locale='zz-ZZ')
     prompt = speech.create_voice_clone_prompt((audio, speech.sampling_rate), preprocess_prompt=False)
     # Upstream normalizes reference loudness before ASR, which can change punctuation.
     assert re.sub(r'[^a-z]', '', prompt.ref_text.lower()) == re.sub(r'[^a-z]', '', transcript.lower())

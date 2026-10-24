@@ -25,5 +25,7 @@ with tempfile.TemporaryDirectory(prefix='speech-', dir=app.parent) as temporary:
     executable = binaries / 'SpeechSmoke'
     subprocess.run(['xcrun', 'swiftc', '-O', '-parse-as-library', '-target', 'arm64-apple-macos27.0',
                     str(root / 'app/Catalog.swift'), str(root / 'app/Runtime.swift'),
+                    str(root / 'src/tinkerbox_ane/transcription.swift'),
+                    str(root / 'src/tinkerbox_ane/audio.swift'),
                     str(root / 'tests/swiftui/SpeechSmoke.swift'), '-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True, timeout=600)

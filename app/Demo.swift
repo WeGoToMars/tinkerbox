@@ -75,6 +75,7 @@ struct RunTotals {
     var settings: [ModelSetting] = []
     var info: [ModelInfo] = []
     var speechParameters: [SpeechParameter] = []
+    var speechCapabilities: SpeechCapabilities?
     // Only values that differ from the defaults are kept.
     var settingValues: [String: Int] = [:] {
         didSet { Runtime.store(settings: settingValues, for: model) }
@@ -83,6 +84,10 @@ struct RunTotals {
     private var generation = 0
 
     var current: CatalogModel? { catalog.models.first { $0.id == model } }
+    var compatibilityIssue: String? {
+        current.flatMap { Catalog.availabilityIssue(for: $0, asset:
+            ProcessInfo.processInfo.environment["TINKERBOX_ASSET"].map { URL(fileURLWithPath: $0) }) }
+    }
 
     func isDownloaded(_ id: String) -> Bool { catalog.downloaded.contains(id) && !downloads.contains(id) }
 
@@ -95,6 +100,11 @@ struct RunTotals {
 
     // Downloads run beside the runtime, so they never hold up requests or model switches.
     private func fetch(_ id: String) async throws {
+        if let model = catalog.models.first(where: { $0.id == id }),
+           let issue = Catalog.availabilityIssue(for: model, asset:
+                ProcessInfo.processInfo.environment["TINKERBOX_ASSET"].map { URL(fileURLWithPath: $0) }) {
+            throw DecisionError.invalid(issue)
+        }
         // The worker loads a local bundle given at launch instead.
         if UserDefaults.standard.string(forKey: "asset.\(id)") != nil { return }
         guard !isDownloaded(id), ProcessInfo.processInfo.environment["TINKERBOX_ASSET"] == nil else { return }
@@ -129,6 +139,7 @@ struct RunTotals {
             settings = reply.settings ?? []
             info = reply.info ?? []
             speechParameters = reply.speechParameters ?? []
+            speechCapabilities = reply.speechCapabilities
         } catch is CancellationError {
             // Its download was stopped to remove the model.
         } catch {
@@ -144,6 +155,7 @@ struct RunTotals {
         settings = []
         info = []
         speechParameters = []
+        speechCapabilities = nil
         settingValues = Runtime.settings(for: model)
     }
 
@@ -251,7 +263,7 @@ struct RunTotals {
     var runMode: RunMode { demo.questionTrees && questions.count > 1 ? mode : .parallel }
 
     var canRun: Bool {
-        !demo.loading && !demo.busy && !(isBlank(state) && images.isEmpty)
+        !demo.loading && !demo.busy && demo.compatibilityIssue == nil && !(isBlank(state) && images.isEmpty)
             && questions.allSatisfy { $0.validation == nil && !isBlank($0.instructions) }
     }
 
@@ -590,6 +602,10 @@ struct ModelToolbar: ToolbarContent {
                     .foregroundStyle(.green)
                     .fixedSize()
                     .help("Unloads after 5 minutes without inference.")
+            } else if let issue = demo.compatibilityIssue {
+                Label("Model unavailable", systemImage: "exclamationmark.circle")
+                    .foregroundStyle(.secondary)
+                    .help(issue)
             } else {
                 Label("Model unloaded", systemImage: "moon")
                     .foregroundStyle(.secondary)
@@ -669,6 +685,22 @@ struct ModelInspector: View {
     }
 }
 
+struct ModelAvailability: View {
+    let demo: Demo
+    let showModels: () -> Void
+
+    var body: some View {
+        if let issue = demo.compatibilityIssue {
+            HStack(alignment: .top, spacing: 12) {
+                Label(issue, systemImage: "info.circle")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Manage Models…", action: showModels)
+            }
+        }
+    }
+}
+
 struct DecisionView: View {
     @Bindable var playground: DecisionPlayground
     let showModels: () -> Void
@@ -684,7 +716,8 @@ struct DecisionView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                if !demo.ready && (demo.loading || demo.error != nil) {
+                ModelAvailability(demo: demo, showModels: showModels)
+                if demo.compatibilityIssue == nil && !demo.ready && (demo.loading || demo.error != nil) {
                     HStack {
                         Text("First launch downloads Python, dependencies and model files.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -791,7 +824,7 @@ struct DecisionView: View {
                     if !Task.isCancelled { await playground.updatePreview() }
                 }
 
-                if let error = playground.error ?? demo.error {
+                if let error = playground.error ?? demo.error, demo.compatibilityIssue == nil {
                     Label(error, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.red).textSelection(.enabled)
                 }
@@ -1058,6 +1091,7 @@ struct ModelsView: View {
     private func row(_ model: CatalogModel) -> some View {
         let downloaded = demo.isDownloaded(model.id)
         let downloading = demo.downloads.contains(model.id)
+        let issue = Catalog.availabilityIssue(for: model)
         // Partial downloads count, so an interrupted one can be deleted.
         let stored = demo.catalog.downloaded.contains(model.id) || downloading
             || demo.storage.report?.models.contains { $0.id == model.id } == true
@@ -1073,6 +1107,9 @@ struct ModelsView: View {
                 }
                 Text(model.summary)
                 Text(details.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                if model.isSupported, let issue {
+                    Text(issue).font(.caption).foregroundStyle(.secondary)
+                }
             }
             Spacer()
             Menu("Hugging Face", systemImage: "arrow.up.right.square") {
@@ -1097,7 +1134,10 @@ struct ModelsView: View {
                      ? "Requires Tinkerbox \(model.minVersion)" : "Update Tinkerbox to use this model")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                if model.id == demo.model && demo.loading {
+                if issue != nil {
+                    Button("Choose bundle…") { chooseBundle(model) }
+                        .disabled(demo.busy || demo.storage.removing.contains(model.id))
+                } else if model.id == demo.model && demo.loading {
                     VStack(alignment: .trailing, spacing: 4) {
                         Text(demo.status).font(.caption).foregroundStyle(.secondary)
                         ProgressView(value: demo.progress).frame(width: 120)
@@ -1123,7 +1163,7 @@ struct ModelsView: View {
                         .help(downloading ? "Stop the download and delete its files" : "Delete model files and cached copies")
                         .disabled(!demo.storage.removing.isEmpty)
                 }
-                if model.id != demo.model {
+                if model.id != demo.model && issue == nil {
                     Button(downloaded ? "Select" : model.localOnly == true ? "Choose bundle…" : "Download & Select") {
                         if model.localOnly == true && !downloaded { chooseBundle(model) }
                         else { Task { await demo.choose(model) } }
@@ -1139,9 +1179,8 @@ struct ModelsView: View {
         panel.canChooseFiles = false
         panel.message = "Choose the compiled model bundle directory containing model.json."
         if panel.runModal() == .OK, let url = panel.url {
-            if FileManager.default.fileExists(atPath: url.appending(path: "model.json").path) {
-                Task { await demo.choose(model, asset: url) }
-            } else { removalError = "Choose a compiled bundle directory containing model.json." }
+            if let issue = Catalog.bundleIssue(at: url) { removalError = issue }
+            else { Task { await demo.choose(model, asset: url) } }
         }
     }
 }
