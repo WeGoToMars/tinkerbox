@@ -3,7 +3,6 @@
 import argparse
 import json
 from pathlib import Path
-import tempfile
 import time
 
 import torch
@@ -13,9 +12,8 @@ from safetensors import safe_open
 from tinkerbox_ane.blocks import conv1x1
 from tinkerbox_ane.architectures.qwen3 import Backbone, Config
 from tinkerbox_ane.architectures.attention import BlockAttention
-from tinkerbox_ane.coreai import compile_asset, source_hash
-from tinkerbox_ane.bundle import (CHECKPOINT, bundled_checkpoint, checkpoint_digest, clone,
-                                  read_bundle, replace_directory, write_checkpoint, compile_bundle)
+from tinkerbox_ane.coreai import source_hash
+from tinkerbox_ane.bundle import checkpoint_digest, compile_bundle, write_checkpoint
 from . import KIND, REPO, REVISION, SOURCE, checkpoint
 
 
@@ -128,7 +126,7 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4, short_capa
                 zeros(1, 1, 1, capacity)), ['query', 'key', 'value', 'mask'], name)
             attention.append(dict(name=name, capacity=capacity))
         add(Output(model), (zeros(1, cfg.hidden, 1, WIDTH),), ['hidden'], 'omnivoice_output', output='logits')
-    out.mkdir(parents=True)
+    out.mkdir(parents=True, exist_ok=True)
     asset = out / 'diffusion.aimodel'
     converter.to_coreai().save_asset(asset)
     long_functions = list(functions)
@@ -161,29 +159,7 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4, short_capa
 
 
 def compile(source, out, architecture=None, *, force=False):
-    from tinkerbox_ane.host import device_architecture, validate_architecture
-
-    architecture = architecture or device_architecture()
-    validate_architecture(architecture)
-    source = Path(source)
-    spec = read_bundle(source, KIND)
-    if 'assets' in spec:
-        return compile_bundle(source, Path(out), KIND, architecture, force=force)
-    cpu = bundled_checkpoint(source)
-    if checkpoint_digest(cpu) != spec.get('checkpoint_hash'):
-        raise ValueError('checkpoint identity mismatch; re-export the bundle')
-    out = Path(out)
-    target = out / f'diffusion.{architecture}.aimodelc'
-    compile_asset(Path(source) / spec['asset'], target, architecture=architecture,
-                  min_deployment_version='27.0', expected_functions=spec.get('functions', [f's{n}' for n in spec['capacities']]),
-                  timeout=1500, force=force)
-    spec.update(asset=target.name, architecture=architecture, min_os='27.0')
-    with tempfile.TemporaryDirectory(prefix='.checkpoint-', dir=out) as temporary:
-        staged = Path(temporary) / CHECKPOINT
-        clone(cpu, staged)
-        replace_directory(staged, out / CHECKPOINT)
-    (out / 'model.json').write_text(json.dumps(spec, indent=2) + '\n')
-    return out
+    return compile_bundle(source, out, KIND, architecture, force=force)
 
 
 def main():

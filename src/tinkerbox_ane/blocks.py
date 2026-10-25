@@ -39,8 +39,11 @@ def silu(x: torch.Tensor, scale: float) -> torch.Tensor:
 class MLP(nn.Module):
     splits = 8
 
-    def __init__(self, hidden: int, ffn: int, scale: float):
+    def __init__(self, hidden: int, ffn: int, scale: float, *, splits: int = 8):
         super().__init__()
+        if splits <= 0 or ffn % splits:
+            raise ValueError('MLP split must be positive and divide intermediate size')
+        self.splits = splits
         c = ffn // self.splits
         self.w1 = nn.ModuleList(conv1x1(hidden, c) for _ in range(self.splits))
         self.w3 = nn.ModuleList(conv1x1(hidden, c) for _ in range(self.splits))

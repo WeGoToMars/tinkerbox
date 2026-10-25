@@ -24,12 +24,14 @@ static BOOL compileWithClones(id self, SEL command, id model, id options, unsign
     NSDictionary *files = external[@"FileConstants"];
     NSDictionary *environment = NSProcessInfo.processInfo.environment;
     NSString *destination = environment[@"COW_CLIENT_DEST"];
-    NSString *prefix = [environment[@"COW_ASSET_PREFIX"] stringByAppendingString:@"/"];
+    // Match Foundation's canonical asset URL, including /private/tmp versus /tmp.
+    NSString *prefix = [[environment[@"COW_ASSET_PREFIX"] stringByResolvingSymlinksInPath]
+                        stringByAppendingString:@"/"];
     if (!destination || !prefix) fail("missing clone staging paths");
     if (!files.count) return originalCompile(self, command, model, options, qos, error);
 
     for (id key in files) {
-        if (![files[key][@"Path"] hasPrefix:prefix]) {
+        if (![[files[key][@"Path"] stringByResolvingSymlinksInPath] hasPrefix:prefix]) {
             // Framework auxiliary graphs may have small resources outside the bundle.
             for (id candidate in files) {
                 NSDictionary *attributes = [NSFileManager.defaultManager

@@ -6,7 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from tinkerbox_ane.blocks import CompositeRMSNorm, conv1x1, silu
+from tinkerbox_ane.blocks import CompositeRMSNorm, MLP, conv1x1
 
 
 @dataclass(frozen=True)
@@ -30,20 +30,6 @@ class Config:
                    config['rope_parameters']['rope_theta'])
 
 
-class MLP(nn.Module):
-    def __init__(self, cfg, splits=4):
-        super().__init__()
-        if cfg.ffn % splits:
-            raise ValueError('MLP split must divide intermediate size')
-        self.gate = nn.ModuleList(conv1x1(cfg.hidden, cfg.ffn // splits) for _ in range(splits))
-        self.up = nn.ModuleList(conv1x1(cfg.hidden, cfg.ffn // splits) for _ in range(splits))
-        self.down = nn.ModuleList(conv1x1(cfg.ffn // splits, cfg.hidden) for _ in range(splits))
-
-    def forward(self, x):
-        return sum(down(silu(gate(x), 1.0) * up(x))
-                   for gate, up, down in zip(self.gate, self.up, self.down))
-
-
 class Block(nn.Module):
     # Preserve small V/attention intermediates, then undo the exact power-of-two
     # scale before O. Attention probabilities and exact-arithmetic results agree.
@@ -60,7 +46,7 @@ class Block(nn.Module):
         self.o = conv1x1(cfg.heads * cfg.head_dim, cfg.hidden)
         self.q_norm = CompositeRMSNorm(cfg.head_dim, cfg.eps, axis=2)
         self.k_norm = CompositeRMSNorm(cfg.head_dim, cfg.eps, axis=2)
-        self.mlp = MLP(cfg, splits)
+        self.mlp = MLP(cfg.hidden, cfg.ffn, 1.0, splits=splits)
 
     def project(self, x, cos, sin):
         cfg, b, n = self.cfg, x.shape[0], x.shape[-1]
@@ -122,9 +108,9 @@ class Backbone(nn.Module):
                      layer.value_scale if name == 'v' else 1.0)
             for name in ('q', 'k'):
                 copy(getattr(layer, name + '_norm').weight, root + f'self_attn.{name}_norm.weight')
-            for name, upstream in (('gate', 'gate_proj'), ('up', 'up_proj'), ('down', 'down_proj')):
+            for name, upstream in (('w1', 'gate_proj'), ('w3', 'up_proj'), ('w2', 'down_proj')):
                 value = tensors.get_tensor(prefix + root + f'mlp.{upstream}.weight')
-                chunks = value.chunk(len(layer.mlp.gate), dim=1 if name == 'down' else 0)
+                chunks = value.chunk(layer.mlp.splits, dim=1 if name == 'w2' else 0)
                 for target, chunk in zip(getattr(layer.mlp, name), chunks):
                     target.weight.data.copy_(chunk.reshape(target.weight.shape))
         copy(self.norm.weight, 'norm.weight')

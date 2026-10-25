@@ -6,8 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from tinkerbox_ane.blocks import CompositeRMSNorm, conv1x1
-from .qwen3 import MLP
+from tinkerbox_ane.blocks import CompositeRMSNorm, MLP, conv1x1
 
 
 @dataclass(frozen=True)
@@ -43,7 +42,7 @@ class Block(nn.Module):
         self.k = conv1x1(cfg.hidden, cfg.kv_heads * cfg.head_dim)
         self.v = conv1x1(cfg.hidden, cfg.kv_heads * cfg.head_dim)
         self.o = conv1x1(cfg.heads * cfg.head_dim, cfg.hidden)
-        self.mlp = MLP(cfg)
+        self.mlp = MLP(cfg.hidden, cfg.ffn, 1.0, splits=4)
 
     def forward(self, x, cos, sin, mask, past=None):
         cfg, b, n = self.cfg, x.shape[0], x.shape[-1]
@@ -102,9 +101,9 @@ class Transformer(nn.Module):
             for name in ('q', 'k', 'v', 'o'):
                 copy(getattr(layer, name).weight, root + f'self_attn.{name}_proj.weight',
                      layer.value_scale if name == 'v' else 1)
-            for name, upstream in (('gate', 'gate_proj'), ('up', 'up_proj'), ('down', 'down_proj')):
+            for name, upstream in (('w1', 'gate_proj'), ('w3', 'up_proj'), ('w2', 'down_proj')):
                 weight = tensors.get_tensor(prefix + root + f'mlp.{upstream}.weight')
-                chunks = weight.chunk(len(layer.mlp.gate), dim=1 if name == 'down' else 0)
+                chunks = weight.chunk(layer.mlp.splits, dim=1 if name == 'w2' else 0)
                 for target, chunk in zip(getattr(layer.mlp, name), chunks):
                     target.weight.data.copy_(chunk.reshape(target.weight.shape))
         if not isinstance(self.norm, nn.Identity):

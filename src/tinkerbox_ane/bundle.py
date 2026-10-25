@@ -292,7 +292,7 @@ def compile_bundle(
             build.mkdir(parents=True)
         marker.write_text(json.dumps(identity))
     if "asset" in spec:
-        target = build / f"fused.{architecture}.aimodelc"
+        target = build / f"{Path(spec['asset']).stem}.{architecture}.aimodelc"
         compile_asset(source / spec["asset"], target, architecture=architecture, min_deployment_version="27.0",
                       expected_functions=(f"c{capacity}" for capacity in spec["tiers"]))
         spec.update(asset=target.name)
