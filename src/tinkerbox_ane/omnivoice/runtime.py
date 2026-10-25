@@ -120,69 +120,90 @@ class Speech:
                                  context_positions=max(capacities))
         self._lock = threading.Lock()
         self.ane_seconds = 0.0
-        bidirectional = None
-        if self.spec.get('attention_width'):
-            bidirectional = dict(hidden=self.spec['hidden'], heads=self.spec['heads'], kvHeads=self.spec['kv_heads'],
-                headDim=self.spec['head_dim'], width=self.spec['attention_width'],
-                logits=self.spec['codebooks']*self.spec['audio_vocab'], projections=self.spec['projections'],
-                finishes=self.spec['finishes'], attention=self.spec['attention'], head=self.spec['head_function'])
         assets = {stage['role']: stage for stage in self.spec.get('assets', [])}
-        diffusion_asset = assets['diffusion']['asset'] if assets else self.spec['asset']
-        self.host = TensorHost(asset/diffusion_asset, bidirectional=bidirectional)
-        self.short_host = None
+        if set(assets) != {'diffusion', 'short'} or not self.spec.get('attention_width') or 'fused_cost' not in self.spec:
+            raise ValueError('OmniVoice bundle predates packed attention; re-export the bundle')
+        bidirectional = dict(hidden=self.spec['hidden'], heads=self.spec['heads'], kvHeads=self.spec['kv_heads'],
+            headDim=self.spec['head_dim'], width=self.spec['attention_width'],
+            logits=self.spec['codebooks']*self.spec['audio_vocab'], projections=self.spec['projections'],
+            finishes=self.spec['finishes'], attention=self.spec['attention'], head=self.spec['head_function'])
+        self.host = TensorHost(asset/assets['diffusion']['asset'], bidirectional=bidirectional)
         try:
-            if assets:
-                self.short_host = TensorHost(asset/assets['short']['asset'])
+            self.short_host = TensorHost(asset/assets['short']['asset'])
         except BaseException:
             self.host.close()
             raise
 
+    def _angles(self, positions):
+        dim = self.spec['head_dim']
+        inverse = self.spec['rope_theta'] ** (-np.arange(0, dim, 2, dtype=np.float32)/dim)
+        angles = positions.astype(np.float32)[:, None] * inverse
+        angles = np.concatenate([angles, angles], axis=1).T[None, None]
+        return dict(cos=np.cos(angles), sin=np.sin(angles))
+
+    def _pack(self, packed, n):
+        """Whether adding a row of n positions to a packed call is cheaper than a separate call."""
+        capacities, cost = self.spec['short_capacities'], self.spec['fused_cost']
+        if packed + n > capacities[-1]:
+            return False
+        bucket = lambda size: next(c for c in capacities if c >= size)
+        # Latency in positions of projection/MLP work: a fixed per-call
+        # overhead, linear work and quadratic attention.
+        time = lambda size: cost['call_positions'] + bucket(size) + bucket(size)**2/cost['attention_positions']
+        return time(packed+n) <= time(packed) + time(n)
+
     @torch.inference_mode()
     def logits(self, embeddings, attention_mask):
-        """Evaluate independent conditioned/unconditioned sequences in input order."""
+        """Evaluate independent conditioned/unconditioned sequences in input order.
+
+        Upstream pads each row after its visible prefix and reads logits only
+        within it. Consecutive rows that fit the fused transformer share a call,
+        with block-diagonal attention and per-row positions, when the bundle's
+        cost model favors the packed bucket over separate ones."""
         batch, length, _ = embeddings.shape
-        try:
-            pool = self.spec['short_capacities'] if length <= max(self.spec.get('short_capacities', [0])) else self.spec['capacities']
-            capacity = next(n for n in pool if n >= length)
-        except StopIteration:
-            raise ValueError(f'speech context needs {length} positions; bundle limit is {max(self.spec["capacities"])}') from None
-        if self.spec.get('attention_width') and length > max(self.spec.get('short_capacities', [0])):
-            dim = self.spec['head_dim']
-            inverse = self.spec['rope_theta'] ** (-np.arange(0, dim, 2, dtype=np.float32)/dim)
-            angles = np.arange(length, dtype=np.float32)[:, None] * inverse
-            angles = np.concatenate([angles, angles], axis=1).T[None, None]
-            values = dict(cos=np.cos(angles), sin=np.sin(angles))
-            results = []
-            for index in range(batch):
-                visible = int(attention_mask[index, 0, 0].sum()) if attention_mask is not None else length
-                values['hidden'] = embeddings[index].half().T[None, :, None].numpy()
+        codebooks, vocabulary = self.spec['codebooks'], self.spec['audio_vocab']
+        limit = max(self.spec['short_capacities'])
+        if length > max(self.spec['capacities']):
+            raise ValueError(f'speech context needs {length} positions; bundle limit is {max(self.spec["capacities"])}')
+        visible = [int(attention_mask[i, 0, 0].sum()) if attention_mask is not None else length for i in range(batch)]
+        result = torch.zeros(batch, codebooks, length, vocabulary)
+        groups = []
+        for i, n in enumerate(visible):
+            if n > limit:
+                values = dict(self._angles(np.arange(length)), hidden=embeddings[i].half().T[None, :, None].numpy())
                 started = time.perf_counter()
-                output = self.host.full_attention(values, length, visible)
+                output = self.host.full_attention(values, length, n)
                 self.ane_seconds += time.perf_counter()-started
-                row = output[0, :, 0].T.copy()
-                results.append(torch.from_numpy(row).float().reshape(length, self.spec['codebooks'], self.spec['audio_vocab']).permute(1, 0, 2))
-            return torch.stack(results)
-        dim = self.spec['head_dim']
-        inverse = self.spec['rope_theta'] ** (-np.arange(0, dim, 2, dtype=np.float32) / dim)
-        angles = np.arange(capacity, dtype=np.float32)[:, None] * inverse
-        angles = np.concatenate([angles, angles], axis=1).T[None, None]
-        cos, sin = np.cos(angles), np.sin(angles)
-        results = []
-        for i in range(batch):
+                result[i, :, :n] = torch.from_numpy(output[0, :, 0, :n].T.copy()).float().reshape(n, codebooks, vocabulary).permute(1, 0, 2)
+            elif groups and self._pack(sum(visible[j] for j in groups[-1]), n):
+                groups[-1].append(i)
+            else:
+                groups.append([i])
+        for rows in groups:
+            total = sum(visible[i] for i in rows)
+            capacity = next(n for n in self.spec['short_capacities'] if n >= total)
             hidden = np.zeros((1, self.spec['hidden'], 1, capacity), np.float16)
             mask = np.full((1, 1, capacity, capacity), -30000, np.float16)
-            # Pad queries attend themselves; real queries can never read padding.
+            # Pad queries attend themselves; real queries can never read padding or another row.
             np.fill_diagonal(mask[0, 0], 0)
-            hidden[0, :, 0, :length] = embeddings[i].float().numpy().T
-            allowed = attention_mask[i, 0].numpy() if attention_mask is not None else np.ones((length, length), bool)
-            mask[0, 0, :length, :length] = np.where(allowed, 0, -30000)
+            positions, offset = np.zeros(capacity, np.int64), 0
+            for i in rows:
+                n = visible[i]
+                hidden[0, :, 0, offset:offset+n] = embeddings[i, :n].float().numpy().T
+                allowed = attention_mask[i, 0, :n, :n].numpy() if attention_mask is not None else True
+                mask[0, 0, offset:offset+n, offset:offset+n] = np.where(allowed, 0, -30000)
+                positions[offset:offset+n] = np.arange(n)
+                offset += n
             started = time.perf_counter()
-            function = f'omnivoice_s{capacity}' if self.spec.get('short_capacities') else f's{capacity}'
-            output = (self.short_host or self.host).run(function, dict(hidden=hidden, cos=cos, sin=sin, mask=mask))
+            output = self.short_host.run(f'omnivoice_s{capacity}', dict(hidden=hidden, mask=mask, **self._angles(positions)))
             self.ane_seconds += time.perf_counter() - started
-            row = output[0, :, 0, :length].T.copy()
-            results.append(torch.from_numpy(row).float().reshape(length, self.spec['codebooks'], self.spec['audio_vocab']).permute(1, 0, 2))
-        return torch.stack(results)
+            offset = 0
+            for i in rows:
+                n = visible[i]
+                row = output[0, :, 0, offset:offset+n].T.copy()
+                result[i, :, :n] = torch.from_numpy(row).float().reshape(n, codebooks, vocabulary).permute(1, 0, 2)
+                offset += n
+        return result
 
     def generate(self, text, *, seed=None, mode=None, controls=None, **kwargs):
         from tinkerbox_ane.speech import speech_controls
@@ -250,8 +271,7 @@ class Speech:
 
     def close(self):
         self.host.close()
-        if self.short_host is not None:
-            self.short_host.close()
+        self.short_host.close()
 
     def __enter__(self):
         return self

@@ -31,6 +31,10 @@ class Diffusion(nn.Module):
 
 WIDTH = 128
 CAPACITIES = (128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 40960)
+SHORT_CAPACITIES = (128, 192, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 4096)
+# Fused call latency is modeled as call + n + n**2/attention positions of
+# projection/MLP work, least-squares fitted on Apple M5 Pro (h17s).
+FUSED_COST = dict(call_positions=26, attention_positions=942)
 
 
 class Project(nn.Module):
@@ -71,7 +75,7 @@ class Output(nn.Module):
         return self.head(self.norm(hidden))
 
 
-def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4):
+def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4, short_capacities=SHORT_CAPACITIES):
     from coreai_torch import TorchConverter, get_decomp_table, ExternalizeSpec
     from coreai_torch.composite_ops import RMSNormImpl
 
@@ -93,6 +97,9 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4):
     if (not capacities or tuple(sorted(set(capacities))) != tuple(capacities)
             or any(n < WIDTH or n % WIDTH or n > data['llm_config']['max_position_embeddings'] for n in capacities)):
         raise ValueError('OmniVoice capacities must be increasing query-block multiples within upstream context')
+    if (not short_capacities or tuple(sorted(set(short_capacities))) != tuple(short_capacities)
+            or any(n <= 0 or n > max(capacities) for n in short_capacities)):
+        raise ValueError('OmniVoice fused capacities must increase within the exported context')
     converter, started = TorchConverter(), time.monotonic()
     functions = []
     def add(module, inputs, names, function, output='features'):
@@ -127,7 +134,6 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4):
     long_functions = list(functions)
     converter, functions = TorchConverter(), []
     with torch.no_grad():
-        short_capacities = [96, 128, 256, 512, 1024]
         short_functions = []
         for capacity in short_capacities:
             name = f'omnivoice_s{capacity}'
@@ -146,7 +152,7 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4):
                 hidden=cfg.hidden, head_dim=cfg.head_dim, rope_theta=cfg.rope_theta,
                 heads=cfg.heads, kv_heads=cfg.kv_heads, attention_width=WIDTH,
                 projections=projections, finishes=finishes, attention=attention, head_function='omnivoice_output',
-                short_capacities=short_capacities, short_functions=short_functions,
+                short_capacities=list(short_capacities), short_functions=short_functions, fused_cost=FUSED_COST,
                 codebooks=data['num_audio_codebook'], audio_vocab=data['audio_vocab_size'], splits=splits,
                 normalization='coreai-rms_norm', audio_head_centering='per-codebook-vocabulary-mean',
                 attention_value_scale=model.backbone.layers[0].value_scale)
@@ -185,11 +191,12 @@ def main():
     parser.add_argument('--out', type=Path, default=SOURCE)
     parser.add_argument('--checkpoint', type=Path)
     parser.add_argument('--capacities', type=int, nargs='+', default=list(CAPACITIES))
+    parser.add_argument('--short-capacities', type=int, nargs='+', default=list(SHORT_CAPACITIES))
     parser.add_argument('--splits', type=int, default=4)
     parser.add_argument('--compile-to', type=Path)
     parser.add_argument('--architecture')
     args = parser.parse_args()
-    export(args.out, args.checkpoint, tuple(args.capacities), args.splits)
+    export(args.out, args.checkpoint, tuple(args.capacities), args.splits, tuple(args.short_capacities))
     if args.compile_to:
         compile(args.out, args.compile_to, args.architecture)
 

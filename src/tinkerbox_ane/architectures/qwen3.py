@@ -81,8 +81,16 @@ class Block(nn.Module):
     def forward(self, x, cos, sin, mask):
         q, k, v = self.project(x, cos, sin)
         group = self.cfg.heads // self.cfg.kv_heads
-        h = F.scaled_dot_product_attention(q, k.repeat_interleave(group, dim=1),
-                                          v.repeat_interleave(group, dim=1), attn_mask=mask)
+        k, v = k.repeat_interleave(group, dim=1), v.repeat_interleave(group, dim=1)
+        if q.shape[2] < 1024:
+            h = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        else:
+            # Long sequences run faster on the ANE as query blocks; the result is
+            # identical. 256-row blocks fail ANE compilation above 2,048 positions.
+            rows = 256 if q.shape[2] <= 2048 else 512
+            h = torch.cat([F.scaled_dot_product_attention(q[:, :, start:start+rows], k, v,
+                                                          attn_mask=mask[..., start:start+rows, :])
+                           for start in range(0, q.shape[2], rows)], dim=2)
         return self.finish(x, h.transpose(2, 3).reshape(x.shape[0], -1, 1, x.shape[-1]))
 
 

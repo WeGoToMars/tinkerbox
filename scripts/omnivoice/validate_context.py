@@ -15,6 +15,7 @@ from torch.nn import functional as F
 from tinkerbox_ane.host import TensorHost
 from tinkerbox_ane.omnivoice.runtime import Speech
 from tinkerbox_ane.transcription import transcribe
+from speech_case import MAX_MEAN_ERROR, SEEDS, SETTINGS, TEXT, character_error
 
 
 def metric(actual, expected):
@@ -24,23 +25,11 @@ def metric(actual, expected):
                 finite=bool(torch.isfinite(actual).all()))
 
 
-def character_error(actual, reference):
-    actual = ''.join(c for c in actual.casefold() if c.isalnum())
-    reference = ''.join(c for c in reference.casefold() if c.isalnum())
-    previous = list(range(len(reference)+1))
-    for i, a in enumerate(actual, 1):
-        current = [i]
-        for j, b in enumerate(reference, 1):
-            current.append(min(current[-1]+1, previous[j]+1, previous[j-1]+(a != b)))
-        previous = current
-    return previous[-1]/max(len(reference), 1)
-
-
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--asset', type=Path, required=True)
 parser.add_argument('--reference', type=Path, default=Path('artifacts/omnivoice/chunked-reference'))
 parser.add_argument('--out', type=Path, default=Path('artifacts/omnivoice/full-context-validation'))
-parser.add_argument('--speech', action='store_true', help='Also generate and transcribe a 28-second passage')
+parser.add_argument('--speech', action='store_true', help='Also generate and transcribe a 60-second passage per seed')
 args = parser.parse_args()
 args.out.mkdir(parents=True, exist_ok=True)
 torch.set_num_threads(4)
@@ -70,25 +59,21 @@ with Speech(args.asset) as model, torch.inference_mode():
         print(path.stem, result, flush=True)
         save()
     if args.speech:
-        text = ('The morning train arrived just as the first shops began to open. '
-                'Mara stepped onto the platform with a small canvas bag and a notebook full of questions. '
-                'She had come to the valley to record the stories of people who repaired old things. '
-                'Her first appointment was with a clockmaker whose workshop stood beside the river. '
-                'She followed the sound of running water through a narrow street, passing a bakery, '
-                'a flower stall, and a bicycle leaning against a blue door.')
-        started = time.monotonic()
-        audio = model.generate(text, mode='design', instruct='female, low pitch, british accent',
-                               duration=28, audio_chunk_threshold=120, num_step=32, seed=42,
-                               postprocess_output=False, pad_duration=0, fade_duration=0)[0]
-        path = args.out/'long-speech.wav'
-        sf.write(path, audio, model.sampling_rate, subtype='FLOAT')
-        transcript = transcribe(path, locale='en-US')
-        error = character_error(transcript, text)
-        report['speech'] = dict(text=text, transcript=transcript, character_error=error,
-                                seconds=len(audio)/model.sampling_rate, elapsed=time.monotonic()-started,
-                                finite=bool(np.isfinite(audio).all()))
-        report['speech']['passed'] = report['speech']['finite'] and report['speech']['seconds'] == 28 and error <= .20
-        print('speech', report['speech'], flush=True)
+        clips = []
+        for seed in SEEDS:
+            started = time.monotonic()
+            audio = model.generate(TEXT, mode='design', seed=seed, postprocess_output=False, pad_duration=0,
+                                   fade_duration=0, **SETTINGS)[0]
+            path = args.out/f'long-speech-{seed}.wav'
+            sf.write(path, audio, model.sampling_rate, subtype='FLOAT')
+            transcript = transcribe(path, locale='en-US')
+            clips.append(dict(seed=seed, transcript=transcript, character_error=character_error(transcript, TEXT),
+                              seconds=len(audio)/model.sampling_rate, elapsed=time.monotonic()-started,
+                              finite=bool(np.isfinite(audio).all())))
+            print('speech', clips[-1], flush=True)
+        mean = float(np.mean([clip['character_error'] for clip in clips]))
+        report['speech'] = dict(text=TEXT, clips=clips, mean_character_error=mean, max_mean_error=MAX_MEAN_ERROR,
+                                passed=mean <= MAX_MEAN_ERROR and all(c['finite'] and c['seconds'] == 60 for c in clips))
         save()
 
 with torch.inference_mode():
