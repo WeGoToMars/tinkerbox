@@ -65,8 +65,12 @@ def speech_controls(capabilities, mode, instruct, controls, has_reference):
     return selected, defaults
 
 
-def synthesize(model, entry, request):
-    """Generate an ordered batch of PCM WAVs for the app/automation protocol."""
+def synthesize(model, entry, request, emit=None):
+    """Generate an ordered batch of PCM WAVs for the app/automation protocol.
+
+    A streamed request speaks one text with a model that supports it and emits
+    each piece as PCM16 before the complete reply; the pieces join into its WAV."""
+    import numpy as np
     import soundfile as sf
 
     preprocess_default = next((field['default'] for field in model.capabilities.get('parameters', [])
@@ -100,14 +104,18 @@ def synthesize(model, entry, request):
             if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
                                       or not math.isfinite(value) or value <= 0):
                 raise ValueError(f'{key} must be positive and finite.')
+    stream = request.get('stream', False)
+    if stream is not False and (stream is not True or emit is None or len(items) != 1
+                                or not model.capabilities.get('streaming')):
+        raise ValueError('Streaming speaks one text with a model that supports it.')
     seed = request.get('seed')
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**63):
         raise ValueError('Seed must be an integer between 0 and 2^63 - 1.')
     if seed is None:
         seed = secrets.randbits(63)
     started = time.perf_counter()
-    clone_seconds = 0.0
-    if any(item.get('ref_audio') or item.get('voice_clone_prompt') for item in items):
+    clone_seconds, first_audio = 0.0, None
+    if stream or any(item.get('ref_audio') or item.get('voice_clone_prompt') for item in items):
         # Upstream cannot mix cloned and automatic voices in one batch. Preserve
         # each item's voice and ordering through independent complete requests.
         audio, ane_seconds = [], 0.0
@@ -123,8 +131,20 @@ def synthesize(model, entry, request):
                     ref_audio=path, ref_text=item.get('ref_text') or None,
                     preprocess_prompt=options.get('preprocess_prompt', preprocess_default), **preparation)
             clone_seconds += time.perf_counter() - preparing
-            audio.extend(model.generate(text=item['text'], seed=seed + index,
-                                        **arguments, **options))
+            if stream:
+                pieces = []
+                for piece in model.stream(text=item['text'], seed=seed + index, **arguments, **options):
+                    if first_audio is None:
+                        first_audio = time.perf_counter() - started - clone_seconds
+                    pieces.append(piece)
+                    output = io.BytesIO()
+                    sf.write(output, piece, model.sampling_rate, format='RAW', subtype='PCM_16')
+                    emit(dict(chunk=dict(pcm=base64.b64encode(output.getvalue()).decode(),
+                                         sampleRate=model.sampling_rate)))
+                audio.append(np.concatenate(pieces))
+            else:
+                audio.extend(model.generate(text=item['text'], seed=seed + index,
+                                            **arguments, **options))
             ane_seconds += model.ane_seconds
     else:
         arguments = {key: [item.get(key) for item in items]
@@ -139,6 +159,9 @@ def synthesize(model, entry, request):
         results.append(dict(wav=base64.b64encode(output.getvalue()).decode(),
                             sampleRate=model.sampling_rate, duration=len(waveform) / model.sampling_rate))
     elapsed = time.perf_counter() - started
-    return dict(audio=results, elapsedMs=elapsed * 1000, cloneMs=clone_seconds * 1000,
-                audioMs=(elapsed - clone_seconds) * 1000,
-                aneMs=ane_seconds * 1000, seed=seed)
+    reply = dict(audio=results, elapsedMs=elapsed * 1000, cloneMs=clone_seconds * 1000,
+                 audioMs=(elapsed - clone_seconds) * 1000,
+                 aneMs=ane_seconds * 1000, seed=seed)
+    if first_audio is not None:
+        reply['firstAudioMs'] = first_audio * 1000
+    return reply

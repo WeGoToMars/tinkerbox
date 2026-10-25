@@ -34,6 +34,8 @@ def test_speech_modes_batch_order_and_request_isolation(speech, tmp_path):
                    parameters=options, seed=42)
     reply = synthesize(speech, {}, request)
     assert reply['cloneMs'] == 0 and reply['audioMs'] > 0
+    with pytest.raises(ValueError, match='Streaming'):
+        synthesize(speech, {}, dict(request, items=request['items'][:1], stream=True), emit=print)
     decoded = [sf.read(io.BytesIO(__import__('base64').b64decode(item['wav'])))[0] for item in reply['audio']]
     assert [len(wave) for wave in decoded] == [24000, 33600]
     assert np.allclose(decoded[0], first, atol=1 / 32768)

@@ -35,6 +35,9 @@ struct SpeechView: View {
     @State private var cloneMs: Double?
     @State private var aneMs: Double?
     @State private var resultSeed: Int64?
+    @State private var live: StreamingAudio?
+    @State private var firstAudioMs: Double?
+    @AppStorage("speech.playWhileGenerating") private var playWhileGenerating = true
     @State private var error: String?
     @State private var showingInspector = false
 
@@ -47,6 +50,7 @@ struct SpeechView: View {
     private var needsTranscript: Bool {
         activeMode?.referenceTranscript != "none"
     }
+    private var streams: Bool { demo.speechCapabilities?.streaming == true && playWhileGenerating }
     private var nativeControls: [SpeechParameter] {
         (demo.speechCapabilities?.controls ?? []) + (activeMode?.controls ?? [])
     }
@@ -79,6 +83,7 @@ struct SpeechView: View {
                     }
                 }
             }
+            .disabled(demo.busy)
             Section("Voice") {
                 Picker("Mode", selection: $mode) {
                     ForEach(demo.speechCapabilities?.modes ?? []) { option in
@@ -194,13 +199,19 @@ struct SpeechView: View {
                     }
                 }
             }
+            .disabled(demo.busy)
             Section("Sampling") {
                 TextField("Random seed (optional)", text: $seed)
                 DisclosureGroup("Advanced generation settings") {
                     ForEach(demo.speechParameters) { parameter in control(parameter, values: $values) }
                 }
             }
+            .disabled(demo.busy)
+            // Live playback stays usable while the model generates; everything else waits.
             Section {
+                if demo.speechCapabilities?.streaming == true {
+                    Toggle("Play while generating", isOn: $playWhileGenerating).disabled(demo.busy)
+                }
                 HStack {
                     Button(demo.busy ? "Generating…" : "Generate speech", systemImage: "waveform") {
                         Task { await generate() }
@@ -214,17 +225,21 @@ struct SpeechView: View {
                         Menu("Save audio…", systemImage: "square.and.arrow.down") {
                             Button("WAV (.wav)…") { save(result.wav, type: .wav) }
                             Button("M4A (.m4a)…") { save(result.wav, type: .mpeg4Audio) }
-                        }.menuStyle(.borderlessButton).fixedSize()
+                        }.menuStyle(.borderlessButton).fixedSize().disabled(demo.busy)
                     }
                 }
-                if let result {
+                if let live, !live.finished {
+                    StreamingPlayback(audio: live).padding(.vertical, 8)
+                } else if let result {
                     AudioPlayback(data: result.wav, spacebarEnabled: !recordFocused && !referencePlaybackFocused,
                                   suspended: recorder.active || demo.busy || referencePlaybackFocused) {
                         recordFocused = false
                         referencePlaybackFocused = false
                     }
-                        .disabled(recorder.active)
+                        .disabled(recorder.active || demo.busy)
                         .padding(.vertical, 8)
+                }
+                if let result {
                     Text("\(result.duration.formatted(.number.precision(.fractionLength(2)))) seconds · \(result.sampleRate) Hz")
                     if let elapsed, let aneMs {
                         if let cloneMs, cloneMs > 0 {
@@ -233,6 +248,10 @@ struct SpeechView: View {
                         }
                         Text("Speech generated in \((elapsed / 1000).formatted(.number.precision(.fractionLength(2)))) s · ANE calls \((aneMs / 1000).formatted(.number.precision(.fractionLength(2)))) s")
                             .font(.caption).foregroundStyle(.secondary)
+                        if let firstAudioMs {
+                            Text("First audio after \((firstAudioMs / 1000).formatted(.number.precision(.fractionLength(2)))) s")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     if let resultSeed {
                         Text("Seed \(String(resultSeed))").font(.caption).textSelection(.enabled)
@@ -244,7 +263,6 @@ struct SpeechView: View {
             }
         }
         .formStyle(.grouped)
-        .disabled(demo.busy)
         .frame(minWidth: 650, minHeight: 650)
         .navigationTitle(ModelTask.speech.title)
         .toolbar { ModelToolbar(demo: demo, task: .speech, showingInspector: $showingInspector, showModels: showModels) }
@@ -266,8 +284,10 @@ struct SpeechView: View {
         .onChange(of: referenceLocale) { transcript = ""; transcriptionCancelled = false }
         .onChange(of: transcript) { if !isBlank(transcript) { transcriptionError = nil } }
         .onChange(of: recordFocused) { if !recordFocused { recorder.disarm() } }
+        .onChange(of: recorder.active) { if recorder.active { live?.stop() } }
+        .onChange(of: live?.finished) { if live?.finished == true { live = nil } }
         .onChange(of: scenePhase) { if scenePhase != .active { recorder.stop() } }
-        .onDisappear { recorder.disarm(discard: true) }
+        .onDisappear { recorder.disarm(discard: true); live?.stop() }
         .onChange(of: demo.model) {
             values = [:]
             controls = [:]
@@ -280,6 +300,9 @@ struct SpeechView: View {
             cloneMs = nil
             aneMs = nil
             resultSeed = nil
+            live?.stop()
+            live = nil
+            firstAudioMs = nil
             error = nil
         }
         .onChange(of: demo.speechCapabilities?.modes.map(\.id), initial: true) {
@@ -298,6 +321,9 @@ struct SpeechView: View {
             cloneMs = nil
             aneMs = nil
             resultSeed = nil
+            live?.stop()
+            live = nil
+            firstAudioMs = nil
             error = nil
         }
     }
@@ -405,6 +431,12 @@ struct SpeechView: View {
         demo.busy = true
         error = nil
         defer { demo.busy = false }
+        // Streamed pieces play as they arrive; the complete reply then replaces them for replay and saving.
+        let audio = streams ? StreamingAudio() : nil
+        live?.stop()
+        live = audio
+        if audio != nil { result = nil }
+        defer { audio?.finish() }
         do {
             let item = SpeechItem(text: text, language: activeMode?.language != false && !isBlank(language) ? language : nil,
                                   instruct: activeMode?.instructionTitle != nil && !isBlank(instruction) ? instruction : nil,
@@ -412,8 +444,11 @@ struct SpeechView: View {
                                   refText: usesReference && prompt == nil && !isBlank(transcript) ? transcript : nil,
                                   voiceClonePrompt: usesReference ? prompt?.path : nil,
                                   mode: activeMode?.id, controls: controls.isEmpty ? nil : controls)
-            let reply = try await demo.runtime.speak(SpeechRequest(items: [item], parameters: values, seed: Int64(seed)))
+            let onAudio: (@Sendable (SpeechChunk) async -> Void)? = audio.map { audio in { @Sendable chunk in await audio.append(chunk) } }
+            let reply = try await demo.runtime.speak(SpeechRequest(items: [item], parameters: values, seed: Int64(seed)),
+                                                     onAudio: onAudio)
             result = reply.audio?.first
+            firstAudioMs = reply.firstAudioMs
             elapsed = reply.audioMs
             cloneMs = usesReference ? reply.cloneMs : nil
             aneMs = reply.aneMs

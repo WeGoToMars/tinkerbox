@@ -5,6 +5,8 @@ import json
 import math
 from pathlib import Path
 import secrets
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 
@@ -76,20 +78,31 @@ class Speech:
         if (not self.capacities or self.prefill_width != 128 or self.capacities != sorted(set(self.capacities))
                 or any(type(n) is not int or not self.prefill_width <= n <= 8192 for n in self.capacities)):
             raise ValueError('Invalid VoxCPM2 context capacities')
-        self.base_roles = [f'base-{i}' for i in range(self.config['lm_config']['num_hidden_layers'])]
-        expected = self.base_roles + ['residual', 'encoder', 'dit']
-        if [stage['role'] for stage in self.spec['assets']] != expected:
-            raise ValueError('VoxCPM2 bundle is missing transformer stages')
         self.stages = {stage['role']: stage for stage in self.spec['assets']}
+        self.base_roles = [stage['role'] for stage in self.spec['assets'] if stage['role'].startswith('base-')]
+        bounds = [0] + [self.stages[role]['end'] for role in self.base_roles]
+        if (list(self.stages) != self.base_roles + ['residual', 'encoder', 'dit']
+                or [self.stages[role]['start'] for role in self.base_roles] != bounds[:-1]
+                or bounds[-1] != self.config['lm_config']['num_hidden_layers']):
+            raise ValueError('VoxCPM2 bundle is missing transformer stages')
+        if (set(self.stages['encoder'].get('local_functions', {})) != {'main', 'batch'}
+                or set(self.stages['dit'].get('local_functions', {})) != {'pair'}
+                or 1 not in {row['steps'] for row in self.stages['dit'].get('sampler_functions', [])}):
+            raise ValueError('VoxCPM2 bundle predates fused local transformers; re-export the bundle')
+        self._masks = {}
         self.tokenizer = LlamaTokenizerFast.from_pretrained(weights)
         with safe_open(weights / 'model.safetensors', framework='pt') as tensors:
             self.cpu = {key: tensors.get_tensor(key).half() for key in tensors.keys()}
         self.codec = AudioVAE(AudioVAEConfig(**self.config['audio_vae_config'])).eval().requires_grad_(False)
         state = torch.load(weights / 'audiovae.pth', map_location='cpu', weights_only=True)
         self.codec.load_state_dict(state.get('state_dict', state), strict=True)
+        # Fold weight normalization once instead of recomputing every weight per call.
+        for module in self.codec.modules():
+            if hasattr(module, 'weight_g'):
+                torch.nn.utils.remove_weight_norm(module)
         self.sampling_rate = self.codec.out_sample_rate
         self.capabilities = dict(CAPABILITIES, parameters=PARAMETERS, sampling_rate=self.sampling_rate,
-                                 context_positions=max(self.capacities))
+                                 context_positions=max(self.capacities), streaming=True)
         cfg = self.config['lm_config']
         dim = cfg['kv_channels']
         inverse = 1 / (cfg['rope_theta'] ** (torch.arange(0, dim, 2).float()/dim))
@@ -154,14 +167,35 @@ class Speech:
                 parts.append(torch.from_numpy(output[:, :, 0].copy()).transpose(1, 2))
                 state['position'] += count
             return torch.cat(parts, dim=1), state
-        n = x.shape[1]
-        values = dict(hidden=x.transpose(1, 2).unsqueeze(2).numpy(),
-                      cos=self.cos[:n].T[None, None], sin=self.sin[:n].T[None, None],
-                      mask=np.zeros((1, 1, n, n), np.float16))
+        raise ValueError(f'{role} is an uncached stage')
+
+    def _rows(self, width, count, length):
+        """Attention inputs for `count` independent rows of `length` packed into `width`."""
+        key = width, count, length
+        if key not in self._masks:
+            # Each row attends only itself; padding attends itself and is discarded.
+            mask = np.full((width, width), -np.inf, np.float16)
+            for start in range(0, count*length, length):
+                mask[start:start+length, start:start+length] = 0
+            np.fill_diagonal(mask, 0)
+            positions = np.arange(width) % length
+            self._masks[key] = dict(cos=self.cos[positions].T[None, None], sin=self.sin[positions].T[None, None],
+                                    mask=mask[None, None])
+        return self._masks[key]
+
+    def _local(self, role, function, rows):
+        """Run independent equal-length sequences of an uncached stage in one call."""
+        spec = self.stages[role]['local_functions'][function]
+        count, length, hidden = rows.shape
+        width = spec['width']
+        if count*length > width:
+            raise ValueError(f'{role} rows exceed the {function} width')
+        values = dict(self._rows(width, count, length), hidden=np.zeros((1, hidden, 1, width), np.float16))
+        values['hidden'][0, :, 0, :count*length] = rows.reshape(-1, hidden).T.numpy()
         started = time.perf_counter()
-        output = host.run(stage['functions'][0], values)
+        output = self.hosts[role].run(spec['name'], values)
         self.ane_seconds += time.perf_counter()-started
-        return torch.from_numpy(output[:, :, 0].copy()).transpose(1, 2)
+        return torch.from_numpy(output[0, :, 0, :count*length].T.copy()).reshape(count, length, hidden)
 
     def _lm(self, role, x, states=None):
         roles = self.base_roles if role == 'base' else ['residual']
@@ -172,65 +206,111 @@ class Speech:
         return x, new
 
     def _encode(self, patches):
-        outputs = []
-        zero = None
-        for patch in patches:
-            empty = not bool(patch.any())
-            if empty and zero is not None:
-                outputs.append(zero)
-                continue
-            x = self._linear(patch, 'feat_encoder.in_proj').unsqueeze(0)
-            cls = self.cpu['feat_encoder.special_token'].reshape(1, 1, -1)
-            out = self._run('encoder', torch.cat((cls, x), dim=1))[:, :1]
-            out = self._linear(out, 'enc_to_lm_proj')
-            outputs.append(out)
-            if empty:
-                zero = out
-        return torch.cat(outputs, dim=1)
+        # Encode each distinct patch once; text positions all share the empty patch.
+        unique, index = torch.unique(patches.reshape(len(patches), -1), dim=0, return_inverse=True)
+        x = self._linear(unique.reshape(-1, *patches.shape[1:]), 'feat_encoder.in_proj')
+        cls = self.cpu['feat_encoder.special_token'].reshape(1, 1, -1).expand(len(x), 1, -1)
+        rows = torch.cat((cls, x), dim=1)
+        width = self.stages['encoder']['local_functions']['batch']['width'] // rows.shape[1]
+        function = 'main' if len(rows) == 1 else 'batch'
+        out = torch.cat([self._local('encoder', function, rows[i:i+width])[:, 0] for i in range(0, len(rows), width)])
+        return self._linear(out, 'enc_to_lm_proj')[index].unsqueeze(0)
 
     def _quantize(self, x):
         x = self._linear(x, 'fsq_layer.in_proj').tanh()
         x = (x*self.config['scalar_quantization_scale']).round()/self.config['scalar_quantization_scale']
         return self._linear(x, 'fsq_layer.out_proj')
 
-    def _velocity(self, x, mu, t, cond):
+    def _clock(self, t):
+        """Diffusion time embedding of a scalar time, with upstream's zero step-size embedding."""
         prefix = 'feat_decoder.estimator.'
         width = self.config['dit_config']['hidden_dim']
-        def time_embed(value, name):
+        def embed(value, name):
             inverse = torch.exp(torch.arange(width//2, dtype=torch.float16) * (-math.log(10000)/(width//2-1)))
             phase = 1000*value.reshape(1, 1)*inverse.reshape(1, -1)
             embedding = torch.cat((phase.sin(), phase.cos()), dim=-1)
             return self._linear(F.silu(self._linear(embedding, prefix+name+'.linear_1')), prefix+name+'.linear_2')
-        clock = time_embed(t, 'time_mlp') + time_embed(torch.zeros_like(t), 'delta_time_mlp')
-        hidden = torch.cat((mu.reshape(1, 2, width), clock.unsqueeze(1),
-                            self._linear(cond.transpose(1, 2), prefix+'cond_proj'),
-                            self._linear(x.transpose(1, 2), prefix+'in_proj')), dim=1)
-        out = self._run('dit', hidden)[:, -4:]
+        return embed(t, 'time_mlp') + embed(torch.zeros_like(t), 'delta_time_mlp')
+
+    def _estimate(self, x, mu, clock, cond):
+        """Velocities of up to two independent rows, evaluated in one packed call."""
+        prefix = 'feat_decoder.estimator.'
+        width = self.config['dit_config']['hidden_dim']
+        rows = torch.cat((mu.reshape(-1, 2, width), clock.reshape(-1, 1, width),
+                          self._linear(cond.transpose(1, 2), prefix+'cond_proj'),
+                          self._linear(x.transpose(1, 2), prefix+'in_proj')), dim=1)
+        out = self._local('dit', 'pair', rows)[:, -4:]
         return self._linear(out, prefix+'out_proj').transpose(1, 2).contiguous()
 
-    def _sample(self, mu, cond, options, generator):
-        x = torch.randn((1, 64, 4), dtype=torch.float16, generator=generator)
+    def _schedule(self, options):
+        """Fused Euler calls shared by every patch: (function, time embeddings, step sizes).
+
+        Upstream's initial zero-velocity steps leave the sample unchanged and are skipped."""
         span = torch.linspace(1, 0, options['num_step']+1, dtype=torch.float16)
         span = span + (torch.cos(torch.pi/2*span)-1+span)
         t, dt = span[0], span[0]-span[1]
         zero_steps = max(1, int(len(span)*0.04))
+        steps = []
         for step in range(1, len(span)):
-            if step <= zero_steps:
-                velocity = torch.zeros_like(x)
-            else:
-                positive = self._velocity(x, mu, t, cond)
-                negative = self._velocity(x, torch.zeros_like(mu), t, cond)
-                flat, null = positive.reshape(1, -1), negative.reshape(1, -1)
-                scale = (flat*null).sum(1, keepdim=True)/(null.square().sum(1, keepdim=True)+1e-8)
-                negative = negative*scale.reshape(1, 1, 1)
-                velocity = negative + options['guidance_scale']*(positive-negative)
-            x = x-dt*velocity
+            if step > zero_steps:
+                steps.append((dt, self._clock(t)))
             t = t-dt
             if step < len(span)-1:
                 dt = t-span[step+1]
-        return x.transpose(1, 2).contiguous()
+        functions = sorted(self.stages['dit']['sampler_functions'], key=lambda row: -row['steps'])
+        calls = []
+        while steps:
+            row = next(row for row in functions if row['steps'] <= len(steps))
+            part, steps = steps[:row['steps']], steps[row['steps']:]
+            calls.append((row['name'], torch.cat([clock for _, clock in part]).T[None, :, None].numpy(),
+                          torch.stack([dt for dt, _ in part]).reshape(1, 1, 1, -1).numpy()))
+        return calls
 
-    def _utterance(self, text, voice, options, generator):
+    def _sample(self, mu, cond, options, schedule, generator):
+        x = torch.randn((1, 64, 4), dtype=torch.float16, generator=generator)
+        width = self.config['dit_config']['hidden_dim']
+        # Guided then unguided rows of [mu, time, condition, noisy frames]; they differ only in mu.
+        mu, condition = mu.reshape(2, width), self._linear(cond.transpose(1, 2), 'feat_decoder.estimator.cond_proj')[0]
+        context = torch.cat((mu, condition, torch.zeros_like(mu), condition)).T[None, :, None].numpy()
+        values = dict(self._rows(self.stages['dit']['local_functions']['pair']['width'], 2, 11), context=context,
+                      guidance=np.full((1, 1, 1, 1), options['guidance_scale'], np.float16), x=x[:, :, None].numpy())
+        for function, clocks, dts in schedule:
+            started = time.perf_counter()
+            values['x'] = self.hosts['dit'].run(function, dict(values, clocks=clocks, dts=dts))
+            self.ane_seconds += time.perf_counter()-started
+        return torch.from_numpy(values['x'][:, :, 0].copy()).transpose(1, 2).contiguous()
+
+    def _stream(self, text, voice, options, generator):
+        """Yield the utterance's waveform in order as it is decoded; the pieces join into the whole."""
+        # Upstream's stateful causal VAE decodes 16-frame (four-patch) chunks on
+        # a worker thread, overlapped with generation. Continuation context is
+        # decoded for continuity and then dropped.
+        with self.codec.streaming_decode() as decoder, ThreadPoolExecutor(1) as worker:
+            chunks, pending, skip = deque(), torch.zeros(1, 64, 0), 0
+            def decode(chunk):
+                with torch.inference_mode():
+                    return decoder.decode_chunk(chunk)[0, 0]
+            def decoded(wait):
+                nonlocal skip
+                while chunks and (wait or chunks[0].done()):
+                    piece = chunks.popleft().result()
+                    piece, skip = piece[skip:], max(0, skip-len(piece))
+                    if not torch.isfinite(piece).all():
+                        raise RuntimeError('VoxCPM2 generated non-finite audio')
+                    if len(piece):
+                        yield piece.numpy()
+            for patches, audible, final in self._generate(text, voice, options, generator):
+                if not audible:
+                    skip += patches.shape[1]*4*self.codec.decode_chunk_size
+                pending = torch.cat((pending, patches.reshape(1, -1, 64).transpose(1, 2).float()), dim=-1)
+                while pending.shape[-1] >= 16 or (final and pending.shape[-1]):
+                    chunks.append(worker.submit(decode, pending[..., :16]))
+                    pending = pending[..., 16:]
+                yield from decoded(wait=False)
+            yield from decoded(wait=True)
+
+    def _generate(self, text, voice, options, generator):
+        """Yield (patches, audible, final): any continuation context, then each generated patch."""
         ids, features, audio = build_inputs(self.tokenizer, text, voice, context_positions=max(self.capacities))
         available = max(self.capacities)-len(ids)
         budget = min(options['max_decode_steps'], available)
@@ -246,15 +326,16 @@ class Speech:
         residual, residual_states = self._lm('residual', residual_input)
         hidden, residual = base[:, -1:], residual[:, -1:]
         previous = features[-1:].half().transpose(1, 2)
-        context = features[audio][-3:].unsqueeze(0).half() if bool(audio[-1]) else None
-        patches = []
+        if bool(audio[-1]):
+            yield features[audio][-3:].unsqueeze(0).half(), False, False
+        schedule = self._schedule(options)
         for step in range(budget):
             mu = torch.cat((self._linear(hidden, 'lm_to_dit_proj'), self._linear(residual, 'res_to_dit_proj')), dim=-1).squeeze(1)
-            patch = self._sample(mu, previous, options, generator)
-            patches.append(patch)
+            patch = self._sample(mu, previous, options, schedule, generator)
             stop = self._linear(F.silu(self._linear(hidden, 'stop_proj')), 'stop_head')
             if step > options['min_decode_steps'] and stop[0, 0].argmax().item() == 1:
-                break
+                yield patch, True, True
+                return
             if step+1 == budget:
                 if available <= options['max_decode_steps']:
                     raise ValueError(f'VoxCPM2 ran out of audio context after {budget*0.16:.1f} seconds: '
@@ -263,31 +344,35 @@ class Speech:
                                      'or use a bundle with more context.')
                 raise ValueError(f'VoxCPM2 reached Maximum audio patches ({budget}, {budget*0.16:.1f} seconds) '
                                  'before finishing. Increase that generation setting.')
+            yield patch, True, False
             current = self._encode(patch)
             hidden, base_states = self._lm('base', current, base_states)
             hidden = self._quantize(hidden)
             residual_input = self._linear(torch.cat((hidden, current), dim=-1), 'fusion_concat_proj')
             residual, residual_states = self._lm('residual', residual_input, residual_states)
             previous = patch.transpose(1, 2)
-        generated = torch.stack(patches, dim=1)
-        if context is not None:
-            generated = torch.cat((context, generated), dim=1)
-        latent = generated.reshape(1, -1, 64).transpose(1, 2).float()
-        # Bound the VAE's working activations for long clips using upstream's
-        # stateful causal decoder. The API still returns one complete waveform.
-        with self.codec.streaming_decode() as decoder:
-            waveform = torch.cat([decoder.decode_chunk(chunk)[0, 0]
-                                  for chunk in latent.split(64, dim=-1)])
-        if context is not None:
-            waveform = waveform[context.shape[1]*4*self.codec.decode_chunk_size:]
-        if not torch.isfinite(waveform).all():
-            raise RuntimeError('VoxCPM2 generated non-finite audio')
-        return waveform.numpy()
 
     @torch.inference_mode()
-    def generate(self, text, *, language=None, instruct=None, mode=None, controls=None,
+    def generate(self, text, **arguments):
+        with self._lock:
+            utterances, options, generator = self._prepare(text, **arguments)
+            self.ane_seconds = 0
+            return [np.concatenate(list(self._stream(item, voice, options, generator))) for item, voice in utterances]
+
+    @torch.inference_mode()
+    def stream(self, text, **arguments):
+        """Yield one text's waveform in order while it is generated; the pieces join into `generate`'s result."""
+        if not isinstance(text, str):
+            raise ValueError('Stream one text at a time.')
+        with self._lock:
+            utterances, options, generator = self._prepare(text, **arguments)
+            self.ane_seconds = 0
+            yield from self._stream(*utterances[0], options, generator)
+
+    def _prepare(self, text, *, language=None, instruct=None, mode=None, controls=None,
                  voice_clone_prompt=None, ref_audio=None, ref_text=None, seed=None,
                  duration=None, speed=None, **parameters):
+        """Validate a request into each text's (prompt, voice), the options and the shared noise generator."""
         if duration is not None or speed is not None:
             raise ValueError('VoxCPM2 supports descriptive delivery instructions, not numeric duration/speed.')
         options = {p['key']: p['default'] for p in PARAMETERS}
@@ -308,30 +393,28 @@ class Speech:
         modes, instructions, fields, voices, languages = [batch(v, k) for v, k in (
             (mode, 'mode'), (instruct, 'instruct'), (controls, 'controls'),
             (voice_clone_prompt, 'voice_clone_prompt'), (language, 'language'))]
-        with self._lock:
-            if ref_audio is not None:
-                if voice_clone_prompt is not None:
-                    raise ValueError('Choose reference audio or a saved voice prompt.')
-                voices = [self.create_voice_clone_prompt(ref_audio, ref_text,
-                           options['preprocess_prompt'], mode=m) for m in modes]
-            self.ane_seconds = 0
-            output = []
-            generator = torch.Generator().manual_seed(seed if seed is not None else secrets.randbits(63))
-            for item, instruction, selected, fields, voice, lang in zip(texts, instructions, modes, fields, voices, languages):
-                if lang is not None:
-                    raise ValueError('VoxCPM2 detects language from the text; omit language.')
-                if voice is not None and not isinstance(voice, VoiceClonePrompt):
-                    raise ValueError('Use a VoxCPM2 saved voice prompt.')
-                if selected is None and voice is not None:
-                    selected = voice.mode
-                selected, _ = speech_controls(self.capabilities, selected, instruction, fields, voice is not None)
-                if voice is not None and selected['id'] in ('clone', 'continuation', 'clone_continuation') and voice.mode != selected['id']:
-                    raise ValueError('Saved voice conditioning differs from the selected mode; prepare the voice in that mode.')
-                item = ' '.join(item.split())
-                if instruction:
-                    item = f'({instruction.strip()})'+item
-                output.append(self._utterance(item, voice, options, generator))
-            return output
+        if ref_audio is not None:
+            if voice_clone_prompt is not None:
+                raise ValueError('Choose reference audio or a saved voice prompt.')
+            voices = [self.create_voice_clone_prompt(ref_audio, ref_text,
+                       options['preprocess_prompt'], mode=m) for m in modes]
+        utterances = []
+        for item, instruction, selected, fields, voice, lang in zip(texts, instructions, modes, fields, voices, languages):
+            if lang is not None:
+                raise ValueError('VoxCPM2 detects language from the text; omit language.')
+            if voice is not None and not isinstance(voice, VoiceClonePrompt):
+                raise ValueError('Use a VoxCPM2 saved voice prompt.')
+            if selected is None and voice is not None:
+                selected = voice.mode
+            selected, _ = speech_controls(self.capabilities, selected, instruction, fields, voice is not None)
+            if voice is not None and selected['id'] in ('clone', 'continuation', 'clone_continuation') and voice.mode != selected['id']:
+                raise ValueError('Saved voice conditioning differs from the selected mode; prepare the voice in that mode.')
+            item = ' '.join(item.split())
+            if instruction:
+                item = f'({instruction.strip()})'+item
+            utterances.append((item, voice))
+        generator = torch.Generator().manual_seed(seed if seed is not None else secrets.randbits(63))
+        return utterances, options, generator
 
     @torch.inference_mode()
     def create_voice_clone_prompt(self, ref_audio, ref_text=None, preprocess_prompt=False, *, mode=None):

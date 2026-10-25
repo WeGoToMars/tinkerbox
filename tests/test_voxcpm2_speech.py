@@ -66,3 +66,29 @@ def test_saved_reference_and_continuation_modes(speech, tmp_path):
         if mode != 'clone':
             with pytest.raises(ValueError, match='conditioning'):
                 speech.generate('Hello.', voice_clone_prompt=prompt, mode='clone', seed=42)
+
+
+def test_streamed_speech_joins_into_the_complete_reply(speech, tmp_path):
+    import soundfile as sf
+    from tinkerbox_ane.speech import synthesize
+
+    text = 'Streaming lets the first words play while the rest is still being generated.'
+    pieces = list(speech.stream(text, seed=7))
+    assert len(pieces) > 1 and np.array_equal(np.concatenate(pieces), speech.generate(text, seed=7)[0])
+    reference = tmp_path/'reference.wav'
+    sf.write(reference, speech.generate('Hello! Welcome to Tinkerbox.', seed=42)[0], speech.sampling_rate)
+    voice = speech.create_voice_clone_prompt(str(reference), 'Hello! Welcome to Tinkerbox.', mode='continuation')
+    continued = speech.generate('The next sentence follows naturally.', voice_clone_prompt=voice, seed=23)[0]
+    assert np.array_equal(np.concatenate(list(speech.stream(
+        'The next sentence follows naturally.', voice_clone_prompt=voice, seed=23))), continued)
+
+    emitted = []
+    request = dict(items=[dict(text=text, mode='auto')], seed=7)
+    reply = synthesize(speech, {}, dict(request, stream=True), emit=emitted.append)
+    assert len(emitted) > 1 and all(event['chunk']['sampleRate'] == 48000 for event in emitted)
+    joined = np.frombuffer(b''.join(base64.b64decode(event['chunk']['pcm']) for event in emitted), '<i2')
+    assert np.array_equal(joined, sf.read(io.BytesIO(base64.b64decode(reply['audio'][0]['wav'])), dtype='int16')[0])
+    assert reply['audio'] == synthesize(speech, {}, request)['audio'] and 0 < reply['firstAudioMs'] < reply['audioMs']
+    for invalid in (dict(request, stream=True, items=request['items']*2), dict(request, stream='yes')):
+        with pytest.raises(ValueError, match='Streaming'):
+            synthesize(speech, {}, invalid, emit=emitted.append)

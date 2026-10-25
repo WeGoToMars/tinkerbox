@@ -164,7 +164,27 @@
       "license": "Apache-2.0",
       "min_version": "2.2.0",
       "architectures": [
-        "h17s"
+        "h18g",
+        "h17d",
+        "h17c",
+        "h17s",
+        "h17g",
+        "h16c",
+        "h16s",
+        "h16g",
+        "h15d",
+        "h15c",
+        "h15m",
+        "h15s",
+        "h15g",
+        "h14d",
+        "h14c",
+        "h14s",
+        "h14g",
+        "h13d",
+        "h13c",
+        "h13s",
+        "h13g"
       ]
     }
   ]

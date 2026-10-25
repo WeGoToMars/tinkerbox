@@ -175,6 +175,8 @@ struct Reply: Decodable, Sendable {
     let audioMs: Double?
     let voicePrompt: Data?
     let seed: Int64?
+    let chunk: SpeechChunk?  // streamed speech, before its complete reply
+    let firstAudioMs: Double?
 }
 
 enum SpeechValue: Codable, Sendable, Equatable {
@@ -240,6 +242,7 @@ struct SpeechMode: Decodable, Identifiable, Sendable {
 struct SpeechCapabilities: Decodable, Sendable {
     let modes: [SpeechMode]
     let controls: [SpeechParameter]
+    let streaming: Bool?  // audio can play while one text is generated
 }
 
 struct SpeechItem: Encodable, Sendable {
@@ -263,6 +266,7 @@ struct SpeechRequest: Encodable, Sendable {
     var items: [SpeechItem]
     var parameters: [String: SpeechValue] = [:]
     var seed: Int64?
+    var stream: Bool?  // set by Runtime when the caller plays pieces as they arrive
 }
 
 struct SpeechVoiceRequest: Encodable, Sendable {
@@ -280,6 +284,12 @@ struct SpeechAudio: Decodable, Sendable {
     let wav: Data
     let sampleRate: Int
     let duration: Double
+}
+
+// One streamed piece: mono little-endian PCM16; in order, the pieces join into the reply's WAV.
+struct SpeechChunk: Decodable, Sendable {
+    let pcm: Data
+    let sampleRate: Int
 }
 
 @MainActor @Observable final class RuntimeState {
@@ -499,13 +509,16 @@ actor Runtime {
         return counts
     }
 
-    func speak(_ request: SpeechRequest) async throws -> Reply {
+    // With `onAudio`, one text's pieces arrive in order while it is generated, then the complete reply.
+    func speak(_ request: SpeechRequest, onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil) async throws -> Reply {
         guard !request.items.isEmpty, request.items.allSatisfy({ !isBlank($0.text) }) else {
             throw DecisionError.invalid("Enter text to speak.")
         }
+        var request = request
+        request.stream = onAudio == nil ? nil : true
         // Reference preparation belongs to the backend: some modes need a
         // transcript while others use only the audio.
-        let reply = try await speechReply(request)
+        let reply = try await speechReply(request, onAudio: onAudio)
         guard reply.audio?.count == request.items.count else { throw DecisionError.invalidReply }
         return reply
     }
@@ -516,7 +529,8 @@ actor Runtime {
         return prompt
     }
 
-    private func speechReply<R: Encodable>(_ request: R) async throws -> Reply {
+    private func speechReply<R: Encodable>(_ request: R,
+                                           onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil) async throws -> Reply {
         await acquire()
         defer { release() }
         try Task.checkCancellation()
@@ -527,7 +541,12 @@ actor Runtime {
             await disconnect()
             throw Self.stopped()
         }
-        return try await readReply()
+        while true {
+            let reply = try await readReply()
+            guard let chunk = reply.chunk else { return reply }
+            // Keep reading after a caller stops listening: the complete reply ends the exchange.
+            await onAudio?(chunk)
+        }
     }
 
     // Sends one request to the decision model, with its saved settings, and reads its reply.

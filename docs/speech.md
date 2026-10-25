@@ -31,6 +31,18 @@ lists. Omitted mode selects automatic, design or cloning from the supplied
 instruction/reference. Explicit mode selects exactly the advertised behavior.
 Unsupported controls and incompatible combinations return errors.
 
+A model whose capabilities include `streaming: True` also offers `stream`, which
+takes one text and the same arguments and yields its waveform in order while it
+is generated. The pieces join into exactly what `generate` returns for the same
+request and seed. An error after the first piece, such as running out of
+context, ends the stream by raising it.
+
+```python
+with tinkerbox_ane.load("voxcpm2") as model:
+    for piece in model.stream("Hello! Welcome to Tinkerbox.", seed=42):
+        play(piece)  # float32 at model.sampling_rate
+```
+
 | Capability | OmniVoice | VoxCPM2 |
 | --- | --- | --- |
 | Modes | Automatic, voice design, cloning | Automatic, design, cloning, continuation, combined cloning/continuation |
@@ -40,6 +52,7 @@ Unsupported controls and incompatible combinations return errors.
 | Reference transcript | Used for reference cloning; transcribed if absent | Not used for reference-only cloning; required for continuation |
 | Language | Explicit selection or automatic | Detected from text |
 | Audio | 24 kHz | 48 kHz |
+| Streaming | Unsupported: every frame is refined together until the last step | One text, in 0.64-second pieces |
 
 For example, OmniVoice accepts `controls={"duration": 3.0}` or
 `controls={"speed": 1.25}`. Its existing direct `duration` and `speed` arguments
@@ -70,6 +83,9 @@ generation settings:
 ```
 
 Replies preserve item order and contain PCM WAV data, sample rate, duration,
-request seed and timing. Clone preparation is timed separately. Saved voice
+request seed and timing. With `"stream": true`, a request for one text to a
+streaming model first sends each piece as `{"chunk": {"pcm": ..., "sampleRate": ...}}`
+(base64 mono little-endian PCM16; joined in order, the WAV's samples), then the
+complete reply, which adds `firstAudioMs`. Clone preparation is timed separately. Saved voice
 files belong to their originating model. Pynini normalization is not part of
 the shared task API or app.

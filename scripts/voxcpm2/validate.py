@@ -64,8 +64,8 @@ with Speech(args.asset) as model, torch.inference_mode():
             if 'arguments' not in row:
                 continue
             x, mu, clock, cond, _ = row['arguments']
-            actual = torch.cat([model._velocity(x[i:i+1], mu[i:i+1], clock[i], cond[i:i+1])
-                                for i in range(len(x))])
+            actual = torch.cat([model._estimate(x[i:i+2], mu[i:i+2], torch.cat([model._clock(t) for t in clock[i:i+2]]),
+                                                cond[i:i+2]) for i in range(0, len(x), 2)])
             velocities.append(metrics(actual, row['output']))
         if velocities:
             result['numerical']['diffusion_velocity'] = dict(
@@ -80,7 +80,7 @@ with Speech(args.asset) as model, torch.inference_mode():
                         model._linear(residual, 'res_to_dit_proj')), dim=-1).squeeze(1)
         cond = trace['feat_encoder'][0]['input'][:, -1].transpose(1, 2)
         options = dict(num_step=10, guidance_scale=2)
-        patch = model._sample(mu, cond, options, torch.Generator().manual_seed(saved['seed']))
+        patch = model._sample(mu, cond, options, model._schedule(options), torch.Generator().manual_seed(saved['seed']))
         result['numerical']['first_diffusion_patch'] = metrics(patch.transpose(1, 2), trace['patches'][0])
         report['cases'][name] = result
         (args.out/'report.json').write_text(json.dumps(report, indent=2)+'\n')

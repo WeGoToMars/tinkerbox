@@ -24,6 +24,20 @@ def WNConvTranspose1d(*args, **kwargs):
     return weight_norm(nn.ConvTranspose1d(*args, **kwargs))
 
 
+def conv1d(module, x):
+    """Unpadded convolution; depthwise layers sum their taps, which avoids PyTorch's
+    per-channel CPU loop for grouped convolutions."""
+    channels, taps = module.in_channels, module.kernel_size[0]
+    if not (module.groups == channels == module.out_channels and module.stride == (1,) and module.padding == (0,)):
+        return nn.Conv1d.forward(module, x)
+    dilation, length = module.dilation[0], x.shape[-1] - module.dilation[0] * (taps - 1)
+    weight = module.weight.reshape(1, channels, taps)
+    y = x[..., :length] * weight[..., :1]
+    for tap in range(1, taps):
+        y = y + x[..., tap * dilation: tap * dilation + length] * weight[..., tap:tap + 1]
+    return y if module.bias is None else y + module.bias.reshape(1, channels, 1)
+
+
 class CausalConv1d(nn.Conv1d):
     def __init__(self, *args, padding: int = 0, output_padding: int = 0, **kwargs):
         super().__init__(*args, **kwargs)
@@ -32,7 +46,7 @@ class CausalConv1d(nn.Conv1d):
 
     def forward(self, x):
         x_pad = F.pad(x, (self.__padding * 2 - self.__output_padding, 0))
-        return super().forward(x_pad)
+        return conv1d(self, x_pad)
 
 
 class CausalTransposeConv1d(nn.ConvTranspose1d):
@@ -604,7 +618,7 @@ class StreamingVAEDecoder:
             else:
                 prev = states.get(_k, torch.zeros(x.shape[0], x.shape[1], _p, device=x.device, dtype=x.dtype))
                 states[_k] = torch.cat([prev, x], dim=-1)[:, :, -_p:].detach()
-            return nn.Conv1d.forward(_m, x_pad)
+            return conv1d(_m, x_pad)
 
         mod.forward = fwd
         self._originals.append((mod, orig))

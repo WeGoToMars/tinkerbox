@@ -56,14 +56,14 @@ struct AudioPlayback: View {
                 .frame(height: 88)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Playback position")
-                .accessibilityValue("\(stamp(time)) of \(stamp(duration))")
+                .accessibilityValue("\(playbackStamp(time)) of \(playbackStamp(duration))")
                 .accessibilityAdjustableAction { direction in
                     seek((player?.currentTime ?? position) + (direction == .increment ? 5 : -5))
                 }
                 HStack {
-                    Text(stamp(time))
+                    Text(playbackStamp(time))
                     Spacer()
-                    Text("−" + stamp(max(0, duration - time)))
+                    Text("−" + playbackStamp(max(0, duration - time)))
                 }
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 HStack(spacing: 32) {
@@ -133,11 +133,6 @@ struct AudioPlayback: View {
         if position >= duration { player?.pause(); playing = false }
     }
 
-    private func stamp(_ time: Double) -> String {
-        let seconds = Int(max(0, time))
-        return String(format: "%d:%02d", seconds / 60, seconds % 60)
-    }
-
     nonisolated private static func envelope(_ data: Data, fileExtension: String) throws -> [Float] {
         let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + "." + fileExtension)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -158,4 +153,121 @@ struct AudioPlayback: View {
         }
         return peaks
     }
+}
+
+// Speech that plays while it is generated: each piece is queued behind the last as it arrives.
+@MainActor @Observable final class StreamingAudio {
+    private(set) var peaks: [Float] = []
+    private(set) var frames = 0  // received
+    private(set) var complete = false  // no more pieces will arrive
+    private(set) var stopped = false
+    private(set) var paused = false
+    private(set) var error: String?
+    private var unplayed = 0  // queued pieces not yet heard
+    @ObservationIgnored private var sampleRate = 0.0
+    @ObservationIgnored private let engine = AVAudioEngine()
+    @ObservationIgnored private let node = AVAudioPlayerNode()
+
+    var duration: Double { sampleRate > 0 ? Double(frames) / sampleRate : 0 }
+    var finished: Bool { stopped || (complete && unplayed == 0) }
+    var position: Double {
+        guard let now = node.lastRenderTime, let time = node.playerTime(forNodeTime: now), sampleRate > 0 else { return 0 }
+        return min(duration, max(0, Double(time.sampleTime) / sampleRate))
+    }
+
+    func append(_ chunk: SpeechChunk) {
+        guard !stopped else { return }
+        let count = chunk.pcm.count / 2
+        if sampleRate == 0 {
+            guard let format = AVAudioFormat(standardFormatWithSampleRate: Double(chunk.sampleRate), channels: 1) else {
+                return fail("Unsupported speech sample rate.")
+            }
+            sampleRate = format.sampleRate
+            engine.attach(node)
+            do {
+                try engine.connectNode(node, to: engine.mainMixerNode, format: format)
+                try engine.start()
+                try node.playAudio()
+            } catch { return fail(error.localizedDescription) }
+        }
+        guard Double(chunk.sampleRate) == sampleRate, count > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: node.outputFormat(forBus: 0), frameCapacity: AVAudioFrameCount(count)),
+              let samples = buffer.floatChannelData?[0] else { return fail("The model returned unplayable audio.") }
+        buffer.frameLength = AVAudioFrameCount(count)
+        chunk.pcm.withUnsafeBytes { raw in
+            for index in 0..<count {
+                samples[index] = Float(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: 2 * index, as: Int16.self))) / 32768
+            }
+        }
+        // One peak per 10 ms, matching the finished clip's waveform closely enough while it grows.
+        let window = max(1, Int(sampleRate / 100))
+        for start in stride(from: 0, to: count, by: window) {
+            peaks.append((start..<min(count, start + window)).reduce(0) { max($0, abs(samples[$1])) })
+        }
+        frames += count
+        unplayed += 1
+        node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { @MainActor in self?.unplayed -= 1 }
+        }
+    }
+
+    func finish() { complete = true }
+
+    func toggle() {
+        guard !stopped else { return }
+        if paused {
+            do { try node.playAudio() } catch { return fail(error.localizedDescription) }
+        } else {
+            node.pause()
+        }
+        paused.toggle()
+    }
+
+    func stop() {
+        guard !stopped else { return }
+        stopped = true
+        node.stop()
+        engine.stop()
+    }
+
+    private func fail(_ message: String) {
+        error = message
+        stop()
+    }
+}
+
+struct StreamingPlayback: View {
+    let audio: StreamingAudio
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1 / 30, paused: audio.finished || audio.paused)) { _ in
+            let time = audio.position
+            VStack(spacing: 12) {
+                AudioWaveform(peaks: audio.peaks, progress: audio.duration > 0 ? time / audio.duration : 0)
+                    .frame(height: 88)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Playback position")
+                    .accessibilityValue("\(playbackStamp(time)) of \(playbackStamp(audio.duration))")
+                HStack {
+                    Text(playbackStamp(time))
+                    Spacer()
+                    Text(audio.complete ? "−" + playbackStamp(audio.duration - time) :
+                         "Generating · \(playbackStamp(audio.duration)) ready")
+                }
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                HStack(spacing: 32) {
+                    Button(audio.paused ? "Play" : "Pause", systemImage: audio.paused ? "play.fill" : "pause.fill") { audio.toggle() }
+                        .font(.system(size: 30)).frame(width: 44, height: 44)
+                    Button("Stop", systemImage: "stop.fill") { audio.stop() }
+                }
+                .font(.title2).labelStyle(.iconOnly).buttonStyle(.plain)
+                if let error = audio.error { Text(error).font(.caption).foregroundStyle(.red) }
+            }
+        }
+    }
+}
+
+private func playbackStamp(_ time: Double) -> String {
+    let seconds = Int(max(0, time))
+    return String(format: "%d:%02d", seconds / 60, seconds % 60)
 }

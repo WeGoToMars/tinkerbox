@@ -26,6 +26,8 @@ speech = ["omnivoice==0.2.1", "torchaudio==2.9.0", "pydantic>=2,<3"]
 [dependency-groups]
 dev = [
     "accelerate>=1.15.0",
+    "coreai-opt[coreai]==0.3.0",
+    "torchao==0.15.0",
     "coreai-torch==0.4.3",
     "pytest==9.1.1",
 ]

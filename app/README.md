@@ -62,7 +62,10 @@ Each question is configured as a card. With multiple questions, models supportin
 OmniVoice and VoxCPM2 support automatic voice, voice design, reference-audio cloning and saved
 voice prompts. The Text to Speech page provides generation controls, playback and
 WAV/M4A export, and displays the seed for replay. Voice preparation and speech
-generation times are shown separately. Select a verified local bundle in
+generation times are shown separately. With models that stream, such as VoxCPM2,
+**Play while generating** (on by default) starts playback as the first audio
+arrives and shows the time to first audio; the finished clip then replaces the live
+player for replay and export. Select a verified local bundle in
 the page toolbar or set `TINKERBOX_ASSET` before launch. Bundles are not distributed
 yet; see local setup and validation for [OmniVoice](../docs/models/omnivoice.md)
 and [VoxCPM2](../docs/models/voxcpm2.md).

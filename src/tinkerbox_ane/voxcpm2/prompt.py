@@ -1,14 +1,21 @@
 """VoxCPM2's text and isolated-reference/continuation sequence contract."""
 
+from functools import lru_cache
+
 import torch
+
+
+@lru_cache(maxsize=4)
+def multichar_chinese(tokenizer):
+    return frozenset(token for token in tokenizer.get_vocab() if len(token) >= 2
+                     and all('\u4e00' <= c <= '\u9fff' for c in token))
 
 
 def tokenize(tokenizer, text):
     # Match upstream mask_multichar_chinese_tokens, including its vocabulary
     # membership check, rather than enabling checkpoint-supplied Python code.
     words = tokenizer.tokenize(text)
-    split = {token for token in tokenizer.get_vocab() if len(token) >= 2
-             and all('\u4e00' <= c <= '\u9fff' for c in token)}
+    split = multichar_chinese(tokenizer)
     tokens = []
     for token in words:
         clean = token.replace('▁', '')
