@@ -293,8 +293,8 @@ roughly 19.6 ms in the main model, 15.4 ms in one fused diffusion call, 3.8 ms
 in the residual model and 2.2 ms in the encoder, all near ANE weight bandwidth.
 The 16-clip set differs from upstream only in transcribed numerals and
 homophones, identically for both bundles except one homophone. Public API and
-actual Swift worker checks passed for both bundles; identities are in
-local validation reports under `artifacts/voxcpm2/`.
+actual Swift worker checks passed for both bundles. The commands above write
+local validation reports under `artifacts/voxcpm2/`; generated JSON is not committed.
 
 An intentionally repeated 184-second reference in combined mode did not stop
 before its remaining 4,877-patch context budget in the earlier per-layer bundle.

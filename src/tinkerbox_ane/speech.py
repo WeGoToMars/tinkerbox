@@ -115,43 +115,42 @@ def synthesize(model, entry, request, emit=None):
         seed = secrets.randbits(63)
     started = time.perf_counter()
     clone_seconds, first_audio = 0.0, None
-    if stream or any(item.get('ref_audio') or item.get('voice_clone_prompt') for item in items):
-        # Upstream cannot mix cloned and automatic voices in one batch. Preserve
-        # each item's voice and ordering through independent complete requests.
-        audio, ane_seconds = [], 0.0
-        for index, item in enumerate(items):
-            arguments = {key: item[key] for key in ('language', 'instruct', 'duration', 'speed', 'mode', 'controls')
-                         if item.get(key) is not None}
+    arguments = {key: [item.get(key) for item in items]
+                 for key in ('language', 'instruct', 'duration', 'speed', 'mode', 'controls')
+                 if any(item.get(key) is not None for item in items)}
+    prompts = []
+    for item in items:
+        prompt = None
+        if item.get('voice_clone_prompt') and item.get('ref_audio'):
+            raise ValueError('Choose reference audio or a saved voice, not both.')
+        if item.get('voice_clone_prompt') or item.get('ref_audio'):
             preparing = time.perf_counter()
             if path := item.get('voice_clone_prompt'):
-                arguments['voice_clone_prompt'] = model.load_voice_clone_prompt(path)
+                prompt = model.load_voice_clone_prompt(path)
             elif path := item.get('ref_audio'):
                 preparation = {'mode': item['mode']} if item.get('mode') else {}
-                arguments['voice_clone_prompt'] = model.create_voice_clone_prompt(
+                prompt = model.create_voice_clone_prompt(
                     ref_audio=path, ref_text=item.get('ref_text') or None,
                     preprocess_prompt=options.get('preprocess_prompt', preprocess_default), **preparation)
             clone_seconds += time.perf_counter() - preparing
-            if stream:
-                pieces = []
-                for piece in model.stream(text=item['text'], seed=seed + index, **arguments, **options):
-                    if first_audio is None:
-                        first_audio = time.perf_counter() - started - clone_seconds
-                    pieces.append(piece)
-                    output = io.BytesIO()
-                    sf.write(output, piece, model.sampling_rate, format='RAW', subtype='PCM_16')
-                    emit(dict(chunk=dict(pcm=base64.b64encode(output.getvalue()).decode(),
-                                         sampleRate=model.sampling_rate)))
-                audio.append(np.concatenate(pieces))
-            else:
-                audio.extend(model.generate(text=item['text'], seed=seed + index,
-                                            **arguments, **options))
-            ane_seconds += model.ane_seconds
+        prompts.append(prompt)
+    if any(prompt is not None for prompt in prompts):
+        arguments['voice_clone_prompt'] = prompts
+    if stream:
+        arguments = {key: values[0] for key, values in arguments.items()}
+        pieces = []
+        for piece in model.stream(text=texts[0], seed=seed, **arguments, **options):
+            if first_audio is None:
+                first_audio = time.perf_counter() - started - clone_seconds
+            pieces.append(piece)
+            output = io.BytesIO()
+            sf.write(output, piece, model.sampling_rate, format='RAW', subtype='PCM_16')
+            emit(dict(chunk=dict(pcm=base64.b64encode(output.getvalue()).decode(),
+                                 sampleRate=model.sampling_rate)))
+        audio = [np.concatenate(pieces)]
     else:
-        arguments = {key: [item.get(key) for item in items]
-                     for key in ('language', 'instruct', 'duration', 'speed', 'mode', 'controls')
-                     if any(item.get(key) is not None for item in items)}
         audio = model.generate(text=texts, seed=seed, **arguments, **options)
-        ane_seconds = model.ane_seconds
+    ane_seconds = model.ane_seconds
     results = []
     for waveform in audio:
         output = io.BytesIO()

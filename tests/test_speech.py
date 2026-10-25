@@ -57,8 +57,19 @@ def test_speech_modes_batch_order_and_request_isolation(speech, tmp_path):
     assert mixed['elapsedMs'] == pytest.approx(mixed['cloneMs'] + mixed['audioMs'])
     mixed_clone = sf.read(io.BytesIO(__import__('base64').b64decode(mixed['audio'][0]['wav'])))[0]
     assert np.allclose(mixed_clone, cloned, atol=1 / 32768)
-    assert np.array_equal(speech.generate('Hello.', duration=1.0, seed=42, **options)[0], first)
+    # The direct Python API has the same ordered per-item voice contract as the worker.
+    direct = speech.generate(['Welcome.', 'Hello.'], mode=['clone', 'auto'],
+                             voice_clone_prompt=[prompt, None], duration=[1.0, 1.4], seed=42, **options)
+    for actual, encoded in zip(direct, mixed['audio']):
+        expected = sf.read(io.BytesIO(__import__('base64').b64decode(encoded['wav'])))[0]
+        assert np.allclose(actual, expected, atol=1 / 32768)
     stochastic = dict(options, position_temperature=5)
+    reversed_voices = speech.generate(['Hello.', 'Welcome.'], mode=['auto', 'clone'],
+                                     voice_clone_prompt=[None, prompt], duration=[1.4, 1.0], seed=42, **stochastic)
+    assert np.array_equal(reversed_voices[0], speech.generate('Hello.', duration=1.4, seed=42, **stochastic)[0])
+    assert np.array_equal(reversed_voices[1], speech.generate('Welcome.', voice_clone_prompt=prompt,
+                                                           duration=1.0, seed=43, **stochastic)[0])
+    assert np.array_equal(speech.generate('Hello.', duration=1.0, seed=42, **options)[0], first)
     unseeded = synthesize(speech, {}, dict(items=[dict(text='Hello.', duration=1.0)], parameters=stochastic))
     replay = synthesize(speech, {}, dict(items=[dict(text='Hello.', duration=1.0)],
                                         parameters=stochastic, seed=unseeded['seed']))
@@ -66,6 +77,17 @@ def test_speech_modes_batch_order_and_request_isolation(speech, tmp_path):
     with pytest.raises(ValueError, match='positive'):
         synthesize(speech, {}, dict(items=[dict(text='Hello.', speed=0)]))
     assert np.array_equal(speech.generate('Hello.', duration=1.0, seed=42, **options)[0], first)
+
+
+def test_oversized_speech_requests_fail_and_leave_the_next_request_unchanged(speech):
+    options = dict(duration=1, num_step=4, position_temperature=0, class_temperature=0,
+                   postprocess_output=False, pad_duration=0, fade_duration=0, seed=42)
+    expected = speech.generate('Hello.', **options)[0]
+    with pytest.raises(ValueError, match='bundle limit'):
+        speech.generate('hello ' * (speech.capabilities['context_positions'] + 1), **options)
+    with pytest.raises(ValueError, match='bundle limit'):
+        speech.generate('Hello.', **dict(options, duration=1_000_000, audio_chunk_threshold=2_000_000))
+    assert np.array_equal(speech.generate('Hello.', **options)[0], expected)
 
 
 def test_short_speech_is_intelligible_and_can_be_transcribed_for_cloning(speech):

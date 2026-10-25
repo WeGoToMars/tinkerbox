@@ -67,12 +67,11 @@ class Speech:
                     ref_audio = read_audio(ref_audio)
                 return super().create_voice_clone_prompt(ref_audio, ref_text, preprocess_prompt)
 
-            def _prepare_inference_inputs(self, *args, **kwargs):
-                inputs = super()._prepare_inference_inputs(*args, **kwargs)
-                length = inputs['input_ids'].shape[-1]
-                if length > max(capacities):
-                    # Reject before upstream allocates the square batch mask.
-                    raise ValueError(f'speech context needs {length} positions; bundle limit is {max(capacities)}')
+            def _prepare_inference_inputs(self, text, num_target_tokens, *args, **kwargs):
+                owner._capacity(num_target_tokens)
+                inputs = super()._prepare_inference_inputs(text, num_target_tokens, *args, **kwargs)
+                # Check each chunk before upstream allocates its square batch mask and embeddings.
+                owner._capacity(inputs['input_ids'].shape[-1])
                 return inputs
 
             def _preprocess_all(self, **kwargs):
@@ -152,6 +151,12 @@ class Speech:
         time = lambda size: cost['call_positions'] + bucket(size) + bucket(size)**2/cost['attention_positions']
         return time(packed+n) <= time(packed) + time(n)
 
+    def _capacity(self, length):
+        try:
+            return next(n for n in self.spec['capacities'] if n >= length)
+        except StopIteration:
+            raise ValueError(f'speech context needs {length} positions; bundle limit is {max(self.spec["capacities"])}') from None
+
     @torch.inference_mode()
     def logits(self, embeddings, attention_mask):
         """Evaluate independent conditioned/unconditioned sequences in input order.
@@ -161,10 +166,9 @@ class Speech:
         with block-diagonal attention and per-row positions, when the bundle's
         cost model favors the packed bucket over separate ones."""
         batch, length, _ = embeddings.shape
+        self._capacity(length)
         codebooks, vocabulary = self.spec['codebooks'], self.spec['audio_vocab']
         limit = max(self.spec['short_capacities'])
-        if length > max(self.spec['capacities']):
-            raise ValueError(f'speech context needs {length} positions; bundle limit is {max(self.spec["capacities"])}')
         visible = [int(attention_mask[i, 0, 0].sum()) if attention_mask is not None else length for i in range(batch)]
         result = torch.zeros(batch, codebooks, length, vocabulary)
         groups = []
@@ -216,9 +220,9 @@ class Speech:
                 return value
             return [value] * size
         modes, fields = batch(mode, 'mode'), batch(controls, 'controls')
-        instructions = batch(kwargs.get('instruct'), 'instruct')
-        voices = batch(kwargs.get('voice_clone_prompt'), 'voice_clone_prompt')
-        references = batch(kwargs.get('ref_audio'), 'ref_audio')
+        arguments = {key: batch(kwargs.pop(key, None), key)
+                     for key in ('language', 'instruct', 'voice_clone_prompt', 'ref_audio', 'ref_text')}
+        voices, references = arguments['voice_clone_prompt'], arguments['ref_audio']
         native = []
         for i in range(size):
             if fields[i] is not None and not isinstance(fields[i], dict):
@@ -231,17 +235,29 @@ class Speech:
                         if key in supplied:
                             raise ValueError(f'Provide {key} once, either directly or in controls.')
                         supplied[key] = value
-            _, values = speech_controls(self.capabilities, modes[i], instructions[i], supplied,
+            _, values = speech_controls(self.capabilities, modes[i], arguments['instruct'][i], supplied,
                                          voices[i] is not None or references[i] is not None)
             native.append(values)
         for key in ('duration', 'speed'):
-            kwargs[key] = [values.get(key) for values in native]
+            kwargs.pop(key, None)
+            arguments[key] = [values.get(key) for values in native]
         # A request's random sampling must not advance another caller's RNG state.
         with _GENERATION_LOCK, self._lock, torch.random.fork_rng(devices=[]) if seed is not None else nullcontext():
+            self.ane_seconds = 0.0
+            if any(voice is not None or reference is not None for voice, reference in zip(voices, references)):
+                # Upstream cannot mix automatic and cloned voices. Keep this contract
+                # in the backend so direct Python and task requests behave identically.
+                audio = []
+                for i, item in enumerate(batch(text, 'text')):
+                    if seed is not None:
+                        torch.manual_seed(seed + i)
+                    selected = {key: values[i] for key, values in arguments.items() if values[i] is not None}
+                    audio.extend(self.engine.generate(text=item, **selected, **kwargs))
+                return audio
             if seed is not None:
                 torch.manual_seed(seed)
-            self.ane_seconds = 0.0
-            return self.engine.generate(text=text, **kwargs)
+            arguments = {key: values for key, values in arguments.items() if any(v is not None for v in values)}
+            return self.engine.generate(text=text, **arguments, **kwargs)
 
     @staticmethod
     def generation_parameters(parameters):

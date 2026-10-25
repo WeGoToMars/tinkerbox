@@ -67,6 +67,16 @@ def test_saved_reference_and_continuation_modes(speech, tmp_path):
             with pytest.raises(ValueError, match='conditioning'):
                 speech.generate('Hello.', voice_clone_prompt=prompt, mode='clone', seed=42)
 
+    texts = ['Every sentence should reach its final word.', 'Hello! Welcome to Tinkerbox.']
+    direct = speech.generate(texts, voice_clone_prompt=[prompt, None],
+                             mode=['clone_continuation', 'auto'], seed=23)
+    mixed = synthesize(speech, {}, dict(items=[dict(text=texts[0], voice_clone_prompt=str(saved),
+                                                   mode='clone_continuation'),
+                                              dict(text=texts[1], mode='auto')], seed=23))
+    for actual, encoded in zip(direct, mixed['audio'], strict=True):
+        decoded = sf.read(io.BytesIO(base64.b64decode(encoded['wav'])))[0]
+        assert np.allclose(decoded, actual, atol=1/32768)
+
 
 def test_streamed_speech_joins_into_the_complete_reply(speech, tmp_path):
     import soundfile as sf

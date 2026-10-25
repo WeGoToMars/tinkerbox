@@ -30,6 +30,9 @@ An optional field, such as a target duration, is omitted until explicitly enable
 lists. Omitted mode selects automatic, design or cloning from the supplied
 instruction/reference. Explicit mode selects exactly the advertised behavior.
 Unsupported controls and incompatible combinations return errors.
+OmniVoice batches containing reference voices run each item independently, using
+`seed + item_index` when seeded. This also applies to mixed automatic/cloned
+batches through the Python API and worker.
 
 A model whose capabilities include `streaming: True` also offers `stream`, which
 takes one text and the same arguments and yields its waveform in order while it

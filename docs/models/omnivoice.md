@@ -139,9 +139,9 @@ PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.guard artifacts/omnivoice/speec
   .venv/bin/python -u scripts/omnivoice/reference_speech.py --seed 42
 ```
 
-These are FP16 arithmetic/content checks, not bitwise waveform equivalence. Full
-identities and app checks are in
-local validation reports under `artifacts/omnivoice/`.
+These are FP16 arithmetic/content checks, not bitwise waveform equivalence.
+The commands above write local validation reports under `artifacts/omnivoice/`.
+Generated validation JSON is not committed.
 
 ## Fused execution
 
@@ -194,8 +194,8 @@ These results do not establish the best buckets or cost model for other chips.
 The combined context limit is now the checkpoint's 40,960 text, reference and
 generated-audio positions per diffusion call. Upstream still chunks long-form
 generation above its default thirty-second threshold into roughly fifteen-second
-text chunks. Oversized conditioning is rejected before allocating upstream's
-square batch mask. The upstream scheduler still creates a CPU mask proportional
+text chunks. Oversized target lengths are rejected before target allocation;
+combined conditioning is checked before the batch mask and embeddings are allocated. The upstream scheduler still creates a CPU mask proportional
 to the square of its active batch length, and returned logits also grow with
 context: maximum context is not negligible total RAM or a constant-latency
 operation. Native blockwise attention avoids a full square ANE attention graph.
