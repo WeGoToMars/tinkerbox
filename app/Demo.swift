@@ -65,6 +65,7 @@ struct RunTotals {
     var status: String { downloads.contains(model) ? "Downloading model…" : runtime.state.status }
     var progress: Double? { downloads.contains(model) ? downloads.progress[model] : runtime.state.progress }
     var busy = false  // a request from the app is running
+    private(set) var updating: Set<String> = []
     var unloading = false
     var error: String?
     var setupMs: Double?
@@ -113,6 +114,25 @@ struct RunTotals {
             Task { await storage.refresh() }
         }
         try await downloads.fetch(id)
+    }
+
+    // Downloads a model's newer revision beside the installed one, switches to it and removes the outdated files.
+    func update(_ id: String) async {
+        guard !updating.contains(id), !storage.removing.contains(id) else { return }
+        updating.insert(id)
+        defer { updating.remove(id) }
+        do { try await downloads.fetch(id, entry: catalog.offers[id]?.raw) } catch {
+            if !(error is CancellationError) { self.error = error.localizedDescription }
+            return
+        }
+        catalog.adopt(id)
+        catalog.scanDownloads()
+        // A worker running the old revision restarts on the new one before its files are removed.
+        if runtime.state.model == id {
+            await runtime.unload()
+            await load()
+        }
+        await remove(id, outdated: true)
     }
 
     func load() async {
@@ -1107,6 +1127,10 @@ struct ModelsView: View {
                 }
                 Text(model.summary)
                 Text(details.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                if issue == nil, let update = demo.catalog.update(for: model) {
+                    Text("Update available · \(update.revision)")
+                        .font(.caption).foregroundStyle(.tint)
+                }
                 if model.isSupported, let issue {
                     Text(issue).font(.caption).foregroundStyle(.secondary)
                 }
@@ -1154,6 +1178,10 @@ struct ModelsView: View {
                     if model.localOnly == true {
                         Button("Choose bundle…") { chooseBundle(model) }.disabled(demo.busy)
                     }
+                }
+                if issue == nil, !downloading, demo.catalog.update(for: model) != nil {
+                    Button("Update") { Task { await demo.update(model.id) } }
+                        .disabled(demo.busy || demo.updating.contains(model.id) || demo.storage.removing.contains(model.id))
                 }
                 if demo.storage.removing.contains(model.id) {
                     ProgressView().controlSize(.small)

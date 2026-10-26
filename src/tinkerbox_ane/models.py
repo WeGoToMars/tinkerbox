@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from pathlib import Path
 
 CATALOG = json.loads(Path(__file__).with_name("models.json").read_text())["models"]
+# The app lists newer published entries of models whose update the user accepted; they replace the shipped ones.
+_UPDATES = {item["id"]: item for item in json.loads(os.environ.get("TINKERBOX_CATALOG_UPDATES") or "[]")}
+CATALOG = [{**item, **_UPDATES.get(item["id"], {})} for item in CATALOG]
 
 
 def entry(model: str) -> dict:
@@ -22,26 +26,14 @@ def entry(model: str) -> dict:
 
 def download(model: str, progress=None) -> Path:
     """Fetch the AOT bundle for this Mac; `progress(done_bytes, total_bytes)` reports the download."""
-    from tinkerbox_ane.bundle import download_bundle
-    from tinkerbox_ane.host import device_architecture, validate_architecture, chip_name
+    from tinkerbox_ane.bundle import CACHE, download_bundle
+    from tinkerbox_ane.host import device_architecture
 
     item = entry(model)
-    architecture = device_architecture()
-    validate_architecture(architecture)
-    from tinkerbox_ane.bundle import CACHE, read_bundle
-    bundle = CACHE / model / item['revision'] / 'macos27' / architecture
-    # Locally compiled bundles can cover a chip before its release is published.
-    if (bundle / 'model.json').is_file():
-        read_bundle(bundle, importlib.import_module(item['module']).KIND)
+    # Downloaded or locally installed: the manifest is written last, so a bundle that has one is complete.
+    bundle = CACHE / model / item["revision"] / "macos27" / device_architecture()
+    if (bundle / "model.json").is_file():
         return bundle
-    if architecture not in item.get('architectures', [architecture]):
-        raise RuntimeError(f"No {item['name']} bundle is available for {chip_name(architecture)} "
-                           f"({architecture}) in {item['revision']}. Choose another model or install "
-                           'a bundle compiled for this Mac.')
-    if item.get('local_only'):
-        raise RuntimeError(f"{item['name']} currently requires a local ANE bundle. Export and compile it, "
-                           f'then run python -m tinkerbox_ane.install {model} <bundle>, '
-                           'or set TINKERBOX_ASSET to the compiled bundle directory.')
     return download_bundle(item["id"], item["repo"], item["revision"], progress)
 
 

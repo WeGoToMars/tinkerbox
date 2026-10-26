@@ -56,7 +56,7 @@ class Speech:
             def __init__(self):
                 super().__init__()
                 self.config = config.llm_config
-                self.embed_tokens = nn.Embedding(self.config.vocab_size, self.config.hidden_size)
+                self.embed_tokens = nn.Embedding(self.config.vocab_size, self.config.hidden_size, device='meta')
 
             def get_input_embeddings(self):
                 return self.embed_tokens
@@ -96,11 +96,13 @@ class Speech:
                 return OmniVoiceModelOutput(logits=owner.logits(embedded, attention_mask))
 
         self.engine = ANEOmniVoice(config, llm=Embeddings()).eval()
-        # These projections live in the ANE bundle. Retain only lookup tables on the CPU.
+        # These projections live in the ANE bundle. Retain only lookup tables on the CPU,
+        # memory-mapped from the checkpoint rather than copied.
         self.engine.audio_heads = nn.Identity()
         with safe_open(weights / 'model.safetensors', framework='pt', device='cpu') as tensors:
-            self.engine.llm.embed_tokens.weight.data.copy_(tensors.get_tensor('llm.embed_tokens.weight'))
-            self.engine.audio_embeddings.weight.data.copy_(tensors.get_tensor('audio_embeddings.weight'))
+            for module, name in ((self.engine.llm.embed_tokens, 'llm.embed_tokens.weight'),
+                                 (self.engine.audio_embeddings, 'audio_embeddings.weight')):
+                module.weight = nn.Parameter(tensors.get_tensor(name), requires_grad=False)
         self.engine.text_tokenizer = AutoTokenizer.from_pretrained(weights)
         codec = weights / 'audio_tokenizer'
         self.engine.audio_tokenizer = HiggsAudioV2TokenizerModel.from_pretrained(codec, device_map='cpu').eval()

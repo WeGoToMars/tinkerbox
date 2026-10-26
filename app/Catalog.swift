@@ -79,6 +79,41 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
         return (try? decode(data)) ?? []
     }()
 
+    // A published revision the user accepted, newer than the one this app ships; kept as the raw
+    // catalog entry because the worker and downloader read it from TINKERBOX_CATALOG_ENTRY.
+    nonisolated static func pinnedEntry(_ id: String) -> String? {
+        UserDefaults.standard.string(forKey: "catalog.entry.\(id)")
+    }
+
+    // Entries of every accepted update, in the form tinkerbox_ane.models reads; `adding` is one being downloaded.
+    nonisolated static func updatesEnvironment(adding: String? = nil) -> String {
+        let entries = bundled.compactMap { model in current(model.id).flatMap { $0.revision == model.revision ? nil : pinnedEntry(model.id) } }
+        return "[" + (entries + [adding].compactMap { $0 }).joined(separator: ",") + "]"
+    }
+
+    nonisolated static func pin(_ raw: String, for id: String) {
+        UserDefaults.standard.set(raw, forKey: "catalog.entry.\(id)")
+    }
+
+    // The entry this app runs for a bundled model: its own, unless an accepted update is newer.
+    nonisolated static func current(_ id: String) -> CatalogModel? {
+        guard let bundled = bundled.first(where: { $0.id == id }) else { return nil }
+        guard let raw = pinnedEntry(id), let pinned = try? decode(Data("{\"schema\":1,\"models\":[\(raw)]}".utf8)).first,
+              isNewer(pinned.revision, than: bundled.revision), !isNewer(pinned.minVersion, than: appVersion)
+        else { return bundled }
+        return pinned
+    }
+
+    // Whether an earlier revision of the model is installed, so the current one is an update.
+    nonisolated static func hasOlderBundle(_ model: CatalogModel, architecture: String = deviceArchitecture) -> Bool {
+        let folders = (try? FileManager.default.contentsOfDirectory(
+            at: cacheURL.appending(path: model.id), includingPropertiesForKeys: nil)) ?? []
+        return folders.contains { folder in
+            folder.lastPathComponent != model.revision && bundleIssue(
+                at: folder.appending(path: "macos27").appending(path: architecture), architecture: architecture) == nil
+        }
+    }
+
     nonisolated static func bundleIssue(at url: URL, architecture: String = deviceArchitecture) -> String? {
         guard let data = try? Data(contentsOf: url.appending(path: "model.json")),
               let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -120,8 +155,10 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
         return nil
     }
 
-    var models = Catalog.bundled
+    var models = Catalog.bundled.map { Catalog.current($0.id) ?? $0 }
     var isRemote = false
+    // Newer published revisions of installed models this app can run, by model, with the raw entry.
+    var offers: [String: (model: CatalogModel, raw: String)] = [:]
     var downloaded: Set<String> = []
 
     // The catalog format this app reads; a newer one is ignored instead of misread.
@@ -158,12 +195,46 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
             let remote = try Self.decode(data)
             // Bundled entries describe what this app runs; the remote catalog only adds models to discover.
-            models = Self.bundled + remote.filter { model in !Self.bundled.contains { $0.id == model.id } }
+            let current = Self.bundled.map { Self.current($0.id) ?? $0 }
+            models = current + remote.filter { model in !Self.bundled.contains { $0.id == model.id } }
+            offers = Self.offers(in: data, remote: remote, current: current)
             isRemote = true
         } catch {
             models = Self.bundled
             isRemote = false
         }
+        scanDownloads()
+    }
+
+    // A published revision is offered when it is newer than the one this app runs and this app is new enough for it.
+    nonisolated private static func offers(in data: Data, remote: [CatalogModel], current: [CatalogModel])
+        -> [String: (model: CatalogModel, raw: String)] {
+        let entries = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["models"] as? [[String: Any]] ?? []
+        var offers: [String: (model: CatalogModel, raw: String)] = [:]
+        for model in current {
+            guard let newer = remote.first(where: { $0.id == model.id }),
+                  isNewer(newer.revision, than: model.revision), !isNewer(newer.minVersion, than: appVersion),
+                  let entry = entries.first(where: { $0["id"] as? String == model.id }),
+                  let raw = try? JSONSerialization.data(withJSONObject: entry),
+                  let text = String(data: raw, encoding: .utf8) else { continue }
+            offers[model.id] = (newer, text)
+        }
+        return offers
+    }
+
+    // What the model's row offers to replace: an installed older revision, or the newer published one.
+    func update(for model: CatalogModel) -> CatalogModel? {
+        if let offer = offers[model.id], Self.localBundle(for: model) != nil || Self.hasOlderBundle(model)
+            || Self.hasOlderBundle(offer.model) { return offer.model }
+        return !downloaded.contains(model.id) && Self.hasOlderBundle(model) ? model : nil
+    }
+
+    // Switches a model to its offered revision once that is downloaded; every launch of the app and worker follows.
+    func adopt(_ id: String) {
+        guard let offer = offers[id] else { return }
+        Self.pin(offer.raw, for: id)
+        models = models.map { $0.id == id ? offer.model : $0 }
+        offers[id] = nil
         scanDownloads()
     }
 
@@ -184,14 +255,14 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     func contains(_ model: String) -> Bool { tasks[model] != nil }
 
     // Waits for a model's download, starting it unless it is already running.
-    func fetch(_ model: String) async throws {
+    func fetch(_ model: String, entry: String? = nil) async throws {
         if let task = tasks[model] { return try await task.value }
         let task = Task {
             defer {
                 tasks[model] = nil
                 progress[model] = nil
             }
-            try await run(model)
+            try await run(model, entry: entry)
         }
         tasks[model] = task
         try await task.value
@@ -206,12 +277,13 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
         _ = try? await task.value
     }
 
-    private func run(_ model: String) async throws {
+    private func run(_ model: String, entry: String?) async throws {
         struct Update: Decodable { let progress: Double? }
         defer { stopped.remove(model) }
         let process = Process(), output = Pipe(), errors = Pipe()
         Runtime.configure(process, python: ["-u", "-m", "tinkerbox_ane.download", model])
         process.environment!["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        process.environment!["TINKERBOX_CATALOG_UPDATES"] = Catalog.updatesEnvironment(adding: entry)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output
         process.standardError = errors

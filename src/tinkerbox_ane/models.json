@@ -43,8 +43,11 @@
       "min_version": "2.1.0",
       "architectures": [
         "h18g",
+        "h17d",
+        "h17c",
         "h17s",
         "h17g",
+        "h16c",
         "h16s",
         "h16g"
       ]
@@ -110,7 +113,6 @@
       "module": "tinkerbox_ane.omnivoice",
       "repo": "wegotomars/OmniVoice-CoreAI-ANE",
       "revision": "v2.2.0",
-      "local_only": true,
       "inputs": ["text", "audio"],
       "non_verbal_tags": [
         "[laughter]",
@@ -127,6 +129,7 @@
         "[surprise-yo]",
         "[dissatisfaction-hnn]"
       ],
+      "download_bytes": 3406433621,
       "license": "CC-BY-NC-4.0",
       "min_version": "2.2.0",
       "architectures": [
@@ -156,11 +159,53 @@
       "module": "tinkerbox_ane.voxcpm2",
       "repo": "wegotomars/VoxCPM2-CoreAI-ANE",
       "revision": "v2.2.0",
-      "local_only": true,
       "inputs": [
         "text",
         "audio"
       ],
+      "download_bytes": 4236881335,
+      "license": "Apache-2.0",
+      "min_version": "2.2.0",
+      "architectures": [
+        "h18g",
+        "h17d",
+        "h17c",
+        "h17s",
+        "h17g",
+        "h16c",
+        "h16s",
+        "h16g",
+        "h15d",
+        "h15c",
+        "h15m",
+        "h15s",
+        "h15g",
+        "h14d",
+        "h14c",
+        "h14s",
+        "h14g",
+        "h13d",
+        "h13c",
+        "h13s",
+        "h13g"
+      ]
+    },
+    {
+      "id": "voxcpm2-lut8",
+      "name": "VoxCPM2 LUT8",
+      "publisher": "OpenBMB",
+      "summary": "VoxCPM2 with 8-bit lookup-table main-model weights: less memory and faster, slightly lower fidelity.",
+      "task": "speech",
+      "base_model": "openbmb/MiniCPM4",
+      "original_model": "openbmb/VoxCPM2",
+      "module": "tinkerbox_ane.voxcpm2",
+      "repo": "wegotomars/VoxCPM2-LUT8-CoreAI-ANE",
+      "revision": "v2.2.0",
+      "inputs": [
+        "text",
+        "audio"
+      ],
+      "download_bytes": 3057182858,
       "license": "Apache-2.0",
       "min_version": "2.2.0",
       "architectures": [

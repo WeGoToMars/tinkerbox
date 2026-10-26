@@ -87,9 +87,9 @@ or set `TINKERBOX_VOXCPM2_CHECKPOINT`. Bundles carry their CPU lookup tables,
 tokenizer/configuration files, and AudioVAE weights, so installed loading is
 offline. The existing compiler/watchdog retains full ANE-placement verification.
 
-The 28-layer main model uses two 14-layer assets (`--base-group` changes the
-split). The eight-layer residual model has its own asset. Both expose
-128-position prefill and single-position decoding at cache tiers
+The 28-layer main model is one asset (`--base-group` splits it into smaller
+assets). The eight-layer residual model has its own asset. Both expose
+64-position prefill and single-position decoding at cache tiers
 512/1024/2048/4096/8192. Swift owns the KV buffers, grows them only when needed,
 and copies valid rows across tiers. Each utterance resets its cache. Hidden
 rows and RoPE inputs cross the Python/native pipe; the complete KV does not.
@@ -139,10 +139,10 @@ on-device checks. Clean sequential compile times were 194–255 s from M2 on and
 
 ```sh
 PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.voxcpm2.publish \
-  --source artifacts/voxcpm2/perf2-src --no-upload --continue-on-error
+  --source artifacts/voxcpm2/fused-src --no-upload --continue-on-error
 ```
 
-## Independent upstream FP16 validation
+## Independent original-model FP16 validation
 
 `scripts/voxcpm2/reference.py` imports the pinned upstream source directly and
 does not import the port. It changes the runtime configuration to CPU FP16,
@@ -181,8 +181,8 @@ identical across CPU and ANE arithmetic.
 The practical gate accepts prefill/component cosine similarity of at least
 0.95 with relative L2 error at most 0.35, and cached decode cosine of at least
 0.90 with relative L2 at most 0.50. All outputs must be finite. Each free-running
-clip must finish normally, remain within half to twice the upstream duration,
-and have at most 20% normalized character error against upstream's separately
+clip must finish normally, remain within half to twice the original duration,
+and have at most 20% normalized character error against the original model's separately
 transcribed clip. Exact waveform matching is not required.
 
 Public behavior and the actual app worker can be exercised with:
@@ -225,20 +225,21 @@ PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.guard artifacts/voxcpm2/cache-r
 ```
 
 The cache comparison evaluates the first main-model asset (14 layers) against
-the unchanged upstream FP16 layers, including single-position decoding around every capacity
+the unchanged original FP16 layers, including single-position decoding around every capacity
 transition. It complements the six complete-model FP16/content cases; it is
 not a complete 8,192-position full-model or maximum-duration speech benchmark.
 The long-speech gate requires normal stopping, finite audio longer than sixty
 seconds, and at most 20% normalized character error against its input text.
 
-## Faster main-model variant
+## Lookup-table main-model variant
 
+Published as its own catalog model, `voxcpm2-lut8`, in the `VoxCPM2-LUT8-CoreAI-ANE` repository.
 `--main-weights lut8-group32` stores the main model as 8-bit k-means lookup
 tables, one table per 32 output channels, with FP16 activations. Single-position
 decode reads half the weight bytes, cutting the main model from about 19.6 to
-12.6 ms per 160 ms patch on `h17s`, about 17% faster end to end. Compression
-runs once on the architecture-independent export, roughly 15 minutes per
-14-layer asset on CPU; each target architecture is then compiled and verified
+12.6 ms per 160 ms patch on `h17s`, about 7–17% faster end to end, and the ANE holds 2.7 GiB wired instead of 3.9. Compression
+runs once on the architecture-independent export, roughly 30 minutes for the
+main asset on CPU (estimated from the 15 minutes per 14-layer half); each target architecture is then compiled and verified
 as usual. Run the export directly rather than under the 25-minute watchdog,
 and compile it under the watchdog:
 
@@ -254,44 +255,49 @@ normalized character error rose from 0.028 to 0.069 over the 16-clip check.
 
 ## Recorded result
 
-Results are from Apple M5 Pro, 24 GB, macOS 27.0.1 (`h17s`); only `h17s` was
-compiled. Every compiled entry of the fresh export passed full ANE placement
-verification. The default bundle is `artifacts/voxcpm2/perf2-ane`; the
-lookup-table variant `artifacts/voxcpm2/perf2-lut8-ane` combines its main-model
-assets with the same residual, encoder and diffusion assets.
+Results are from Apple M5 Pro, 24 GB, macOS 27.0.1 (`h17s`). Both bundles were compiled
+for all 21 architectures, and every compiled entry passed full ANE placement
+verification. The default bundle is `artifacts/voxcpm2/fused-ane`; the
+lookup-table variant `artifacts/voxcpm2/lut8-ane` combines its main-model
+asset with the same residual, encoder and diffusion assets. Accuracy rows were measured
+with a build that split the 28 layers into two 14-layer assets; the weights and arithmetic are unchanged by the single
+28-layer asset, and the default's 16-clip result was identical on both.
 
 | Check | Default | Lookup-table main model |
 | --- | --- | --- |
-| Six FP16/content cases | Pass; all transcripts match upstream | Pass; only a trailing period differs |
+| Six FP16/content cases | Pass; all transcripts match the original | Pass; only a trailing period differs |
 | Main prefill / decode cosine | ≥ 0.999994 / 0.999987 | ≥ 0.999953 / 0.999672 |
 | Residual, encoder, diffusion-velocity cosine | ≥ 0.9999, 0.99993, 0.99988 | Same assets |
 | First diffusion patch cosine | ≥ 0.999615 | ≥ 0.999615 |
 | Growing cache through 8,192 (14 layers) | cosine 0.999990, rel. L2 0.0048 | cosine 0.999981, rel. L2 0.0066 |
 | 16 clips, mean / max character error | 0.028 / 0.136 | 0.032 / 0.136 |
-| Four-paragraph clone passage | 97.9 s audio in 27.0 s, 0.26% error | 94.9 s audio in 21.7 s, 0.26% error |
 
-Warm end-to-end real-time factors (generation time divided by audio length);
-v2.2.0 was measured with its own bundle and runtime:
+Warm end-to-end requests, and memory and energy while running them. Energy is the ANE's average
+power times the request's duration (`powermetrics`, median of three runs); CPU and GPU draw is excluded.
+Timings are from separate runs without power sampling.
 
-| Request | v2.2.0 | Default | Lookup-table main model |
-| --- | --- | --- | --- |
-| Automatic voice | 0.78 | 0.27 | 0.23 |
-| Saved clone | 0.79 | 0.28 | 0.23 |
-| 21-second passage | 0.77 | 0.26 | 0.22 |
+| Request | Default time / real-time multiplier / RTF / ANE energy | Lookup-table time / real-time multiplier / RTF / ANE energy |
+| --- | --- | --- |
+| Automatic voice, 4.5 s | 1.21 s / 3.7× / 0.27 / 2.6 J | 1.12 s / 4.0× / 0.25 / 2.0 J |
+| Saved clone, 3.8 s (3.4 s lookup-table) | 1.04 s / 3.7× / 0.27 / 2.1 J | 0.86 s / 3.9× / 0.26 / 2.0 J |
+| 21.9-second passage (21.8 s lookup-table) | 5.73 s / 3.8× / 0.26 / 10.7 J | 5.20 s / 4.2× / 0.24 / 12.2 J |
+| Peak wired memory | 3.9 GiB | 2.7 GiB |
+| Peak Python process | 0.46 GiB | 0.42 GiB |
+
+The lookup-table build runs faster at higher ANE power, so its energy per request is not lower. The
+single 28-layer main asset keeps one copy of its weights per width group, and the 64-position prefill puts every function of
+the asset in the smallest group, so the ANE reserves 3.3 GiB for the default bundle.
 
 Streaming yields 16-frame (0.64-second) pieces from the same decoder, so the
 joined pieces are bit-identical to the complete waveform; this held for all six
 validation cases. Warm time to first audio through the worker protocol:
 
-| Request | Default first / complete | Lookup-table first / complete |
-| --- | --- | --- |
-| 2.1-second greeting | 0.28 s / 0.60 s | 0.23 s / 0.52 s |
-| 51–55-second passage, automatic voice | 0.32 s / 13.5 s | 0.28 s / 12.1 s |
+| Request | Default first / complete |
+| --- | --- |
+| 2.1-second greeting | 0.25 s / 0.57 s |
+| 51-second passage, automatic voice | 0.32 s / 13.6 s |
 
-On the default bundle, about 94% of a generation is ANE time. Each patch spends
-roughly 19.6 ms in the main model, 15.4 ms in one fused diffusion call, 3.8 ms
-in the residual model and 2.2 ms in the encoder, all near ANE weight bandwidth.
-The 16-clip set differs from upstream only in transcribed numerals and
+The 16-clip set differs from the original only in transcribed numerals and
 homophones, identically for both bundles except one homophone. Public API and
 actual Swift worker checks passed for both bundles. The commands above write
 local validation reports under `artifacts/voxcpm2/`; generated JSON is not committed.

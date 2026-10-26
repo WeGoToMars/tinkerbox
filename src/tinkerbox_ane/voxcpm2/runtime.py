@@ -21,7 +21,7 @@ from tinkerbox_ane.host import TensorHost, device_architecture
 from tinkerbox_ane.speech import speech_controls
 from tinkerbox_ane.transcription import transcribe
 from . import KIND, REPO, REVISION, UPSTREAM_REVISION
-from .codec import AudioVAE, AudioVAEConfig, trim_reference
+from .codec import AudioVAE, AudioVAEConfig, fold_weight_norm, trim_reference
 from .parameters import CAPABILITIES, PARAMETERS, validate
 from .prompt import build_inputs
 
@@ -75,7 +75,8 @@ class Speech:
         self.config = json.loads((weights / 'config.json').read_text())
         self.capacities = self.spec['capacities']
         self.prefill_width = self.spec.get('prefill_width')
-        if (not self.capacities or self.prefill_width != 128 or self.capacities != sorted(set(self.capacities))
+        if (not self.capacities or type(self.prefill_width) is not int or self.prefill_width <= 0
+                or self.capacities != sorted(set(self.capacities))
                 or any(type(n) is not int or not self.prefill_width <= n <= 8192 for n in self.capacities)):
             raise ValueError('Invalid VoxCPM2 context capacities')
         self.stages = {stage['role']: stage for stage in self.spec['assets']}
@@ -91,15 +92,15 @@ class Speech:
             raise ValueError('VoxCPM2 bundle predates fused local transformers; re-export the bundle')
         self._masks = {}
         self.tokenizer = LlamaTokenizerFast.from_pretrained(weights)
+        # Bundles store these FP16 tables and the folded AudioVAE weights as the runtime uses them,
+        # so both stay memory-mapped from disk rather than copied.
         with safe_open(weights / 'model.safetensors', framework='pt') as tensors:
             self.cpu = {key: tensors.get_tensor(key).half() for key in tensors.keys()}
-        self.codec = AudioVAE(AudioVAEConfig(**self.config['audio_vae_config'])).eval().requires_grad_(False)
-        state = torch.load(weights / 'audiovae.pth', map_location='cpu', weights_only=True)
-        self.codec.load_state_dict(state.get('state_dict', state), strict=True)
-        # Fold weight normalization once instead of recomputing every weight per call.
-        for module in self.codec.modules():
-            if hasattr(module, 'weight_g'):
-                torch.nn.utils.remove_weight_norm(module)
+        with torch.device('meta'):
+            codec = fold_weight_norm(AudioVAE(AudioVAEConfig(**self.config['audio_vae_config'])))
+        with safe_open(weights / 'audiovae.safetensors', framework='pt') as tensors:
+            codec.load_state_dict({key: tensors.get_tensor(key) for key in tensors.keys()}, strict=True, assign=True)
+        self.codec = codec.eval().requires_grad_(False)
         self.sampling_rate = self.codec.out_sample_rate
         self.capabilities = dict(CAPABILITIES, parameters=PARAMETERS, sampling_rate=self.sampling_rate,
                                  context_positions=max(self.capacities), streaming=True)

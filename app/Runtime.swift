@@ -405,7 +405,7 @@ actor Runtime {
     // One model is loaded at a time; a request for another one replaces it.
     private func prepare(model: String) async throws -> Reply {
         if let readyReply, readyReply.modelId == model, process?.isRunning == true, replies != nil { return readyReply }
-        if let selected = Catalog.bundled.first(where: { $0.id == model }),
+        if let selected = Catalog.current(model),
            let issue = Catalog.availabilityIssue(for: selected, asset:
                 ProcessInfo.processInfo.environment["TINKERBOX_ASSET"].map { URL(fileURLWithPath: $0) }) {
             throw DecisionError.invalid(issue)
@@ -437,6 +437,7 @@ actor Runtime {
         replies = output.fileHandleForReading.bytes.lines.makeAsyncIterator()
         Self.configure(process, python: ["-u", Bundle.main.resourceURL!.appending(path: "worker.py").path])
         process.environment!["TINKERBOX_MODEL"] = model
+        process.environment!["TINKERBOX_CATALOG_UPDATES"] = Catalog.updatesEnvironment()
         if process.environment!["TINKERBOX_ASSET"] == nil,
            let asset = UserDefaults.standard.string(forKey: "asset.\(model)") {
             process.environment!["TINKERBOX_ASSET"] = asset
@@ -487,6 +488,9 @@ actor Runtime {
         for name in ["PYTHONPATH", "PYTHONHOME", "UV_INTERNAL__PARENT_INTERPRETER"] {
             environment.removeValue(forKey: name)
         }
+        // Return freed large blocks to macOS: the allocator's cache otherwise keeps a speech request's
+        // temporary buffers resident, about 1 GB, for a few percent of speed.
+        environment["MallocLargeCache"] = "0"
         process.environment = environment
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
     }

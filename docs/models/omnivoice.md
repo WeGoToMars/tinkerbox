@@ -39,8 +39,8 @@ The task API returns a seed for replay of initially unseeded requests.
 
 The app's Text to Speech page provides automatic voice, design, cloning, saved
 voices, waveform previews, microphone recording and WAV/M4A export. Clone preparation
-and speech generation times are reported separately. Choose a local bundle in the toolbar or set
-`TINKERBOX_ASSET` before launch. Bundles are not distributed yet.
+and speech generation times are reported separately. Download the bundle in the app's model list, or choose a local bundle in the toolbar
+or set `TINKERBOX_ASSET` before launch.
 The **Non-verbal tags** list reads `non_verbal_tags` from the shared `models.json`
 manifest, following the [upstream supported tags](https://github.com/k2-fsa/OmniVoice/tree/08be0b4ccbac3e13e374e86fbfead4b4cac343e2#non-verbal--pronunciation-control).
 
@@ -99,7 +99,7 @@ Run ANE checks under `python -m tinkerbox_ane.guard`.
 
 ## Full-context validation
 
-Capture upstream `omnivoice==0.2.1` CPU FP16 logits independently, then compare
+Capture the original `omnivoice==0.2.1` CPU FP16 logits independently, then compare
 the ANE output and the 40,960-position attention kernel. The optional speech
 case generates a 60-second passage as a single chunk:
 
@@ -114,24 +114,23 @@ PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.guard artifacts/omnivoice/conte
 
 On Apple M5 Pro, 24 GB, macOS 27.0.1 (`h17s`), independent full-transformer
 comparisons at lengths 96, 1,100, 2,400 and 3,000 had cosine at least 0.999985
-and relative L2 at most 0.00541, identical to the previous v2.2.0 bundle. The
+and relative L2 at most 0.00541. The
 full 40,960-key attention kernel passed fully visible and mostly masked cases
 with cosine at least 0.999998 and relative L2 at most 0.00156.
 
 The speech case generates the 60-second passage for seeds 1, 2, 3, 5 and 42 and
 gates their mean normalized transcription error at 0.20. A single seed is not a
-usable gate here: upstream CPU FP16 itself exceeded 0.20 on two of these five
+usable gate here: the original CPU FP16 itself exceeded 0.20 on two of these five
 seeds. The engine seeds upstream's generator the same way, so each seed starts
 from the same random stream:
 
 | Seed | 1 | 2 | 3 | 5 | 42 | Mean |
 | --- | --- | --- | --- | --- | --- | --- |
-| Upstream CPU FP16 | 0.246 | 0.148 | 0.236 | 0.180 | 0.157 | 0.193 |
+| Original CPU FP16 | 0.246 | 0.148 | 0.236 | 0.180 | 0.157 | 0.193 |
 | This bundle | 0.238 | 0.175 | 0.163 | 0.131 | 0.226 | 0.187 |
 
 The bundle passed with mean 0.187. Each clip took about 23 seconds including
-transcription, versus 70.7 seconds for seed 42 with v2.2.0 (same transcript) and
-about 21 minutes for upstream on CPU. Capture the upstream clips one seed per
+transcription, versus about 21 minutes for the original model on CPU. Capture the original clips one seed per
 watchdog run:
 
 ```sh
@@ -158,9 +157,9 @@ and 512-row blocks above that. The results are identical to one attention over
 all queries; 256-row blocks above 2,048 positions failed ANE compilation.
 Steady-state fused latency on `h17s`, including Python/native transfers:
 
-| Positions | 128 | 256 | 512 | 1,024 | 2,048 | 3,072 | 4,096 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Milliseconds | 10.1 | 21.9 | 54.8 | 135 | 377 | 972 | 1,575 |
+| Positions | 256 | 512 | 1,024 | 2,048 | 3,072 | 4,096 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Milliseconds | 21.9 | 54.8 | 135 | 377 | 972 | 1,575 |
 
 Unblocked attention took 170 ms at 1,024 and 504 ms at 2,048. The blockwise
 runner took 1.27 s at 2,048 and 2.9 s at 4,096 positions, so fusion now extends
@@ -169,17 +168,20 @@ blockwise runner is ANE-bound: native copies are about 6% of a 12.9-second
 8,192-position forward, and 512-query calls were no faster than 128. Per-channel
 INT8 weights did not change fused latency and are not used.
 
-Warm end-to-end requests on `h17s`, compared with v2.2.0:
+Warm end-to-end requests on `h17s`, with the energy of the ANE (`powermetrics`, median of three runs):
 
-| Request | Audio | v2.2.0 | This bundle |
+| Request | Audio | Time | ANE energy |
 | --- | --- | --- | --- |
-| Automatic voice | 4.4 s | 1.66 s | 0.95 s |
-| Saved clone | 2.9 s | 1.62 s | 0.89 s |
-| Two-text batch | 5.5 s | 1.71 s | 1.63 s |
-| Passage, default chunking | 18.5 s | 12.2 s | 5.1 s |
+| Automatic voice | 4.4 s | 1.11 s | 4.2 J |
+| Saved clone | 2.9 s | 1.03 s | 3.8 J |
+| Two-text batch | — | 2.14 s | — |
+| Passage, default chunking | 18.5 s | 5.74 s | 21.2 J |
 
-The two-text batch's four short rows were already near their best buckets. The
-fused-versus-blockwise comparison can be reproduced on a target Mac with:
+Peak wired memory was 1.35 GiB, which includes the ANE's reserved weights. The Neural Engine keeps one copy
+of an asset's weights per width group (up to 64 positions, up to 128, and 129 or more), so the buckets all start at
+192 positions: one group, one copy. The Python process peaked at 1.49 GiB while encoding a reference recording and stayed under 0.8 GiB otherwise.
+
+The fused-versus-blockwise comparison can be reproduced on a target Mac with:
 
 ```sh
 PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.guard artifacts/omnivoice/paths-run -- \

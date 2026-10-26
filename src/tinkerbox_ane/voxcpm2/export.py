@@ -8,11 +8,13 @@ from pathlib import Path
 import torch
 from torch import nn
 from safetensors import safe_open
+from safetensors.torch import save_file
 
 from tinkerbox_ane.architectures.minicpm import Config, Transformer
 from tinkerbox_ane.bundle import compile_bundle, write_checkpoint, checkpoint_digest
 from tinkerbox_ane.coreai import source_hash
 from . import KIND, REPO, REVISION, UPSTREAM_REVISION, SOURCE, checkpoint
+from .codec import AudioVAE, AudioVAEConfig, fold_weight_norm
 
 
 def stage_configs(data, group=1):
@@ -32,9 +34,12 @@ def stage_configs(data, group=1):
     return stages
 
 
-PREFILL_WIDTH = 128
+# The Neural Engine keeps one weight copy per width group in an asset (up to 64,
+# up to 128, wider). Prefill shares single-position decode's group, so each
+# stage's weights stay resident once; 128-wide prefill doubled them.
+PREFILL_WIDTH = 64
 CAPACITIES = (512, 1024, 2048, 4096, 8192)
-BASE_GROUP = 14
+BASE_GROUP = 28
 # Per-channel INT8 weights for the bandwidth-bound residual and local stages:
 # FP16 activations, unchanged speech content. The main model defaults to FP16,
 # since INT8 there measurably changed pronunciation. Its optional 8-bit k-means
@@ -60,8 +65,9 @@ def compress(program, weights):
 # Uncached widths. The encoder reads one patch (special token plus four frames)
 # while decoding and packs reference patches for prompts. The diffusion
 # transformer evaluates its guided and unguided rows (two mu, time, four
-# condition and four noisy frames each) together.
-LOCAL_FUNCTIONS = dict(encoder=dict(main=5, batch=5*25), dit=dict(pair=22))
+# condition and four noisy frames each) together. Both encoder widths stay
+# within PREFILL_WIDTH's group.
+LOCAL_FUNCTIONS = dict(encoder=dict(main=5, batch=5*12), dit=dict(pair=22))
 # Fused sampler lengths; any schedule decomposes greedily into these calls.
 SAMPLER_STEPS = (9, 3, 1)
 
@@ -175,7 +181,14 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, stages=None, group=B
         'stop_proj.', 'stop_head.', 'feat_encoder.in_proj.', 'feat_encoder.special_token',
         'feat_decoder.estimator.in_proj.', 'feat_decoder.estimator.cond_proj.',
         'feat_decoder.estimator.out_proj.', 'feat_decoder.estimator.time_mlp.',
-        'feat_decoder.estimator.delta_time_mlp.'])
+        'feat_decoder.estimator.delta_time_mlp.'], dtype=torch.float16)
+    # Store the AudioVAE with weight normalization folded, as the runtime maps it.
+    codec = AudioVAE(AudioVAEConfig(**data['audio_vae_config']))
+    state = torch.load(weights / 'audiovae.pth', map_location='cpu', weights_only=True)
+    codec.load_state_dict(state.get('state_dict', state), strict=True)
+    save_file({key: value.contiguous() for key, value in fold_weight_norm(codec).state_dict().items()},
+              cpu / 'audiovae.safetensors')
+    (cpu / 'audiovae.pth').unlink()
     spec = dict(kind=KIND, version=2, assets=assets, capacities=list(capacities), prefill_width=PREFILL_WIDTH,
                 checkpoint_hash=checkpoint_digest(cpu),
                 source=dict(repo=REPO, revision=REVISION, code_revision=UPSTREAM_REVISION))

@@ -29,7 +29,9 @@ class Diffusion(nn.Module):
 
 WIDTH = 128
 CAPACITIES = (128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 40960)
-SHORT_CAPACITIES = (128, 192, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 4096)
+# The Neural Engine keeps one weight copy per width group in an asset (up to 64,
+# up to 128, wider), so the fused buckets all stay above 128.
+SHORT_CAPACITIES = (192, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 4096)
 # Fused call latency is modeled as call + n + n**2/attention positions of
 # projection/MLP work, least-squares fitted on Apple M5 Pro (h17s).
 FUSED_COST = dict(call_positions=26, attention_positions=942)

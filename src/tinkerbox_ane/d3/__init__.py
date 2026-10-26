@@ -19,9 +19,10 @@ RUNTIME_TENSORS = ("language_model.embed_tokens.weight", "visual.pos_embed.weigh
 RESIDUAL_SCALE = 64.0  # Keep ANE residual products above the subnormal threshold.
 CHUNK = 128
 # Short prompts run each stage in one call at the smallest of these widths that holds them: the DeltaNet
-# scan over the whole prompt, then full attention. Steps of 64 limit padding; past 320 tokens a call
-# saves under 10% over the chunked path.
-PROMPT_WIDTHS = (128, 192, 256, 320)
+# scan over the whole prompt, then full attention. Longer prompts take the chunked path. The Neural
+# Engine keeps one weight copy per width group in an asset (up to 64, up to 128, wider), so wider
+# prompt functions, about a third faster for 129–320 tokens, would double each stage's resident weights.
+PROMPT_WIDTHS = (128,)
 INPUT, OUTPUT = "hidden_in", "hidden_out"
 # Vision tower patch capacities; an image runs at the smallest that holds its patches.
 PATCH_TIERS = (1024, 1536, 2048, 3072, 4096, 5120, 6400)

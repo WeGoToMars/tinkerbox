@@ -67,6 +67,14 @@ def WNCausalTransposeConv1d(*args, **kwargs):
     return weight_norm(CausalTransposeConv1d(*args, **kwargs))
 
 
+def fold_weight_norm(codec):
+    """Replace each weight-normalized layer's weight with its computed value, once."""
+    for module in codec.modules():
+        if hasattr(module, 'weight_g'):
+            torch.nn.utils.remove_weight_norm(module)
+    return codec
+
+
 # Scripting this brings model speed up 1.4x
 @torch.jit.script
 def snake(x, alpha):
