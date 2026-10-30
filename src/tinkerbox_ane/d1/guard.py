@@ -1,6 +1,6 @@
 """Compatibility entry point for the shared Core AI watchdog."""
 
-from tinkerbox_ane.guard import disk_written, main, run, stop, workers
+from tinkerbox_ane.guard import main
 
 
 if __name__ == "__main__":

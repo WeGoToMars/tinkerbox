@@ -213,7 +213,7 @@ class VisionPipeline:
 
             def padded(x):
                 """[patches, channels] as [1, channels, 1, capacity]."""
-                x = torch.cat([x.half(), torch.zeros(capacity - count, x.shape[1], dtype=torch.float16)])
+                x = torch.cat([x.half(), torch.zeros(capacity - count, x.shape[1], dtype=torch.float16)])  # noqa: B023
                 return x.T[None, :, None]
 
             mask = torch.full((1, 1, 1, capacity), MASK_MIN, dtype=torch.float16)

@@ -49,5 +49,10 @@ cache-keys = [
     { file = "src/tinkerbox_ane/cow-staging.m" },
 ]
 
+[tool.ruff.lint]
+# Pyflakes plus bugbear; zip() lengths are matched by construction.
+select = ["F", "B"]
+ignore = ["B905"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

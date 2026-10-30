@@ -13,8 +13,8 @@ INFO = [
     {'label': 'Synthesis', 'value': 'ANE · Qwen3 diffusion'},
     {'label': 'Audio codec', 'value': 'ANE decoder · 24 kHz'},
 ]
-from .parameters import PARAMETERS as SPEECH_PARAMETERS
-from .parameters import CAPABILITIES as SPEECH_CAPABILITIES
+from .parameters import PARAMETERS as SPEECH_PARAMETERS  # noqa: F401 (model registry)
+from .parameters import CAPABILITIES as SPEECH_CAPABILITIES  # noqa: F401 (model registry)
 
 
 def checkpoint():

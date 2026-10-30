@@ -132,14 +132,15 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, stages=None, group=B
         # functions use the same Parameter objects and weight resources.
         function_prefix = 'voxcpm2_' + role.replace('-', '_') + '_'
         functions, cache_functions, sampler_functions = [], [], []
+        # stage() runs within this iteration, so it sees the current converter and role.
         def stage(module, args, inputs, name):
-            converter.add_pytorch_module(
+            converter.add_pytorch_module(  # noqa: B023, F821
                 module, export_fn=lambda value: torch.export.export(value, args).run_decompositions(get_decomp_table()),
                 externalize_modules=[ExternalizeSpec(RMSNormImpl, composite_op_name='rms_norm',
                                                      composite_attrs=['eps', 'axes', 'version'])],
                 input_names=inputs, output_names=['features'], entrypoint_name=name)
-            functions.append(name)
-            print(f'{role}: staged {name}', flush=True)
+            functions.append(name)  # noqa: B023
+            print(f'{role}: staged {name}', flush=True)  # noqa: B023
         variants = ([(f'c{n}w{width}', n, width) for n in capacities for width in (PREFILL_WIDTH, 1)] if cached
                     else [(name, 0, width) for name, width in LOCAL_FUNCTIONS[role].items()])
         local = {}

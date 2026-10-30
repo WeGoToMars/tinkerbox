@@ -1,7 +1,6 @@
 """High-signal process supervision and watchdog abort tests."""
 
 import json
-from pathlib import Path
 import sys
 
 import pytest
