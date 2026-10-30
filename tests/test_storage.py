@@ -53,7 +53,7 @@ def storage(home, *arguments):
 def test_report_and_remove_a_model_with_everything_it_downloaded(tmp_path: Path):
     build = subprocess.run(["sw_vers", "-buildVersion"], capture_output=True, text=True, check=True).stdout.strip()
     old, old_compiled = bundle(tmp_path, build, "d3-nano", "v2.0.0")
-    current, current_compiled = bundle(tmp_path, build, "d3-nano", "v2.1.0")
+    current, current_compiled = bundle(tmp_path, build, "d3-nano", "v2.2.0")
     other, other_compiled = bundle(tmp_path, build, "d1-3b", "v2.0.1")
     nano = checkpoint(tmp_path / "hub", "vllm-sr/d3-nano")
     d1 = checkpoint(tmp_path / "hub", "LiquidAI/d1-3B")
@@ -62,7 +62,7 @@ def test_report_and_remove_a_model_with_everything_it_downloaded(tmp_path: Path)
     models, found = storage(tmp_path)
     assert set(models) == {"d1-3b", "d3-nano"}
     bundles = [(b["revision"], b["current"], b["compiled"]["paths"]) for b in models["d3-nano"]["bundles"]]
-    assert bundles == [("v2.0.0", False, [str(old_compiled)]), ("v2.1.0", True, [str(current_compiled)])]
+    assert bundles == [("v2.0.0", False, [str(old_compiled)]), ("v2.2.0", True, [str(current_compiled)])]
     assert models["d3-nano"]["checkpoint"]["repo"] == "vllm-sr/d3-nano"
     # Clones share the bundle's blocks, so compiled copies add nothing to the model's size.
     assert all(b["compiled"]["bytes"] == 0 for b in models["d3-nano"]["bundles"])
@@ -70,7 +70,7 @@ def test_report_and_remove_a_model_with_everything_it_downloaded(tmp_path: Path)
     assert found == set(map(str, unused))
 
     models, _ = storage(tmp_path, "--remove", "d3-nano", "--outdated")
-    assert [b["revision"] for b in models["d3-nano"]["bundles"]] == ["v2.1.0"]
+    assert [b["revision"] for b in models["d3-nano"]["bundles"]] == ["v2.2.0"]
     assert not old.exists() and not old_compiled.exists()
     assert current.exists() and current_compiled.exists() and nano.exists()
 

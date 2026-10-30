@@ -1,5 +1,6 @@
 """Run the real App Intent perform methods against the built app's runtime (no mocks)."""
 
+import argparse
 from pathlib import Path
 import plistlib
 import shutil
@@ -7,6 +8,11 @@ import subprocess
 import tempfile
 
 
+parser = argparse.ArgumentParser(description=__doc__)
+checks = parser.add_mutually_exclusive_group()
+checks.add_argument('--speech', action='store_true', help='exercise the speech App Intents instead of decisions')
+checks.add_argument('--speech-modes', action='store_true', help='check the mode picker before model setup')
+args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 source = root / "app"
 app = root / "artifacts/swiftui/Tinkerbox.app"
@@ -32,6 +38,8 @@ with tempfile.TemporaryDirectory(prefix="shortcuts-", dir=root / "artifacts/swif
         "xcrun", "swiftc", "-O", "-parse-as-library", "-target", "arm64-apple-macos27.0",
         str(source / "Catalog.swift"), str(source / "Runtime.swift"), str(source / "Shortcuts.swift"),
         str(root / "src/tinkerbox_ane/transcription.swift"),
-        str(root / "tests/swiftui/ShortcutsSmoke.swift"), "-o", str(executable),
+        str(root / 'tests/swiftui' / ('SpeechModeSmoke.swift' if args.speech_modes else
+                                    'SpeechShortcutsSmoke.swift' if args.speech else 'ShortcutsSmoke.swift')),
+        "-o", str(executable),
     ], check=True)
     subprocess.run([str(executable)], check=True, timeout=600)

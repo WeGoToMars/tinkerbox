@@ -9,7 +9,7 @@ import AVFoundation
         let runtime = Runtime.shared
         let ready = try await runtime.start(model: "omnivoice")
         precondition(ready.ready == true && !(ready.speechParameters ?? []).isEmpty)
-        precondition(ready.speechCapabilities?.controls.contains { $0.key == "duration" } == true)
+        precondition(Catalog.speechCapabilities["omnivoice"]?.controls.contains { $0.key == "duration" } == true)
         let short = try await runtime.speak(SpeechRequest(items: [SpeechItem(text: "fuck yeah")], seed: 7))
         precondition(short.audio?.count == 1)
         if let path = ProcessInfo.processInfo.environment["TINKERBOX_SPEECH_SMOKE_WAV"] {

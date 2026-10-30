@@ -24,7 +24,6 @@ struct SpeechView: View {
     @State private var referenceLocales: [Locale] = []
     @State private var transcriptionStatus: String?
     @State private var transcriptionError: String?
-    @State private var transcriptionID: UUID?
     @State private var transcriptionAttempt = 0
     @State private var transcriptionCancelled = false
     @State private var seed = ""
@@ -218,7 +217,8 @@ struct SpeechView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(demo.busy || demo.loading || demo.compatibilityIssue != nil || recorder.active || demo.current?.kind != .speech || isBlank(text) ||
-                              (usesReference && prompt == nil && (transcriptionStatus != nil || isBlank(transcript))) ||
+                              (usesReference && prompt == nil && (reference == nil ||
+                                  (needsTranscript && (transcriptionStatus != nil || isBlank(transcript))))) ||
                               (activeMode?.instructionRequired == true && isBlank(instruction)))
                     if demo.busy { ProgressView().controlSize(.small) }
                     if let result {
@@ -295,15 +295,7 @@ struct SpeechView: View {
             useReference = false
             instruction = ""
             prompt = nil
-            result = nil
-            elapsed = nil
-            cloneMs = nil
-            aneMs = nil
-            resultSeed = nil
-            live?.stop()
-            live = nil
-            firstAudioMs = nil
-            error = nil
+            clearResult()
         }
         .onChange(of: demo.speechCapabilities?.modes.map(\.id), initial: true) {
             guard let modes = demo.speechCapabilities?.modes else { return }
@@ -316,16 +308,20 @@ struct SpeechView: View {
             useReference = false
             recorder.disarm(discard: true)
             recordFocused = false
-            result = nil
-            elapsed = nil
-            cloneMs = nil
-            aneMs = nil
-            resultSeed = nil
-            live?.stop()
-            live = nil
-            firstAudioMs = nil
-            error = nil
+            clearResult()
         }
+    }
+
+    private func clearResult() {
+        result = nil
+        elapsed = nil
+        cloneMs = nil
+        aneMs = nil
+        resultSeed = nil
+        live?.stop()
+        live = nil
+        firstAudioMs = nil
+        error = nil
     }
 
     private func insertTag(_ tag: String) {
@@ -358,24 +354,24 @@ struct SpeechView: View {
         transcriptionAttempt += 1
     }
 
+    // Runs as the view's task for the current reference: a newer one cancels it, so a cancelled
+    // attempt leaves the status, transcript and error to its successor.
     private func transcribeReference() async {
-        let id = UUID()
-        transcriptionID = id
         transcriptionStatus = nil
         transcriptionError = nil
         guard usesReference, needsTranscript, let reference, prompt == nil, isBlank(transcript), !transcriptionCancelled else { return }
         transcriptionStatus = "Preparing speech recognition…"
-        defer { if transcriptionID == id { transcriptionStatus = nil } }
+        defer { if !Task.isCancelled { transcriptionStatus = nil } }
         do {
             let locale = referenceLocale.isEmpty ? Locale.current : Locale(identifier: referenceLocale)
             let recognized = try await ReferenceTranscription.transcribe(reference, locale: locale) { status in
-                if transcriptionID == id && !Task.isCancelled { transcriptionStatus = status }
+                if !Task.isCancelled { transcriptionStatus = status }
             }
             try Task.checkCancellation()
-            if transcriptionID == id { transcript = recognized }
+            transcript = recognized
         } catch is CancellationError { }
         catch {
-            if transcriptionID == id && !Task.isCancelled { transcriptionError = error.localizedDescription }
+            if !Task.isCancelled { transcriptionError = error.localizedDescription }
         }
     }
 
@@ -423,9 +419,6 @@ struct SpeechView: View {
 
     private func generate() async {
         guard seed.isEmpty || Int64(seed) != nil else { error = "Seed must be an integer."; return }
-        guard !usesReference || reference != nil || prompt != nil else {
-            error = "Choose reference audio or a saved voice prompt."; return
-        }
         recordFocused = false
         referencePlaybackFocused = false
         demo.busy = true
@@ -483,12 +476,9 @@ struct SpeechView: View {
         demo.busy = true
         defer { demo.busy = false }
         do {
-            let preprocess = values["preprocess_prompt"] ?? demo.speechParameters.first {
-                $0.key == "preprocess_prompt"
-            }?.defaultValue ?? .boolean(true)
             let data = try await demo.runtime.createVoice(SpeechVoiceRequest(
                 refAudio: referenceURL.path, refText: isBlank(transcript) ? nil : transcript,
-                preprocessPrompt: preprocess == .boolean(true), mode: activeMode?.id))
+                preprocessPrompt: values["preprocess_prompt"].map { $0 == .boolean(true) }, mode: activeMode?.id))
             try data.write(to: url)
             prompt = url
             reference = nil

@@ -26,13 +26,7 @@ final class CachedTensorRunner {
 
   init(url: URL, configuration: CachedTensorConfiguration) async throws {
     self.configuration = configuration
-    guard configuration.hidden > 0, configuration.channels > 0,
-          !configuration.functions.isEmpty,
-          Set(configuration.functions.map(\.name)).count == configuration.functions.count,
-          configuration.functions.allSatisfy({ $0.capacity > 0 && $0.width > 0 }) else {
-      throw HostError("invalid cached tensor configuration")
-    }
-    executable = try await TensorFunctions(url: url, names: Set(configuration.functions.map(\.name)))
+    executable = try await TensorFunctions(url: url)
   }
 
   func reset() {
@@ -41,13 +35,10 @@ final class CachedTensorRunner {
     position = 0
   }
 
-
   func ensureCapacity(_ next: Int, function: InferenceFunction) throws {
     if next == capacity { return }
-    guard next > capacity else { throw HostError("cached tensor capacity cannot shrink") }
     var grown = NDArray(descriptor: try descriptor(function.descriptor.inputDescriptor(of: "cache"), "cache"))
     write4(&grown) { dst, shape, ds in
-      precondition(shape == [1, configuration.channels, 1, next])
       forEachContiguousBlock(shape, ds) { _, offset, count in
         memset(dst.advanced(by: offset), 0, count * 2)
       }
@@ -68,35 +59,17 @@ final class CachedTensorRunner {
   }
 
   func run(_ name: String, count: Int, values: [String: [Float16]]) async throws -> ([Int], [Float16]) {
-    guard let spec = configuration.functions.first(where: { $0.name == name }),
-          count > 0, count <= spec.width, position + count <= spec.capacity,
-          Set(values.keys) == Set(["hidden", "cos", "sin"]) else {
-      throw HostError("invalid cached tensor append")
+    guard let spec = configuration.functions.first(where: { $0.name == name }) else {
+      throw HostError("unknown cached tensor function \(name)")
     }
     let function = try await executable.get(name)
     try ensureCapacity(spec.capacity, function: function)
     var inputs: [String: NDArray] = [:]
-    for (key, value) in values {
-      var array = NDArray(descriptor: try descriptor(function.descriptor.inputDescriptor(of: key), key))
-      var matches = false
-      write4(&array) { dst, shape, strides in
-        matches = shape.reduce(1, *) == value.count
-        if matches {
-          value.withUnsafeBufferPointer { source in
-            forEachContiguousBlock(shape, strides) { linear, offset, count in
-              dst.advanced(by: offset).update(from: source.baseAddress!.advanced(by: linear), count: count)
-            }
-          }
-        }
-      }
-      guard matches else { throw HostError("wrong element count for \(key)") }
-      inputs[key] = array
-    }
+    for (key, value) in values { inputs[key] = try inputArray(function, key, value) }
     var mask = NDArray(descriptor: try descriptor(function.descriptor.inputDescriptor(of: "mask"), "mask"))
     write4(&mask) { dst, shape, strides in
-      precondition(shape == [1, 1, spec.width, capacity + spec.width])
       forEachContiguousBlock(shape, strides) { _, offset, count in
-        dst.advanced(by: offset).update(repeating: -Float16.infinity, count: count)
+        dst.advanced(by: offset).update(repeating: maskMin, count: count)
       }
       for row in 0..<spec.width {
         let offset = row * strides[2]
@@ -113,8 +86,7 @@ final class CachedTensorRunner {
       throw HostError("missing cached tensor output")
     }
     var hidden = [Float16](repeating: 0, count: configuration.hidden * count)
-    read4(result) { src, shape, ss in
-      precondition(shape == [1, configuration.hidden + configuration.channels, 1, spec.width])
+    read4(result) { src, _, ss in
       for channel in 0..<configuration.hidden {
         for index in 0..<count { hidden[channel * count + index] = src[channel * ss[1] + index * ss[3]] }
       }
@@ -148,19 +120,11 @@ func cachedTensorHost(_ asset: URL, configuration: String) async {
       writeAll([0])
       continue
     }
-    guard operation == UInt8(ascii: "C"), let count = readExact(4), let length = readExact(4),
-          let name = readExact(u32(length, 0)), let fields = readExact(4) else { return }
-    var values: [String: [Float16]] = [:]
-    for _ in 0..<u32(fields, 0) {
-      guard let length = readExact(4), let key = readExact(u32(length, 0)),
-            let size = readExact(4), let value = readHalves(u32(size, 0)) else { return }
-      values[String(decoding: key, as: UTF8.self)] = value
-    }
+    guard operation == UInt8(ascii: "C"), let count = readExact(4), let name = readString(),
+          let values = readInputs() else { return }
     do {
-      let (shape, hidden) = try await runner.run(String(decoding: name, as: UTF8.self), count: u32(count, 0), values: values)
-      var reply: [UInt8] = [0] + le32(shape.count) + shape.flatMap(le32)
-      hidden.withUnsafeBytes { reply += $0 }
-      writeAll(reply)
+      let (shape, hidden) = try await runner.run(name, count: u32(count, 0), values: values)
+      sendTensor(shape, hidden)
     } catch { sendError("\(error)") }
   }
 }

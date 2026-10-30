@@ -168,7 +168,6 @@ struct Reply: Decodable, Sendable {
     let elapsedMs: Double?
     let error: String?
     let speechParameters: [SpeechParameter]?
-    let speechCapabilities: SpeechCapabilities?
     let audio: [SpeechAudio]?
     let aneMs: Double?
     let cloneMs: Double?
@@ -273,7 +272,7 @@ struct SpeechVoiceRequest: Encodable, Sendable {
     let operation = "create_voice"
     let refAudio: String
     var refText: String?
-    let preprocessPrompt: Bool
+    var preprocessPrompt: Bool?  // nil uses the model's default
     var mode: String? = nil
     enum CodingKeys: String, CodingKey {
         case operation, mode, refAudio = "ref_audio", refText = "ref_text", preprocessPrompt = "preprocess_prompt"
@@ -332,7 +331,7 @@ actor Runtime {
         kill(getpgid(pid) == pid ? -pid : pid, signal)
     }
 
-    // Each task remembers its own model; the UI and Shortcuts both use the one chosen in the app.
+    // Each task remembers the UI's selection. Speech Shortcuts pass their own saved model per request.
     nonisolated static func selectedModel(for task: ModelTask) -> String {
         let runnable = Catalog.bundled.filter { $0.isSupported && $0.kind == task }.map(\.id)
         let stored = UserDefaults.standard.string(forKey: "model.\(task.rawValue)")
@@ -406,8 +405,7 @@ actor Runtime {
     private func prepare(model: String) async throws -> Reply {
         if let readyReply, readyReply.modelId == model, process?.isRunning == true, replies != nil { return readyReply }
         if let selected = Catalog.current(model),
-           let issue = Catalog.availabilityIssue(for: selected, asset:
-                ProcessInfo.processInfo.environment["TINKERBOX_ASSET"].map { URL(fileURLWithPath: $0) }) {
+           let issue = Catalog.availabilityIssue(for: selected, asset: Catalog.overrideAsset) {
             throw DecisionError.invalid(issue)
         }
         readyReply = nil
@@ -514,31 +512,25 @@ actor Runtime {
     }
 
     // With `onAudio`, one text's pieces arrive in order while it is generated, then the complete reply.
-    func speak(_ request: SpeechRequest, onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil) async throws -> Reply {
-        guard !request.items.isEmpty, request.items.allSatisfy({ !isBlank($0.text) }) else {
-            throw DecisionError.invalid("Enter text to speak.")
-        }
+    func speak(_ request: SpeechRequest, model: String? = nil,
+               onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil) async throws -> Reply {
         var request = request
         request.stream = onAudio == nil ? nil : true
-        // Reference preparation belongs to the backend: some modes need a
-        // transcript while others use only the audio.
-        let reply = try await speechReply(request, onAudio: onAudio)
-        guard reply.audio?.count == request.items.count else { throw DecisionError.invalidReply }
-        return reply
+        return try await speechReply(request, model: model, onAudio: onAudio)
     }
 
-    func createVoice(_ request: SpeechVoiceRequest) async throws -> Data {
-        let reply = try await speechReply(request)
+    func createVoice(_ request: SpeechVoiceRequest, model: String? = nil) async throws -> Data {
+        let reply = try await speechReply(request, model: model)
         guard let prompt = reply.voicePrompt else { throw DecisionError.invalidReply }
         return prompt
     }
 
-    private func speechReply<R: Encodable>(_ request: R,
+    private func speechReply<R: Encodable>(_ request: R, model: String? = nil,
                                            onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil) async throws -> Reply {
         await acquire()
         defer { release() }
         try Task.checkCancellation()
-        _ = try await prepare(model: Self.selectedModel(for: .speech))
+        _ = try await prepare(model: model ?? Self.selectedModel(for: .speech))
         var data = try JSONEncoder().encode(request)
         data.append(10)
         do { try input!.fileHandleForWriting.write(contentsOf: data) } catch {

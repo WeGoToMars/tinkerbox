@@ -51,6 +51,21 @@ def device_architecture() -> str:
     return result.stdout.strip()
 
 
+def check_architecture(spec: dict) -> None:
+    """Reject a compiled bundle that targets another chip."""
+    current = device_architecture()
+    if spec.get("architecture") and spec["architecture"] != current:
+        raise ValueError(
+            f"Bundle targets {chip_name(spec['architecture'])} ({spec['architecture']}), but this Mac is "
+            f"{chip_name(current)} ({current}). Choose a bundle compiled for this Mac."
+        )
+
+
+def _string(value: str) -> bytes:
+    encoded = value.encode()
+    return struct.pack("<I", len(encoded)) + encoded
+
+
 def check_layout(spec: dict) -> None:
     """The cache tiers, dimensions, and convolution/attention layers the chunked runner allocates state for."""
     width, context, tiers = spec["width"], spec["context"], spec["tiers"]
@@ -85,21 +100,27 @@ def check_flops(counted) -> None:
 class _PipeHost:
     _timeout = 300.0
 
-    def _read(self, count: int) -> bytes:
+    def _read_into(self, buffer) -> None:
+        """Fill a writable buffer, such as an output array, directly from the reply pipe."""
         import select
         import time
 
+        view = memoryview(buffer).cast('B')
         deadline = time.monotonic() + self._timeout
-        data = bytearray()
-        while len(data) < count:
+        done = 0
+        while done < len(view):
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([self._process.stdout], [], [], remaining)[0]:
                 self._process.kill()
                 raise RuntimeError(f'Core AI host did not respond within {self._timeout:g} seconds')
-            chunk = os.read(self._process.stdout.fileno(), min(count - len(data), 1024 * 1024))
-            if not chunk:
+            count = os.readv(self._process.stdout.fileno(), [view[done:]])
+            if not count:
                 raise RuntimeError(f'the Core AI host exited (status {self._process.poll()})')
-            data.extend(chunk)
+            done += count
+
+    def _read(self, count: int) -> bytes:
+        data = bytearray(count)
+        self._read_into(data)
         return bytes(data)
 
     def _u32(self) -> int:
@@ -116,6 +137,21 @@ class _PipeHost:
             self._process.stdin.flush()
         except BrokenPipeError as error:
             raise RuntimeError(f"the Core AI host exited (status {self._process.poll()})") from error
+
+    def _call(self, header: bytes, inputs: dict):
+        """Send named FP16 inputs after a request header and read back one FP16 tensor."""
+        import numpy as np
+
+        payload = [header + struct.pack("<I", len(inputs))]
+        for name, value in inputs.items():
+            array = np.ascontiguousarray(value, dtype=np.float16)
+            payload += [_string(name) + struct.pack("<I", array.size), memoryview(array).cast("B")]
+        self._send(*payload)
+        self._reply()
+        rank = self._u32()
+        output = np.empty(struct.unpack(f"<{rank}I", self._read(4 * rank)), np.float16)
+        self._read_into(output)
+        return output
 
     def close(self) -> None:
         process = getattr(self, "_process", None)
@@ -149,14 +185,12 @@ class TensorHost(_PipeHost):
         clones = Path(self._directory.name) / 'clones'
         clones.mkdir()
         environment = dict(os.environ, COW_CLIENT_DEST=str(clones), COW_ASSET_PREFIX=str(asset))
-        self._cached = cached is not None
-        self._bidirectional = bidirectional is not None
-        if self._cached and self._bidirectional:
-            raise ValueError('choose causal caching or bidirectional attention')
-        arguments = ['--tensor', str(asset), output] if cached is None else [
-            '--cached-tensor', str(asset), json.dumps(dict(cached, output=output))]
         if bidirectional is not None:
             arguments = ['--bidirectional-tensor', str(asset), json.dumps(bidirectional)]
+        elif cached is not None:
+            arguments = ['--cached-tensor', str(asset), json.dumps(dict(cached, output=output))]
+        else:
+            arguments = ['--tensor', str(asset), output]
         try:
             self._process = subprocess.Popen([str(BINARY), *arguments],
                                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment)
@@ -168,39 +202,20 @@ class TensorHost(_PipeHost):
             raise
 
     def run(self, function: str, inputs: dict):
-        return self._tensor_call(b'F', function, inputs)
+        return self._call(b'F' + _string(function), inputs)
 
     def reset(self):
-        if not self._cached:
-            raise ValueError('reset requires a cached tensor host')
+        """Clear a cached host's transformer state."""
         self._send(b'R')
         self._reply()
 
     def step(self, function: str, inputs: dict, count: int):
-        if not self._cached:
-            raise ValueError('step requires a cached tensor host')
-        return self._tensor_call(b'C' + struct.pack('<I', count), function, inputs)
+        """Append `count` positions to a cached host's state and return their hidden rows."""
+        return self._call(b'C' + struct.pack('<I', count) + _string(function), inputs)
 
-    def full_attention(self, inputs: dict, count: int, visible: int):
-        if not self._bidirectional:
-            raise ValueError('full_attention requires a bidirectional tensor host')
-        return self._tensor_call(b'B' + struct.pack('<II', count, visible), '', inputs)
-
-    def _tensor_call(self, prefix, function, inputs):
-        import numpy as np
-
-        encoded = function.encode()
-        payload = [prefix + struct.pack('<I', len(encoded)) + encoded + struct.pack('<I', len(inputs))]
-        for name, value in inputs.items():
-            array = np.ascontiguousarray(value, dtype=np.float16)
-            key = name.encode()
-            payload += [struct.pack('<I', len(key)) + key + struct.pack('<I', array.size),
-                        memoryview(array).cast('B')]
-        self._send(*payload)
-        self._reply()
-        rank = self._u32()
-        shape = struct.unpack(f'<{rank}I', self._read(4 * rank))
-        return np.frombuffer(self._read(2 * int(np.prod(shape))), dtype=np.float16).reshape(shape).copy()
+    def full_attention(self, inputs: dict):
+        """Logits of a bidirectional host's sequence, in which every position attends every other."""
+        return self._call(b'B', inputs)
 
 
 class Host(_PipeHost):
@@ -213,13 +228,7 @@ class Host(_PipeHost):
         check(spec)
         if not compiled(spec):
             raise ValueError("load requires a compiled AOT bundle; compile the exported model first")
-        current = device_architecture()
-        if spec.get("architecture") and spec["architecture"] != current:
-            target_chip = chip_name(spec["architecture"])
-            current_chip = chip_name(current)
-            raise ValueError(
-                f"Bundle targets {target_chip} ({spec['architecture']}), but this Mac is {current_chip} ({current}). Choose a bundle compiled for this Mac."
-            )
+        check_architecture(spec)
         # Stage on the asset volume: APFS clones must stay on the same filesystem.
         self._directory = tempfile.TemporaryDirectory(prefix=".host-", dir=asset.parent)
         clones = Path(self._directory.name) / "clones"
@@ -244,19 +253,7 @@ class Host(_PipeHost):
     def vision(self, inputs: dict, function: str = "main"):
         """Run a function of the bundle's vision asset on named FP16 inputs, each row-major in its
         declared shape, and return the `features` output."""
-        import numpy as np
-        encoded = function.encode()
-        payload = [b"V" + struct.pack("<I", len(encoded)) + encoded + struct.pack("<I", len(inputs))]
-        for name, value in inputs.items():
-            array = np.ascontiguousarray(value, dtype=np.float16)
-            encoded = name.encode()
-            payload += [struct.pack("<I", len(encoded)) + encoded + struct.pack("<I", array.size),
-                        memoryview(array).cast("B")]
-        self._send(*payload)
-        self._reply()
-        rank = self._u32()
-        shape = struct.unpack(f"<{rank}I", self._read(4 * rank))
-        return np.frombuffer(self._read(2 * int(np.prod(shape))), dtype=np.float16).reshape(shape).copy()
+        return self._call(b"V" + _string(function), inputs)
 
     def metrics(self) -> dict:
         """Neural Engine `seconds` and `calls` per function since the previous call."""

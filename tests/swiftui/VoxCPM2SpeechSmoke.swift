@@ -4,16 +4,16 @@ import Foundation
     static func main() async throws {
         UserDefaults.standard.set("voxcpm2", forKey: "model.speech")
         let runtime = Runtime.shared
-        let ready = try await runtime.start(model: "voxcpm2")
-        precondition(ready.speechCapabilities?.modes.first { $0.id == "clone" }?.referenceTranscript == "none")
-        precondition(ready.speechCapabilities?.modes.first { $0.id == "continuation" }?.referenceTranscript == "required")
+        _ = try await runtime.start(model: "voxcpm2")
+        precondition(Catalog.speechCapabilities["voxcpm2"]?.modes.first { $0.id == "clone" }?.referenceTranscript == "none")
+        precondition(Catalog.speechCapabilities["voxcpm2"]?.modes.first { $0.id == "continuation" }?.referenceTranscript == "required")
         let request = SpeechRequest(items: [SpeechItem(text: "Hello! Welcome to Tinkerbox.", mode: "auto")], seed: 42)
         let first = try await runtime.speak(request)
         precondition(first.audio?.first?.sampleRate == 48000 && first.audio!.first!.duration > 0)
         await runtime.unload()
         let replay = try await runtime.speak(request)
         precondition(first.audio!.first!.wav == replay.audio!.first!.wav)
-        precondition(ready.speechCapabilities?.streaming == true)
+        precondition(Catalog.speechCapabilities["voxcpm2"]?.streaming == true)
         let pieces = Pieces()
         let streamed = try await runtime.speak(request) { await pieces.add($0) }
         let joined = await pieces.pcm, count = await pieces.count

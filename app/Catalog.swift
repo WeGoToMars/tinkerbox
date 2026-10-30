@@ -48,7 +48,6 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     let context: Int?
     let downloadBytes: Int64?
     let license: String?
-    let localOnly: Bool?
     let architectures: [String]?
     let minVersion: String
 
@@ -79,8 +78,15 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
         return (try? decode(data)) ?? []
     }()
 
+    // Backend declarations bundled at build time: Shortcuts pickers need no model or Python setup.
+    nonisolated static let speechCapabilities: [String: SpeechCapabilities] = {
+        guard let url = Bundle.main.url(forResource: "speech-capabilities", withExtension: "json"),
+              let data = try? Data(contentsOf: url) else { return [:] }
+        return (try? JSONDecoder().decode([String: SpeechCapabilities].self, from: data)) ?? [:]
+    }()
+
     // A published revision the user accepted, newer than the one this app ships; kept as the raw
-    // catalog entry because the worker and downloader read it from TINKERBOX_CATALOG_ENTRY.
+    // catalog entry because the worker and downloader read it from TINKERBOX_CATALOG_UPDATES.
     nonisolated static func pinnedEntry(_ id: String) -> String? {
         UserDefaults.standard.string(forKey: "catalog.entry.\(id)")
     }
@@ -105,53 +111,54 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     }
 
     // Whether an earlier revision of the model is installed, so the current one is an update.
-    nonisolated static func hasOlderBundle(_ model: CatalogModel, architecture: String = deviceArchitecture) -> Bool {
+    nonisolated static func hasOlderBundle(_ model: CatalogModel) -> Bool {
         let folders = (try? FileManager.default.contentsOfDirectory(
             at: cacheURL.appending(path: model.id), includingPropertiesForKeys: nil)) ?? []
         return folders.contains { folder in
-            folder.lastPathComponent != model.revision && bundleIssue(
-                at: folder.appending(path: "macos27").appending(path: architecture), architecture: architecture) == nil
+            folder.lastPathComponent != model.revision
+                && bundleIssue(at: folder.appending(path: "macos27").appending(path: deviceArchitecture)) == nil
         }
     }
 
-    nonisolated static func bundleIssue(at url: URL, architecture: String = deviceArchitecture) -> String? {
+    nonisolated static func bundleIssue(at url: URL) -> String? {
         guard let data = try? Data(contentsOf: url.appending(path: "model.json")),
               let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               manifest["version"] as? Int == 2,
               let target = manifest["architecture"] as? String else {
             return "Choose a compiled bundle directory containing model.json."
         }
-        guard target == architecture else {
+        guard target == deviceArchitecture else {
             return "This bundle targets \(architectures[target] ?? target). Choose a bundle compiled for this Mac."
         }
         return nil
     }
 
-    nonisolated static func cachedBundle(for model: CatalogModel, architecture: String = deviceArchitecture) -> URL {
+    nonisolated static func cachedBundle(for model: CatalogModel) -> URL {
         cacheURL.appending(path: model.id).appending(path: model.revision)
-            .appending(path: "macos27").appending(path: architecture)
+            .appending(path: "macos27").appending(path: deviceArchitecture)
     }
 
-    nonisolated static func localBundle(for model: CatalogModel, architecture: String = deviceArchitecture) -> URL? {
+    nonisolated static func localBundle(for model: CatalogModel) -> URL? {
         let candidate = UserDefaults.standard.string(forKey: "asset.\(model.id)").map { URL(fileURLWithPath: $0) }
-            ?? cachedBundle(for: model, architecture: architecture)
-        return bundleIssue(at: candidate, architecture: architecture) == nil ? candidate : nil
+            ?? cachedBundle(for: model)
+        return bundleIssue(at: candidate) == nil ? candidate : nil
     }
 
-    nonisolated static func availabilityIssue(for model: CatalogModel, asset: URL? = nil,
-                                             architecture: String = deviceArchitecture) -> String? {
-        guard architectures[architecture] != nil else {
+    // A development bundle that the worker loads for whichever model it runs.
+    nonisolated static let overrideAsset = ProcessInfo.processInfo.environment["TINKERBOX_ASSET"].map { URL(fileURLWithPath: $0) }
+
+    nonisolated static func availabilityIssue(for model: CatalogModel, asset: URL? = nil) -> String? {
+        guard architectures[deviceArchitecture] != nil else {
             return "This Mac's Neural Engine is not supported by this version of Tinkerbox. Update Tinkerbox to use this Mac."
         }
-        if let asset { return bundleIssue(at: asset, architecture: architecture) }
+        if let asset { return bundleIssue(at: asset) }
         if let selected = UserDefaults.standard.string(forKey: "asset.\(model.id)") {
-            return bundleIssue(at: URL(fileURLWithPath: selected), architecture: architecture)
+            return bundleIssue(at: URL(fileURLWithPath: selected))
         }
-        if localBundle(for: model, architecture: architecture) != nil { return nil }
-        if let supported = model.architectures, !supported.contains(architecture) {
+        if localBundle(for: model) != nil { return nil }
+        if let supported = model.architectures, !supported.contains(deviceArchitecture) {
             return "No \(model.name) bundle is available for this Mac. Choose another model or a matching local bundle."
         }
-        if model.localOnly == true { return "Choose a local \(model.name) bundle to use this model." }
         return nil
     }
 

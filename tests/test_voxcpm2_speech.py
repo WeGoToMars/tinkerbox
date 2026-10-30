@@ -31,6 +31,7 @@ def test_modes_batch_replay_and_request_limits(speech):
     assert first['audio'] == synthesize(speech, {}, request)['audio']
     standalone = synthesize(speech, {}, dict(items=[request['items'][0]], seed=42))
     assert first['audio'][0] == standalone['audio'][0]
+    assert first['audio'][1] == synthesize(speech, {}, dict(items=[request['items'][1]], seed=43))['audio'][0]
     for arguments in [dict(duration=1), dict(speed=1.2), dict(language='en'),
                       dict(mode='design'), dict(controls={'speed': 'fast'})]:
         with pytest.raises(ValueError):

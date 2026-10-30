@@ -1,4 +1,4 @@
-"""Export the complete diffusion transformer and audio projection for ANE."""
+"""Export the complete diffusion transformer, audio projection and codec decoder for ANE."""
 
 import argparse
 import json
@@ -12,6 +12,7 @@ from safetensors import safe_open
 from tinkerbox_ane.blocks import conv1x1
 from tinkerbox_ane.architectures.qwen3 import Backbone, Config
 from tinkerbox_ane.architectures.attention import BlockAttention
+from tinkerbox_ane.architectures.dac import Decoder
 from tinkerbox_ane.coreai import source_hash
 from tinkerbox_ane.bundle import checkpoint_digest, compile_bundle, write_checkpoint
 from . import KIND, REPO, REVISION, SOURCE, checkpoint
@@ -35,6 +36,9 @@ SHORT_CAPACITIES = (192, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 153
 # Fused call latency is modeled as call + n + n**2/attention positions of
 # projection/MLP work, least-squares fitted on Apple M5 Pro (h17s).
 FUSED_COST = dict(call_positions=26, attention_positions=942)
+# Codec decoder calls in frames of 960 samples: the Neural Engine limits a tensor
+# axis to 65,536 elements. Ten frames each side cover the decoder's receptive field.
+CODEC_WIDTH, CODEC_OVERLAP = 64, 10
 
 
 class Project(nn.Module):
@@ -73,6 +77,27 @@ class Output(nn.Module):
 
     def forward(self, hidden):
         return self.head(self.norm(hidden))
+
+
+def export_codec(out, weights):
+    """Export the audio codec's acoustic decoder; returns its asset stage and manifest fields."""
+    from coreai_torch import TorchConverter, get_decomp_table
+    from transformers import HiggsAudioV2TokenizerModel
+
+    codec = HiggsAudioV2TokenizerModel.from_pretrained(Path(weights) / 'audio_tokenizer', device_map='cpu')
+    decoder = Decoder(codec.acoustic_decoder).half().eval().requires_grad_(False)
+    channels = codec.acoustic_decoder.conv1.in_channels
+    inputs = (torch.zeros(1, channels, CODEC_WIDTH, dtype=torch.float16),
+              torch.zeros(1, 1, CODEC_WIDTH, dtype=torch.float16))
+    converter, function = TorchConverter(), 'omnivoice_codec'
+    with torch.no_grad():
+        converter.add_pytorch_module(
+            decoder, export_fn=lambda value: torch.export.export(value, inputs).run_decompositions(get_decomp_table()),
+            input_names=['hidden', 'mask'], output_names=['audio'], entrypoint_name=function)
+    asset = Path(out) / 'codec.aimodel'
+    converter.to_coreai().save_asset(asset)
+    stage = dict(role='codec', asset=asset.name, source_hash=source_hash(asset), functions=[function])
+    return stage, dict(codec_width=CODEC_WIDTH, codec_overlap=CODEC_OVERLAP, codec_hop=decoder.hop)
 
 
 def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4, short_capacities=SHORT_CAPACITIES):
@@ -143,10 +168,12 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4, short_capa
             short_functions.append(name)
     short_asset = out / 'short.aimodel'
     converter.to_coreai().save_asset(short_asset)
+    codec, codec_fields = export_codec(out, weights)
     cpu = write_checkpoint(weights, out, ['llm.embed_tokens.weight', 'audio_embeddings.weight'])
     spec = dict(kind=KIND, version=2, assets=[
                     dict(role='diffusion', asset=asset.name, source_hash=source_hash(asset), functions=long_functions),
-                    dict(role='short', asset=short_asset.name, source_hash=source_hash(short_asset), functions=functions)],
+                    dict(role='short', asset=short_asset.name, source_hash=source_hash(short_asset), functions=functions),
+                    codec],
                 checkpoint_hash=checkpoint_digest(cpu),
                 source=dict(repo=REPO, revision=REVISION), capacities=list(capacities),
                 hidden=cfg.hidden, head_dim=cfg.head_dim, rope_theta=cfg.rope_theta,
@@ -155,7 +182,7 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4, short_capa
                 short_capacities=list(short_capacities), short_functions=short_functions, fused_cost=FUSED_COST,
                 codebooks=data['num_audio_codebook'], audio_vocab=data['audio_vocab_size'], splits=splits,
                 normalization='coreai-rms_norm', audio_head_centering='per-codebook-vocabulary-mean',
-                attention_value_scale=model.backbone.layers[0].value_scale)
+                attention_value_scale=model.backbone.layers[0].value_scale, **codec_fields)
     (out / 'model.json').write_text(json.dumps(spec, indent=2) + '\n')
     return out
 

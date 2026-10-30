@@ -1,8 +1,9 @@
 # OmniVoice speech synthesis
 
-OmniVoice runs its Qwen3 diffusion transformer and audio projection on ANE.
-Text processing, embeddings, scheduling, sampling and the 24 kHz audio codec run
-on CPU through `omnivoice==0.2.1`. Bundles include the CPU embeddings and codec.
+OmniVoice runs its Qwen3 diffusion transformer, audio projection and the 24 kHz
+codec's acoustic decoder on ANE. Text processing, embeddings, scheduling, sampling,
+codebook lookup and reference encoding run on CPU through `omnivoice==0.2.1`.
+Bundles include the CPU embeddings and codec.
 The checkpoint is `k2-fsa/OmniVoice@c5fdb5ccb189668d56333f77ba2629f4cd7535f4`;
 weights are CC-BY-NC-4.0 and upstream code is Apache-2.0.
 
@@ -77,7 +78,11 @@ speech and performance results above were measured only on `h17s`. Clean
 sequential compile times ranged from 625 s (M4, M4 Pro) to 1,780 s (14-core
 M3 Max), dominated by the fused asset.
 
-M1 and M2 are not supported. Their ANE compiler rejects the long-context
+M3 is not supported. Its Neural Engine limits a tensor's width to 16,384 elements,
+and the codec decoder's 24 kHz layers need up to 61,440 (see Codec decoder); every
+M3 target (`h15*`) fails placement. The diffusion assets themselves compile on M3.
+
+M1 and M2 are not supported either. Their ANE compiler rejects the long-context
 merge's rescaling, `exp(clamp(m_i - m_j, max=0))`, in every attention tier
 above 4,096 positions; the identical `softmax(block maxima) * block mass`
 form compiled on M1 in isolated probes, but has not been exported or
@@ -89,7 +94,7 @@ PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.omnivoice.publish \
   --source artifacts/omnivoice/perf-src --no-upload --continue-on-error
 ```
 
-The catalog remains local-only until publishing is explicitly requested.
+Published `v2.2.0` bundles download automatically; local exports are optional.
 
 Run public speech regressions with `TINKERBOX_SPEECH_TEST_ASSET` and
 `TINKERBOX_OMNIVOICE_CHECKPOINT` set. Transcription checks use Apple's system
@@ -190,6 +195,37 @@ PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.guard artifacts/omnivoice/paths
 ```
 
 These results do not establish the best buckets or cost model for other chips.
+
+## Codec decoder
+
+The DAC acoustic decoder runs on ANE in calls of 64 frames (61,440 samples): the
+Neural Engine limits a tensor axis to 65,536 elements. Each call keeps 10 frames of
+context on both sides, which covers the decoder's receptive field, so 44 frames of
+audio come from each call. A frame mask before every convolution reproduces the
+original zero padding at the true start and end, so chunked FP32 decoding matches
+whole-sequence decoding to rounding (115 dB SNR). Two rewrites keep the graph on ANE
+and within FP16:
+
+- Transposed convolutions do not place on ANE. Each has kernel = 2 × stride, so it
+  becomes one kernel-2 convolution over all output phases, interleaved; this is exact.
+- Some Snake α are about 4e-7, and the original 1/α overflows FP16. The bundle
+  computes x ± (sin(αx)·|α|^-½)² instead.
+
+On `h17s` the bundle decodes 18.5 s of audio in 149 ms in 11 calls; the original
+decoder took 517 ms on CPU. The output stays within 47 dB SNR of the original codec
+(largest sample error 6e-3), and generated tokens are unchanged. Codebook lookup and
+the codec's input projection stay on CPU; the CPU acoustic and semantic decoders are
+not loaded. The codec asset is 39 MB and adds about 0.13 GiB of wired memory.
+
+Warm requests on `h17s` with the codec decoder on ANE (median of five, seed 1):
+
+| Request | Audio | Time |
+| --- | --- | --- |
+| Automatic voice | 4.4 s | 0.83 s |
+| Saved clone | 2.9 s | 0.80 s |
+| Passage | 18.5 s | 4.3 s |
+
+The end-to-end table above, including energy, was measured before this change.
 
 ## Limits
 

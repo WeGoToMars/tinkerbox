@@ -76,7 +76,7 @@ struct RunTotals {
     var settings: [ModelSetting] = []
     var info: [ModelInfo] = []
     var speechParameters: [SpeechParameter] = []
-    var speechCapabilities: SpeechCapabilities?
+    var speechCapabilities: SpeechCapabilities? { Catalog.speechCapabilities[model] }
     // Only values that differ from the defaults are kept.
     var settingValues: [String: Int] = [:] {
         didSet { Runtime.store(settings: settingValues, for: model) }
@@ -86,8 +86,7 @@ struct RunTotals {
 
     var current: CatalogModel? { catalog.models.first { $0.id == model } }
     var compatibilityIssue: String? {
-        current.flatMap { Catalog.availabilityIssue(for: $0, asset:
-            ProcessInfo.processInfo.environment["TINKERBOX_ASSET"].map { URL(fileURLWithPath: $0) }) }
+        current.flatMap { Catalog.availabilityIssue(for: $0, asset: Catalog.overrideAsset) }
     }
 
     func isDownloaded(_ id: String) -> Bool { catalog.downloaded.contains(id) && !downloads.contains(id) }
@@ -102,13 +101,12 @@ struct RunTotals {
     // Downloads run beside the runtime, so they never hold up requests or model switches.
     private func fetch(_ id: String) async throws {
         if let model = catalog.models.first(where: { $0.id == id }),
-           let issue = Catalog.availabilityIssue(for: model, asset:
-                ProcessInfo.processInfo.environment["TINKERBOX_ASSET"].map { URL(fileURLWithPath: $0) }) {
+           let issue = Catalog.availabilityIssue(for: model, asset: Catalog.overrideAsset) {
             throw DecisionError.invalid(issue)
         }
         // The worker loads a local bundle given at launch instead.
         if UserDefaults.standard.string(forKey: "asset.\(id)") != nil { return }
-        guard !isDownloaded(id), ProcessInfo.processInfo.environment["TINKERBOX_ASSET"] == nil else { return }
+        guard !isDownloaded(id), Catalog.overrideAsset == nil else { return }
         defer {
             catalog.scanDownloads()
             Task { await storage.refresh() }
@@ -159,7 +157,6 @@ struct RunTotals {
             settings = reply.settings ?? []
             info = reply.info ?? []
             speechParameters = reply.speechParameters ?? []
-            speechCapabilities = reply.speechCapabilities
         } catch is CancellationError {
             // Its download was stopped to remove the model.
         } catch {
@@ -175,7 +172,6 @@ struct RunTotals {
         settings = []
         info = []
         speechParameters = []
-        speechCapabilities = nil
         settingValues = Runtime.settings(for: model)
     }
 
@@ -1138,7 +1134,7 @@ struct ModelsView: View {
             Spacer()
             Menu("Hugging Face", systemImage: "arrow.up.right.square") {
                 let repositories = [("Base model", model.baseModel), ("Original model", model.originalModel),
-                                    (model.localOnly == true ? "Model source" : "Converted model", model.repo)]
+                                    ("Converted model", model.repo)]
                 ForEach(repositories, id: \.0) { title, repository in
                     if let repository {
                         Button("\(title) · \(repository)") {
@@ -1175,9 +1171,6 @@ struct ModelsView: View {
                     Label("Selected", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(demo.ready ? .green : .secondary)
                         .help("Selected for \(model.kind?.title ?? model.task)")
-                    if model.localOnly == true {
-                        Button("Choose bundle…") { chooseBundle(model) }.disabled(demo.busy)
-                    }
                 }
                 if issue == nil, !downloading, demo.catalog.update(for: model) != nil {
                     Button("Update") { Task { await demo.update(model.id) } }
@@ -1192,10 +1185,7 @@ struct ModelsView: View {
                         .disabled(!demo.storage.removing.isEmpty)
                 }
                 if model.id != demo.model && issue == nil {
-                    Button(downloaded ? "Select" : model.localOnly == true ? "Choose bundle…" : "Download & Select") {
-                        if model.localOnly == true && !downloaded { chooseBundle(model) }
-                        else { Task { await demo.choose(model) } }
-                    }
+                    Button(downloaded ? "Select" : "Download & Select") { Task { await demo.choose(model) } }
                     .disabled(demo.busy || demo.storage.removing.contains(model.id))
                 }
             }

@@ -1,5 +1,5 @@
-// Full bidirectional transformer layers with query chunks and reusable KV storage.
-// A visible prefix attends itself; batch padding is excluded and its logits unused.
+// Full bidirectional transformer layers with query chunks and reusable KV storage:
+// every position of the sequence attends every other.
 import CoreAI
 import Darwin
 import Foundation
@@ -21,12 +21,7 @@ final class BidirectionalTensorRunner {
 
   init(url: URL, config: BidirectionalConfiguration) async throws {
     self.config = config
-    guard config.hidden > 0, config.heads > 0, config.kvHeads > 0, config.headDim > 0,
-          config.width > 0, config.logits > 0, !config.projections.isEmpty,
-          config.projections.count == config.finishes.count, !config.attention.isEmpty else {
-      throw HostError("invalid bidirectional tensor configuration")
-    }
-    executable = try await TensorFunctions(url: url, names: Set(config.projections + config.finishes + config.attention.map(\.name) + [config.head]))
+    executable = try await TensorFunctions(url: url)
   }
 
   func array(_ function: InferenceFunction, _ name: String) throws -> NDArray {
@@ -58,18 +53,17 @@ final class BidirectionalTensorRunner {
     }
   }
 
-  func run(count: Int, visible: Int, values: [String: [Float16]]) async throws -> ([Int], [Float16]) {
-    guard visible > 0, visible <= count, Set(values.keys) == Set(["hidden", "cos", "sin"]),
-          values["hidden"]!.count == config.hidden * count,
-          values["cos"]!.count == config.headDim * count, values["sin"]!.count == config.headDim * count,
-          let tier = config.attention.first(where: { $0.capacity >= visible }),
-          count <= config.attention.map(\.capacity).max()! else { throw HostError("bidirectional context limit exceeded") }
+  func run(values: [String: [Float16]]) async throws -> ([Int], [Float16]) {
+    let count = (values["hidden"]?.count ?? 0) / config.hidden
+    guard let tier = config.attention.first(where: { $0.capacity >= count }) else {
+      throw HostError("bidirectional context limit exceeded")
+    }
     let attend = try await executable.get(tier.name)
-    var hidden = NDArray(shape: [1, config.hidden, 1, visible], scalarType: .float16)
-    var next = NDArray(shape: [1, config.hidden, 1, visible], scalarType: .float16)
+    var hidden = NDArray(shape: [1, config.hidden, 1, count], scalarType: .float16)
+    var next = NDArray(shape: [1, config.hidden, 1, count], scalarType: .float16)
     write4(&hidden) { dst, _, ds in
       for channel in 0..<config.hidden {
-        for index in 0..<visible { dst[channel * ds[1] + index * ds[3]] = values["hidden"]![channel * count + index] }
+        for index in 0..<count { dst[channel * ds[1] + index * ds[3]] = values["hidden"]![channel * count + index] }
       }
     }
     var queries = NDArray(shape: [1, config.heads, tier.capacity, config.headDim], scalarType: .float16)
@@ -78,25 +72,26 @@ final class BidirectionalTensorRunner {
     var mask = try array(attend, "mask")
     write4(&mask) { dst, shape, strides in
       forEachContiguousBlock(shape, strides) { _, offset, size in dst.advanced(by: offset).update(repeating: Float16(-30000), count: size) }
-      for index in 0..<visible { dst[index * strides[3]] = 0 }
+      for index in 0..<count { dst[index * strides[3]] = 0 }
     }
     for layer in config.projections.indices {
       let project = try await executable.get(config.projections[layer])
-      for offset in stride(from: 0, to: visible, by: config.width) {
-        let size = min(config.width, visible - offset)
-        var input = try array(project, "hidden"), cos = try array(project, "cos"), sin = try array(project, "sin")
+      for offset in stride(from: 0, to: count, by: config.width) {
+        let size = min(config.width, count - offset)
+        var input = try array(project, "hidden")
         hiddenChunk(hidden, at: offset, count: size, into: &input)
-        for (name, field) in [("cos", 0), ("sin", 1)] {
-          var tensor = field == 0 ? cos : sin
+        var inputs = ["hidden": input]
+        for name in ["cos", "sin"] {
+          var tensor = try array(project, name)
           zero(&tensor)
           write4(&tensor) { dst, _, ds in
             for dim in 0..<config.headDim {
               for index in 0..<size { dst[dim * ds[2] + index * ds[3]] = values[name]![dim * count + offset + index] }
             }
           }
-          if field == 0 { cos = tensor } else { sin = tensor }
+          inputs[name] = tensor
         }
-        var outputs = try await project.run(inputs: ["hidden": input, "cos": cos, "sin": sin])
+        var outputs = try await project.run(inputs: inputs)
         guard let qkv = outputs.remove("features")?.ndArray else { throw HostError("missing projected features") }
         let qChannels = config.heads * config.headDim, kvChannels = config.kvHeads * config.headDim
         storeProjection(qkv, channelOffset: 0, heads: config.heads, at: offset, count: size, into: &queries)
@@ -104,8 +99,8 @@ final class BidirectionalTensorRunner {
         storeProjection(qkv, channelOffset: qChannels + kvChannels, heads: config.kvHeads, at: offset, count: size, into: &vectors)
       }
       let finish = try await executable.get(config.finishes[layer])
-      for offset in stride(from: 0, to: visible, by: config.width) {
-        let size = min(config.width, visible - offset)
+      for offset in stride(from: 0, to: count, by: config.width) {
+        let size = min(config.width, count - offset)
         var query = try array(attend, "query")
         zero(&query)
         read4(queries) { src, _, ss in
@@ -133,8 +128,8 @@ final class BidirectionalTensorRunner {
     }
     let head = try await executable.get(config.head)
     var logits = [Float16](repeating: 0, count: config.logits * count)
-    for offset in stride(from: 0, to: visible, by: config.width) {
-      let size = min(config.width, visible - offset)
+    for offset in stride(from: 0, to: count, by: config.width) {
+      let size = min(config.width, count - offset)
       var input = try array(head, "hidden")
       hiddenChunk(hidden, at: offset, count: size, into: &input)
       var outputs = try await head.run(inputs: ["hidden": input])
@@ -158,27 +153,10 @@ func bidirectionalTensorHost(_ asset: URL, configuration: String) async {
   } catch { sendJSON(["error": "\(error)"]); return }
   while let operation = readExact(1)?.first {
     if operation == UInt8(ascii: "Q") { return }
-    guard operation == UInt8(ascii: "B"), let n = readExact(4), let v = readExact(4),
-          let length = readExact(4), let name = readExact(u32(length, 0)), name.isEmpty,
-          let fields = readExact(4) else { return }
-    let count = u32(n, 0), visible = u32(v, 0)
-    var values: [String: [Float16]] = [:]
-    for _ in 0..<u32(fields, 0) {
-      guard let length = readExact(4), let key = readExact(u32(length, 0)),
-            let size = readExact(4), let value = readHalves(u32(size, 0)) else { return }
-      values[String(decoding: key, as: UTF8.self)] = value
-    }
+    guard operation == UInt8(ascii: "B"), let values = readInputs() else { return }
     do {
-      let (shape, logits) = try await runner.run(count: count, visible: visible, values: values)
-      writeAll([0] + le32(shape.count) + shape.flatMap(le32))
-      logits.withUnsafeBytes { bytes in
-        var done = 0
-        while done < bytes.count {
-          let written = write(replyFD, bytes.baseAddress! + done, bytes.count - done)
-          if written <= 0 { exit(1) }
-          done += written
-        }
-      }
+      let (shape, logits) = try await runner.run(values: values)
+      sendTensor(shape, logits)
     } catch { sendError("\(error)") }
   }
 }

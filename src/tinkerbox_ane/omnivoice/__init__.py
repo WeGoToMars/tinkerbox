@@ -1,4 +1,4 @@
-"""OmniVoice speech synthesis: ANE diffusion, CPU codec and preprocessing."""
+"""OmniVoice speech synthesis: ANE diffusion and codec decoder, CPU codec encoder and preprocessing."""
 
 from pathlib import Path
 
@@ -11,9 +11,10 @@ SOURCE = Path('artifacts/omnivoice/export')
 SETTINGS = []  # Speech generation settings travel on each request, including floats and booleans.
 INFO = [
     {'label': 'Synthesis', 'value': 'ANE · Qwen3 diffusion'},
-    {'label': 'Audio codec', 'value': 'CPU · 24 kHz'},
+    {'label': 'Audio codec', 'value': 'ANE decoder · 24 kHz'},
 ]
 from .parameters import PARAMETERS as SPEECH_PARAMETERS
+from .parameters import CAPABILITIES as SPEECH_CAPABILITIES
 
 
 def checkpoint():

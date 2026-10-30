@@ -2,12 +2,14 @@
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -56,6 +58,12 @@ with tempfile.TemporaryDirectory(prefix=".app-", dir=out) as temporary:
     shutil.copyfile(source / "worker.py", resources / "worker.py")
     # The offline model catalog: exactly the models this package version can run.
     shutil.copyfile(root / "src/tinkerbox_ane/models.json", resources / "models.json")
+    # Picker choices must work before setup or model download. Bundle the backend declarations.
+    sys.path.insert(0, str(root / 'src'))
+    catalog = json.loads((resources / 'models.json').read_text())['models']
+    capabilities = {model['id']: importlib.import_module(model['module']).SPEECH_CAPABILITIES
+                    for model in catalog if model['task'] == 'speech'}
+    (resources / 'speech-capabilities.json').write_text(json.dumps(capabilities))
     icon_plist = Path(temporary) / "icon.plist"
     subprocess.run([
         "xcrun", "actool", str(source / "Tinkerbox.icon"), "--compile", str(resources),

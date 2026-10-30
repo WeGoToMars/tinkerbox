@@ -114,14 +114,36 @@ Build and launch **Tinkerbox.app** once to complete initial model setup. In Shor
 | **Ask Several Questions** | Input Text, Questions (List), Images, Yes Threshold | List of Yes/No Decisions from a single shared pass over the input |
 | **Filter List by Question** | List, Question, Yes Threshold | Items evaluating to Yes, preserving input order |
 | **Sort List by Score** | List, Question, Levels, Highest First (default on) | Ranked items with attached **Score**, **Maximum Score**, and **Most Likely Level** |
+| **Generate Speech** | Text (one item or a list), Model, optional Mode, Voice Description, Reference Audio/Transcript or Saved Voice, Language, Target Duration, Speaking Speed, Seed, Diffusion Steps, Guidance Scale | WAV audio files in input order; filenames include the request seed |
+| **Create Voice Prompt** | Reference Audio, Model, optional Reference Transcript, Mode and Preprocess Reference | A reusable `voice.pt` file for **Generate Speech** or the app |
 
-Results format as plain text when passed to Text actions or notifications, while exposing typed properties for conditional logic.
+Decision results format as plain text when passed to Text actions or notifications, while exposing typed properties for conditional logic.
 
 **Images** is optional and accepts image files (e.g., from **Take Screenshot** or **Select Photos**); **Input Text** may be omitted when images are supplied.
 
-**Ask Several Questions** reads the input once and answers every question in one pass, so extra questions cost little. List actions process items together in a single batch, automatically dropping blank lines.
+**Ask Several Questions** reads the input once and answers every question in one pass, so extra questions cost little. Decision list actions process items together in a single batch, automatically dropping blank lines.
 
 Actions run in the background, sharing the loaded runtime model and serializing requests. Setup requires network access to download weights; inference executes entirely on-device.
+
+Each speech action saves an explicit **Model** choice, shown in its summary.
+Changing the app's model does not affect the Shortcut, and running the Shortcut
+does not change the app's saved selection. The Mode picker offers modes for the
+action's Model, including continuation when available. If you change Model in the
+action, select a compatible Mode again; incompatible saved modes return an error.
+Both pickers work offline before downloading or loading a model.
+Leave Mode empty to infer automatic voice, voice design or cloning from the
+inputs. **Create Voice Prompt** defaults to the model's cloning mode; save its
+output with **Save File**, or pass it directly to **Generate Speech → Saved Voice**.
+Saved voices must be reused with the same model and conditioning mode. Supply
+either Reference Audio or Saved Voice. Transcript-free modes use the audio
+directly; modes needing a transcript recognize it on-device when omitted.
+
+**Generate Speech** returns files suitable for **Play Sound** or **Save File**.
+For a batch, it preserves every text and its order; blank entries return an error.
+Optional generation settings use the model's defaults when omitted. Duration,
+speed, language and instructions retain their native backend meaning; supplying
+an unsupported control returns an error. The filename `speech-42-1.wav` identifies
+request seed 42 and the first item; set Seed to 42 to replay the same request.
 
 The source build runs Xcode's App Intents metadata extractor before signing. Keep `Contents/Resources/Metadata.appintents` in the app bundle so the actions remain discoverable. Every Tinkerbox build shares one bundle identifier, so keep a single copy installed: Shortcuts may resolve the actions to an older copy (1.x has none) or to an ad-hoc signed build, which fails with "Shortcuts couldn't communicate with the app".
 
@@ -131,5 +153,15 @@ To exercise the actions against real inference, including concurrent calls with 
 python3 app/run.py --build-only
 python3 app/test_shortcuts.py
 ```
+
+To exercise the speech actions with a local bundle:
+
+```sh
+TINKERBOX_SPEECH_MODEL=omnivoice TINKERBOX_ASSET=/absolute/path/to/bundle \
+  python3 app/test_shortcuts.py --speech
+```
+
+Run this with `TINKERBOX_SPEECH_MODEL=voxcpm2` and its bundle to cover reference-only
+cloning and continuation modes as well.
 
 The smoke test uses the built app's bundled worker and pinned package requirements. It requires the same supported Apple Silicon hardware and cached/downloadable model as the app. Set `TINKERBOX_ASSET` to use a local compatible model bundle. It calls the App Intent entry points directly; discovery and composing result properties should also be checked in the Shortcuts app after a build.

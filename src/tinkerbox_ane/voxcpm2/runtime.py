@@ -16,8 +16,8 @@ from torch.nn import functional as F
 from safetensors import safe_open
 
 from tinkerbox_ane.audio import read_audio
-from tinkerbox_ane.bundle import bundled_checkpoint, checkpoint_digest, read_bundle
-from tinkerbox_ane.host import TensorHost, device_architecture
+from tinkerbox_ane.bundle import bundled_checkpoint, read_bundle
+from tinkerbox_ane.host import TensorHost, check_architecture
 from tinkerbox_ane.speech import speech_controls
 from tinkerbox_ane.transcription import transcribe
 from . import KIND, REPO, REVISION, UPSTREAM_REVISION
@@ -42,21 +42,9 @@ class VoiceClonePrompt:
         data = torch.load(path, map_location='cpu', weights_only=True)
         if not isinstance(data, dict) or data.get('kind') != KIND or data.get('revision') != REVISION:
             raise ValueError('Choose a saved VoxCPM2 voice prompt for this checkpoint.')
-        mode = data.get('mode')
-        if mode not in ('clone', 'continuation', 'clone_continuation') or not isinstance(data.get('ref_text'), str):
+        if data['mode'] not in ('clone', 'continuation', 'clone_continuation'):
             raise ValueError('Invalid VoxCPM2 voice prompt.')
-        for key in ('reference', 'continuation'):
-            value = data.get(key)
-            needed = mode != ('continuation' if key == 'reference' else 'clone')
-            if needed:
-                if (not isinstance(value, torch.Tensor) or value.ndim != 3 or value.shape[1:] != (4, 64)
-                        or not 0 < len(value) < 8192 or not torch.isfinite(value).all()):
-                    raise ValueError('Invalid VoxCPM2 reference features.')
-            elif value is not None:
-                raise ValueError('Voice conditioning and saved features differ.')
-        if mode != 'clone' and not data['ref_text'].strip():
-            raise ValueError('Continuation requires a matching reference transcript.')
-        return cls(data.get('reference'), data.get('continuation'), data['ref_text'], mode)
+        return cls(data['reference'], data['continuation'], data['ref_text'], data['mode'])
 
 
 class Speech:
@@ -65,31 +53,15 @@ class Speech:
 
         asset = Path(asset)
         self.spec = read_bundle(asset, KIND)
-        if self.spec.get('architecture') != device_architecture():
-            raise ValueError('VoxCPM2 bundle targets a different device architecture')
+        check_architecture(self.spec)
         if self.spec['source'] != dict(repo=REPO, revision=REVISION, code_revision=UPSTREAM_REVISION):
             raise ValueError('VoxCPM2 bundle and runtime revisions differ')
         weights = bundled_checkpoint(asset)
-        if checkpoint_digest(weights) != self.spec.get('checkpoint_hash'):
-            raise ValueError('VoxCPM2 CPU checkpoint identity mismatch; re-export the bundle')
         self.config = json.loads((weights / 'config.json').read_text())
         self.capacities = self.spec['capacities']
-        self.prefill_width = self.spec.get('prefill_width')
-        if (not self.capacities or type(self.prefill_width) is not int or self.prefill_width <= 0
-                or self.capacities != sorted(set(self.capacities))
-                or any(type(n) is not int or not self.prefill_width <= n <= 8192 for n in self.capacities)):
-            raise ValueError('Invalid VoxCPM2 context capacities')
+        self.prefill_width = self.spec['prefill_width']
         self.stages = {stage['role']: stage for stage in self.spec['assets']}
         self.base_roles = [stage['role'] for stage in self.spec['assets'] if stage['role'].startswith('base-')]
-        bounds = [0] + [self.stages[role]['end'] for role in self.base_roles]
-        if (list(self.stages) != self.base_roles + ['residual', 'encoder', 'dit']
-                or [self.stages[role]['start'] for role in self.base_roles] != bounds[:-1]
-                or bounds[-1] != self.config['lm_config']['num_hidden_layers']):
-            raise ValueError('VoxCPM2 bundle is missing transformer stages')
-        if (set(self.stages['encoder'].get('local_functions', {})) != {'main', 'batch'}
-                or set(self.stages['dit'].get('local_functions', {})) != {'pair'}
-                or 1 not in {row['steps'] for row in self.stages['dit'].get('sampler_functions', [])}):
-            raise ValueError('VoxCPM2 bundle predates fused local transformers; re-export the bundle')
         self._masks = {}
         self.tokenizer = LlamaTokenizerFast.from_pretrained(weights)
         # Bundles store these FP16 tables and the folded AudioVAE weights as the runtime uses them,
@@ -103,7 +75,7 @@ class Speech:
         self.codec = codec.eval().requires_grad_(False)
         self.sampling_rate = self.codec.out_sample_rate
         self.capabilities = dict(CAPABILITIES, parameters=PARAMETERS, sampling_rate=self.sampling_rate,
-                                 context_positions=max(self.capacities), streaming=True)
+                                 context_positions=max(self.capacities))
         cfg = self.config['lm_config']
         dim = cfg['kv_channels']
         inverse = 1 / (cfg['rope_theta'] ** (torch.arange(0, dim, 2).float()/dim))
@@ -126,9 +98,6 @@ class Speech:
                 if stage['cached']:
                     cached = dict(hidden=cfg['hidden'], channels=2*(stage['end']-stage['start'])*cfg['kv_heads']*cfg['head_dim'],
                                   functions=stage['cache_functions'])
-                    expected = {(capacity, width) for capacity in self.capacities for width in (self.prefill_width, 1)}
-                    if {(row['capacity'], row['width']) for row in cached['functions']} != expected:
-                        raise ValueError('VoxCPM2 bundle is missing cache tier functions')
                 self.hosts[stage['role']] = TensorHost(asset/stage['asset'], output='features', cached=cached)
         except BaseException:
             self.close()
@@ -175,7 +144,7 @@ class Speech:
         key = width, count, length
         if key not in self._masks:
             # Each row attends only itself; padding attends itself and is discarded.
-            mask = np.full((width, width), -np.inf, np.float16)
+            mask = np.full((width, width), -30000, np.float16)
             for start in range(0, count*length, length):
                 mask[start:start+length, start:start+length] = 0
             np.fill_diagonal(mask, 0)
@@ -356,9 +325,11 @@ class Speech:
     @torch.inference_mode()
     def generate(self, text, **arguments):
         with self._lock:
-            utterances, options, generator = self._prepare(text, **arguments)
+            utterances, options, seed = self._prepare(text, **arguments)
             self.ane_seconds = 0
-            return [np.concatenate(list(self._stream(item, voice, options, generator))) for item, voice in utterances]
+            # Each text samples from its own seed, so a batch item matches a single request with seed + i.
+            return [np.concatenate(list(self._stream(item, voice, options, torch.Generator().manual_seed(seed + i))))
+                    for i, (item, voice) in enumerate(utterances)]
 
     @torch.inference_mode()
     def stream(self, text, **arguments):
@@ -366,25 +337,21 @@ class Speech:
         if not isinstance(text, str):
             raise ValueError('Stream one text at a time.')
         with self._lock:
-            utterances, options, generator = self._prepare(text, **arguments)
+            utterances, options, seed = self._prepare(text, **arguments)
             self.ane_seconds = 0
-            yield from self._stream(*utterances[0], options, generator)
+            yield from self._stream(*utterances[0], options, torch.Generator().manual_seed(seed))
 
     def _prepare(self, text, *, language=None, instruct=None, mode=None, controls=None,
                  voice_clone_prompt=None, ref_audio=None, ref_text=None, seed=None,
                  duration=None, speed=None, **parameters):
-        """Validate a request into each text's (prompt, voice), the options and the shared noise generator."""
+        """Validate a request into each text's (prompt, voice), the options and the seed."""
         if duration is not None or speed is not None:
             raise ValueError('VoxCPM2 supports descriptive delivery instructions, not numeric duration/speed.')
         options = {p['key']: p['default'] for p in PARAMETERS}
         options.update(validate(parameters))
         if options['max_decode_steps'] <= options['min_decode_steps']+1:
             raise ValueError('Maximum audio patches must exceed the minimum by at least two.')
-        if seed is not None and (type(seed) is not int or not 0 <= seed < 2**63):
-            raise ValueError('Seed must be an integer between 0 and 2^63 - 1.')
         texts = text if isinstance(text, list) else [text]
-        if not texts or any(not isinstance(t, str) or not t.strip() for t in texts):
-            raise ValueError('Speech text must not be empty.')
         def batch(value, name):
             if isinstance(value, list):
                 if len(value) != len(texts):
@@ -400,22 +367,19 @@ class Speech:
             voices = [self.create_voice_clone_prompt(ref_audio, ref_text,
                        options['preprocess_prompt'], mode=m) for m in modes]
         utterances = []
-        for item, instruction, selected, fields, voice, lang in zip(texts, instructions, modes, fields, voices, languages):
+        for item, instruction, selected, field, voice, lang in zip(texts, instructions, modes, fields, voices, languages):
             if lang is not None:
                 raise ValueError('VoxCPM2 detects language from the text; omit language.')
-            if voice is not None and not isinstance(voice, VoiceClonePrompt):
-                raise ValueError('Use a VoxCPM2 saved voice prompt.')
             if selected is None and voice is not None:
                 selected = voice.mode
-            selected, _ = speech_controls(self.capabilities, selected, instruction, fields, voice is not None)
+            selected, _ = speech_controls(self.capabilities, selected, instruction, field, voice is not None)
             if voice is not None and selected['id'] in ('clone', 'continuation', 'clone_continuation') and voice.mode != selected['id']:
                 raise ValueError('Saved voice conditioning differs from the selected mode; prepare the voice in that mode.')
             item = ' '.join(item.split())
             if instruction:
                 item = f'({instruction.strip()})'+item
             utterances.append((item, voice))
-        generator = torch.Generator().manual_seed(seed if seed is not None else secrets.randbits(63))
-        return utterances, options, generator
+        return utterances, options, seed if seed is not None else secrets.randbits(63)
 
     @torch.inference_mode()
     def create_voice_clone_prompt(self, ref_audio, ref_text=None, preprocess_prompt=False, *, mode=None):
@@ -431,9 +395,6 @@ class Speech:
             waveform = torch.as_tensor(waveform, dtype=torch.float32)
             if waveform.ndim == 1:
                 waveform = waveform.unsqueeze(0)
-            if (waveform.ndim != 2 or not waveform.numel() or not torch.isfinite(waveform).all()
-                    or type(rate) is not int or rate <= 0):
-                raise ValueError('Reference audio must contain finite samples.')
             waveform = audio.resample(waveform.mean(0, keepdim=True), rate, self.codec.sample_rate)
             if preprocess_prompt:
                 waveform = trim_reference(waveform, self.codec.sample_rate)
@@ -444,7 +405,7 @@ class Speech:
             pad = (-waveform.shape[-1]) % alignment
             def encode(left):
                 data = F.pad(waveform, (pad, 0) if left else (0, pad))
-                return self.codec.encode(data, self.codec.sample_rate)[0].reshape(64, -1, 4).permute(1, 2, 0).contiguous()
+                return self.codec.encode(data)[0].reshape(64, -1, 4).permute(1, 2, 0).contiguous()
             reference = encode(False) if mode != 'continuation' else None
             continuation = encode(True) if mode != 'clone' else None
             return VoiceClonePrompt(reference, continuation, ref_text.strip() if ref_text else '', mode)

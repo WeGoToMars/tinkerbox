@@ -12,10 +12,10 @@ Run models on Apple's Neural Engine through Core AI. Critical inference always r
 | [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) (`voxcpm2`) | Multilingual speech synthesis, voice design, cloning and continuation | [Local bundle setup](docs/models/voxcpm2.md) |
 
 Requires Apple Silicon (M1–M6), macOS 27, and Python 3.12 or 3.13. Bundle availability
-varies by model and chip. OmniVoice has fully ANE-compiled bundles across M1–M6;
-the published decision-model releases currently cover M4, M4 Pro, M5, M5 Pro and
-M6. Older-chip OmniVoice bundles are cross-compiled; on-device correctness and
-performance have been checked on M5 Pro. The app shows unavailable models before
+varies by model and chip. VoxCPM2 has fully ANE-compiled bundles across M1–M6;
+OmniVoice and the decision models cover M4 and newer. Bundles for chips other than
+M5 Pro are cross-compiled; on-device correctness and performance have been checked
+on M5 Pro. The app shows unavailable models before
 downloading and accepts compatible local bundles.
 
 ## Quickstart
