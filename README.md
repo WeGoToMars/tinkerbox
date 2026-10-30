@@ -4,19 +4,15 @@
 
 Run models on Apple's Neural Engine through Core AI. Critical inference always runs on the Neural Engine, the CPU does only supplementary work, and the GPU stays idle.
 
-| Model | Task | Notes |
-| --- | --- | --- |
-| [LiquidAI/d1-3B](https://huggingface.co/LiquidAI/d1-3B) (`d1-3b`) | Decisions over text and images | [docs/models/d1.md](docs/models/d1.md) |
-| [vllm-sr/d3-nano](https://huggingface.co/vllm-sr/d3-nano) (`d3-nano`), [vllm-sr/d3-mini](https://huggingface.co/vllm-sr/d3-mini) (`d3-mini`) | Decisions over text and images, one question per pass | [docs/models/d3.md](docs/models/d3.md) |
-| [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) (`omnivoice`) | Speech synthesis, voice cloning and voice design | [Usage](docs/models/omnivoice.md) |
-| [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) (`voxcpm2`) | Multilingual speech synthesis, voice design, cloning and continuation | [Usage](docs/models/voxcpm2.md) |
+| Model | Task | Supported SoC | Notes |
+| --- | --- | --- | --- |
+| [LiquidAI/d1-3B](https://huggingface.co/LiquidAI/d1-3B) (`d1-3b`) | Parallel decisions over text and images | M4-M6+ | [docs/models/d1.md](docs/models/d1.md) |
+| [vllm-sr/d3-nano](https://huggingface.co/vllm-sr/d3-nano) (`d3-nano`), [vllm-sr/d3-mini](https://huggingface.co/vllm-sr/d3-mini) (`d3-mini`) | Decisions over text and images | M4-M6+ | [docs/models/d3.md](docs/models/d3.md) |
+| [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) (`omnivoice`) | Speech synthesis, voice cloning and voice design | M4-M6+ | [docs/models/omnivoice.md](docs/models/omnivoice.md) |
+| [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) (`voxcpm2`) | Multilingual speech synthesis, voice design, cloning and continuation | M1-M6+ | [docs/models/voxcpm2.md](docs/models/voxcpm2.md) |
 
 Requires Apple Silicon (M1–M6), macOS 27, and Python 3.12 or 3.13. Bundle availability
-varies by model and chip. VoxCPM2 has fully ANE-compiled bundles across M1–M6;
-OmniVoice and the decision models cover M4 and newer. Bundles for chips other than
-M5 Pro are cross-compiled; on-device correctness and performance have been checked
-on M5 Pro. The app shows unavailable models before
-downloading and accepts compatible local bundles.
+varies by model and chip.
 
 ## Quickstart
 
