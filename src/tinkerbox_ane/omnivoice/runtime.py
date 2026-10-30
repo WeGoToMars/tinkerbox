@@ -1,0 +1,316 @@
+"""Upstream speech behavior composed with a verified ANE diffusion export."""
+
+from pathlib import Path
+from contextlib import nullcontext
+import math
+import os
+import threading
+import time
+
+import numpy as np
+import torch
+from torch import nn
+from safetensors import safe_open
+
+from tinkerbox_ane.architectures import dac
+from tinkerbox_ane.bundle import bundled_checkpoint, read_bundle
+from tinkerbox_ane.audio import read_audio
+from tinkerbox_ane.host import TensorHost, check_architecture
+from tinkerbox_ane.transcription import transcribe
+from . import KIND, REVISION
+
+_GENERATION_LOCK = threading.Lock()  # torch's CPU RNG is shared across model instances.
+
+
+class Speech:
+    def __init__(self, asset, weights=None):
+        from omnivoice import OmniVoice, OmniVoiceConfig
+        from omnivoice.models.omnivoice import OmniVoiceModelOutput
+        from omnivoice.utils.duration import RuleDurationEstimator
+        from omnivoice.utils.text import add_punctuation
+        from transformers import AutoTokenizer, AutoFeatureExtractor, HiggsAudioV2TokenizerModel
+        from transformers.models.higgs_audio_v2_tokenizer.modeling_higgs_audio_v2_tokenizer import (
+            HiggsAudioV2TokenizerDecoderOutput)
+
+        asset = Path(asset)
+        self.spec = read_bundle(asset, KIND)
+        check_architecture(self.spec)
+        assets = {stage['role']: stage for stage in self.spec['assets']}
+        if self.spec['source']['revision'] != REVISION:
+            raise ValueError('OmniVoice bundle and CPU checkpoint revisions differ')
+        if weights is None:
+            local = os.environ.get('TINKERBOX_OMNIVOICE_CHECKPOINT')
+            weights = Path(local) if local else bundled_checkpoint(asset)
+        else:
+            weights = Path(weights)
+        config = OmniVoiceConfig.from_pretrained(weights)
+        owner = self
+
+        class Embeddings(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.config = config.llm_config
+                self.embed_tokens = nn.Embedding(self.config.vocab_size, self.config.hidden_size, device='meta')
+
+            def get_input_embeddings(self):
+                return self.embed_tokens
+
+        class ANEOmniVoice(OmniVoice):
+            def create_voice_clone_prompt(self, ref_audio, ref_text=None, preprocess_prompt=True):
+                if isinstance(ref_audio, (str, Path)):
+                    ref_audio = read_audio(ref_audio)
+                return super().create_voice_clone_prompt(ref_audio, ref_text, preprocess_prompt)
+
+            def _prepare_inference_inputs(self, text, num_target_tokens, *args, **kwargs):
+                owner._capacity(num_target_tokens)
+                inputs = super()._prepare_inference_inputs(text, num_target_tokens, *args, **kwargs)
+                # Check each chunk before upstream allocates its square batch mask and embeddings.
+                owner._capacity(inputs['input_ids'].shape[-1])
+                return inputs
+
+            def _preprocess_all(self, **kwargs):
+                text = kwargs['text']
+                kwargs['text'] = (add_punctuation(text) if isinstance(text, str)
+                                  else [add_punctuation(item) for item in text])
+                task = super()._preprocess_all(**kwargs)
+                durations = self._ensure_list(kwargs.get('duration'), task.batch_size)
+                for i in range(task.batch_size):
+                    if durations[i] is None and task.ref_audio_tokens[i] is None:
+                        # Upstream's short automatic estimate can collapse a
+                        # voice to noise, including in F32. Allow three
+                        # seconds at normal speed; explicit durations still win.
+                        speed = task.speed[i] if task.speed else 1.0
+                        minimum = math.ceil(3 * self.audio_tokenizer.config.frame_rate /
+                                            (speed if speed and speed > 0 else 1.0))
+                        task.target_lens[i] = max(task.target_lens[i], minimum)
+                return task
+
+            def forward(self, input_ids, audio_mask, attention_mask=None, **kwargs):
+                embedded = self._prepare_embed_inputs(input_ids, audio_mask)
+                return OmniVoiceModelOutput(logits=owner.logits(embedded, attention_mask))
+
+        class ANECodec(HiggsAudioV2TokenizerModel):
+            def decode(self, audio_codes, return_dict=None):
+                # Codebook lookup and projection stay on the CPU; the acoustic decoder runs on the ANE.
+                quantized = self.quantizer.decode(audio_codes.transpose(0, 1))
+                hidden = self.fc2(quantized.transpose(1, 2)).transpose(1, 2)
+                audio = torch.stack([torch.from_numpy(owner.decode(row.half().numpy()))[None] for row in hidden])
+                return_dict = return_dict if return_dict is not None else self.config.return_dict
+                return HiggsAudioV2TokenizerDecoderOutput(audio) if return_dict else audio
+
+        self.engine = ANEOmniVoice(config, llm=Embeddings()).eval()
+        # These projections live in the ANE bundle. Retain only lookup tables on the CPU,
+        # memory-mapped from the checkpoint rather than copied.
+        self.engine.audio_heads = nn.Identity()
+        with safe_open(weights / 'model.safetensors', framework='pt', device='cpu') as tensors:
+            for module, name in ((self.engine.llm.embed_tokens, 'llm.embed_tokens.weight'),
+                                 (self.engine.audio_embeddings, 'audio_embeddings.weight')):
+                module.weight = nn.Parameter(tensors.get_tensor(name), requires_grad=False)
+        self.engine.text_tokenizer = AutoTokenizer.from_pretrained(weights)
+        codec = weights / 'audio_tokenizer'
+        self.engine.audio_tokenizer = ANECodec.from_pretrained(codec, device_map='cpu').eval()
+        # Inference never uses the semantic decoder, and the acoustic decoder is in the bundle.
+        del self.engine.audio_tokenizer.acoustic_decoder, self.engine.audio_tokenizer.decoder_semantic
+        self.engine.feature_extractor = AutoFeatureExtractor.from_pretrained(codec)
+        self.engine.sampling_rate = self.engine.feature_extractor.sampling_rate
+        self.engine.duration_estimator = RuleDurationEstimator()
+        # Supply the upstream pipeline's ASR contract with native transcription.
+        # Keeping it installed also prevents upstream's lazy Whisper download.
+        def native_asr(audio):
+            source = audio if isinstance(audio, str) else (audio['array'], audio['sampling_rate'])
+            return {'text': transcribe(source)}
+        self.engine._asr_pipe = native_asr
+        self.sampling_rate = self.engine.sampling_rate
+        from .parameters import CAPABILITIES, PARAMETERS
+        self.capabilities = dict(CAPABILITIES, parameters=PARAMETERS, sampling_rate=self.sampling_rate,
+                                 context_positions=max(self.spec['capacities']))
+        self._lock = threading.Lock()
+        self.ane_seconds = 0.0
+        bidirectional = dict(hidden=self.spec['hidden'], heads=self.spec['heads'], kvHeads=self.spec['kv_heads'],
+            headDim=self.spec['head_dim'], width=self.spec['attention_width'],
+            logits=self.spec['codebooks']*self.spec['audio_vocab'], projections=self.spec['projections'],
+            finishes=self.spec['finishes'], attention=self.spec['attention'], head=self.spec['head_function'])
+        self.codec_function = assets['codec']['functions'][0]
+        self.host = TensorHost(asset/assets['diffusion']['asset'], bidirectional=bidirectional)
+        try:
+            self.short_host = TensorHost(asset/assets['short']['asset'])
+        except BaseException:
+            self.host.close()
+            raise
+        try:
+            self.codec_host = TensorHost(asset/assets['codec']['asset'], output='audio')
+        except BaseException:
+            self.host.close()
+            self.short_host.close()
+            raise
+
+    def _angles(self, positions):
+        dim = self.spec['head_dim']
+        inverse = self.spec['rope_theta'] ** (-np.arange(0, dim, 2, dtype=np.float32)/dim)
+        angles = positions.astype(np.float32)[:, None] * inverse
+        angles = np.concatenate([angles, angles], axis=1).T[None, None]
+        return dict(cos=np.cos(angles), sin=np.sin(angles))
+
+    def _pack(self, packed, n):
+        """Whether adding a row of n positions to a packed call is cheaper than a separate call."""
+        capacities, cost = self.spec['short_capacities'], self.spec['fused_cost']
+        if packed + n > capacities[-1]:
+            return False
+        bucket = lambda size: next(c for c in capacities if c >= size)
+        # Latency in positions of projection/MLP work: a fixed per-call
+        # overhead, linear work and quadratic attention.
+        time = lambda size: cost['call_positions'] + bucket(size) + bucket(size)**2/cost['attention_positions']
+        return time(packed+n) <= time(packed) + time(n)
+
+    def _capacity(self, length):
+        try:
+            return next(n for n in self.spec['capacities'] if n >= length)
+        except StopIteration:
+            raise ValueError(f'speech context needs {length} positions; bundle limit is {max(self.spec["capacities"])}') from None
+
+    @torch.inference_mode()
+    def logits(self, embeddings, attention_mask):
+        """Evaluate independent conditioned/unconditioned sequences in input order.
+
+        Upstream pads each row after its visible prefix and reads logits only
+        within it. Consecutive rows that fit the fused transformer share a call,
+        with block-diagonal attention and per-row positions, when the bundle's
+        cost model favors the packed bucket over separate ones."""
+        batch, length, _ = embeddings.shape
+        self._capacity(length)
+        codebooks, vocabulary = self.spec['codebooks'], self.spec['audio_vocab']
+        limit = max(self.spec['short_capacities'])
+        visible = [int(attention_mask[i, 0, 0].sum()) if attention_mask is not None else length for i in range(batch)]
+        result = torch.zeros(batch, codebooks, length, vocabulary)
+        groups = []
+        for i, n in enumerate(visible):
+            if n > limit:
+                values = dict(self._angles(np.arange(n)), hidden=embeddings[i, :n].half().T[None, :, None].numpy())
+                started = time.perf_counter()
+                output = self.host.full_attention(values)
+                self.ane_seconds += time.perf_counter()-started
+                result[i, :, :n] = torch.from_numpy(output[0, :, 0]).reshape(codebooks, vocabulary, n).transpose(1, 2)
+            elif groups and self._pack(sum(visible[j] for j in groups[-1]), n):
+                groups[-1].append(i)
+            else:
+                groups.append([i])
+        for rows in groups:
+            total = sum(visible[i] for i in rows)
+            capacity = next(n for n in self.spec['short_capacities'] if n >= total)
+            hidden = np.zeros((1, self.spec['hidden'], 1, capacity), np.float16)
+            mask = np.full((1, 1, capacity, capacity), -30000, np.float16)
+            # Pad queries attend themselves; real queries can never read padding or another row.
+            np.fill_diagonal(mask[0, 0], 0)
+            positions, offset = np.zeros(capacity, np.int64), 0
+            for i in rows:
+                n = visible[i]
+                hidden[0, :, 0, offset:offset+n] = embeddings[i, :n].float().numpy().T
+                allowed = attention_mask[i, 0, :n, :n].numpy() if attention_mask is not None else True
+                mask[0, 0, offset:offset+n, offset:offset+n] = np.where(allowed, 0, -30000)
+                positions[offset:offset+n] = np.arange(n)
+                offset += n
+            started = time.perf_counter()
+            output = self.short_host.run(f'omnivoice_s{capacity}', dict(hidden=hidden, mask=mask, **self._angles(positions)))
+            self.ane_seconds += time.perf_counter() - started
+            offset = 0
+            for i in rows:
+                n = visible[i]
+                # One strided FP16-to-FP32 copy into upstream's (codebook, position, vocabulary) layout.
+                row = torch.from_numpy(output[0, :, 0, offset:offset+n])
+                result[i, :, :n] = row.reshape(codebooks, vocabulary, n).transpose(1, 2)
+                offset += n
+        return result
+
+    def decode(self, hidden):
+        """Waveform of (channels, frames) codec latents, decoded in overlapping fixed-width ANE calls."""
+        def run(window, mask):
+            started = time.perf_counter()
+            audio = self.codec_host.run(self.codec_function, dict(hidden=window, mask=mask))
+            self.ane_seconds += time.perf_counter() - started
+            return audio
+        return dac.decode(run, hidden, self.spec['codec_width'], self.spec['codec_overlap'], self.spec['codec_hop'])
+
+    def generate(self, text, *, seed=None, mode=None, controls=None, **kwargs):
+        from tinkerbox_ane.speech import speech_controls
+
+        size = len(text) if isinstance(text, list) else 1
+        def batch(value, name):
+            if isinstance(value, list):
+                if len(value) != size:
+                    raise ValueError(f'{name} must have one value per text')
+                return value
+            return [value] * size
+        modes, fields = batch(mode, 'mode'), batch(controls, 'controls')
+        arguments = {key: batch(kwargs.pop(key, None), key)
+                     for key in ('language', 'instruct', 'voice_clone_prompt', 'ref_audio', 'ref_text')}
+        voices, references = arguments['voice_clone_prompt'], arguments['ref_audio']
+        native = []
+        for i in range(size):
+            supplied = dict(fields[i] or {})
+            for key in ('duration', 'speed'):
+                if key in kwargs:
+                    value = batch(kwargs[key], key)[i]
+                    if value is not None:
+                        if key in supplied:
+                            raise ValueError(f'Provide {key} once, either directly or in controls.')
+                        supplied[key] = value
+            _, values = speech_controls(self.capabilities, modes[i], arguments['instruct'][i], supplied,
+                                         voices[i] is not None or references[i] is not None)
+            native.append(values)
+        for key in ('duration', 'speed'):
+            kwargs.pop(key, None)
+            arguments[key] = [values.get(key) for values in native]
+        # A request's random sampling must not advance another caller's RNG state.
+        with _GENERATION_LOCK, self._lock, torch.random.fork_rng(devices=[]) if seed is not None else nullcontext():
+            self.ane_seconds = 0.0
+            if any(voice is not None or reference is not None for voice, reference in zip(voices, references)):
+                # Upstream cannot mix automatic and cloned voices. Keep this contract
+                # in the backend so direct Python and task requests behave identically.
+                audio = []
+                for i, item in enumerate(batch(text, 'text')):
+                    if seed is not None:
+                        torch.manual_seed(seed + i)
+                    selected = {key: values[i] for key, values in arguments.items() if values[i] is not None}
+                    audio.extend(self.engine.generate(text=item, **selected, **kwargs))
+                return audio
+            if seed is not None:
+                torch.manual_seed(seed)
+            arguments = {key: values for key, values in arguments.items() if any(v is not None for v in values)}
+            return self.engine.generate(text=text, **arguments, **kwargs)
+
+    @staticmethod
+    def generation_parameters(parameters):
+        from .parameters import validate
+        return validate(parameters)
+
+    @staticmethod
+    def load_voice_clone_prompt(path):
+        from omnivoice import VoiceClonePrompt
+        return VoiceClonePrompt.load(path)
+
+    def create_voice_clone_prompt(self, *args, mode=None, **kwargs):
+        if mode not in (None, 'clone', 'design'):
+            raise ValueError('Choose a reference-based OmniVoice mode.')
+        with self._lock:
+            return self.engine.create_voice_clone_prompt(*args, **kwargs)
+
+    def supported_language_ids(self):
+        return self.engine.supported_language_ids()
+
+    def supported_language_names(self):
+        return self.engine.supported_language_names()
+
+    def transcribe(self, audio, *, locale=None):
+        with self._lock:
+            return transcribe(audio, locale=locale)
+
+    def close(self):
+        self.host.close()
+        self.short_host.close()
+        self.codec_host.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()

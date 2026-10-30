@@ -77,19 +77,16 @@ def upload_to_hub(
     return commit.oid
 
 
-def upload_release(
-    repo: str,
+def prepare_release(
     staging: Path,
     kind: str,
-    tag: str | None = None,
     *,
     license_file: str,
     expected_source: dict | None = None,
     architectures: Iterable[str] | None = None,
     metadata_dir: Path | None = None,
-    token: str | None = None,
-) -> str:
-    """Verify and publish a complete macos27 release of `kind` bundles for the selected architectures.
+) -> list[str]:
+    """Verify and stage a complete macos27 release, returning its upload allowlist.
 
     Release metadata (LICENSE, NOTICE, README.md) comes from `metadata_dir`, or else from staging and
     then the repository root; `license_file` is the LICENSE source relative to that directory."""
@@ -99,7 +96,7 @@ def upload_release(
     if architectures is None:
         architectures = sorted(p.name for p in (staging / "macos27").iterdir()
                                if p.is_dir() and not p.name.startswith("."))
-    patterns = ["LICENSE", "NOTICE", "README.md", "config.json"]
+    patterns = ["LICENSE", "LICENSES/**", "NOTICE", "README.md", "config.json"]
     identities = set()
     bundles = {}
     for architecture in architectures:
@@ -139,4 +136,63 @@ def upload_release(
             raise ValueError(f"missing release metadata: {source}")
         if source.resolve() != target.resolve():
             shutil.copy2(source, target)
+    return patterns
+
+
+def upload_release(
+    repo: str,
+    staging: Path,
+    kind: str,
+    tag: str | None = None,
+    *,
+    license_file: str,
+    expected_source: dict | None = None,
+    architectures: Iterable[str] | None = None,
+    metadata_dir: Path | None = None,
+    token: str | None = None,
+) -> str:
+    """Verify and publish a complete macos27 release of `kind` bundles."""
+    patterns = prepare_release(staging, kind, license_file=license_file, expected_source=expected_source,
+                               architectures=architectures, metadata_dir=metadata_dir)
     return upload_to_hub(repo, staging, tag, allow_patterns=patterns, delete_patterns=["macos27/**"], token=token)
+
+
+def release_main(model: str, kind: str, source: Path, expected_source: dict, license_file: str, argv=None) -> int:
+    """Command line that compiles, stages and publishes a model's bundles; returns 1 if any target failed."""
+    import argparse
+
+    from tinkerbox_ane.bundle import compile_bundle, read_bundle
+    from tinkerbox_ane.host import SUPPORTED_ARCHITECTURES
+    from tinkerbox_ane.models import entry
+
+    item = entry(model)
+    parser = argparse.ArgumentParser(description=f"Compile, stage and publish {item['name']} bundles to Hugging Face Hub.")
+    parser.add_argument('--source', type=Path, default=source)
+    parser.add_argument('--staging', type=Path,
+                        default=Path('artifacts/huggingface') / item['repo'].split('/')[-1])
+    parser.add_argument('--repo', default=item['repo'])
+    parser.add_argument('--tag', default=item['revision'])
+    parser.add_argument('--arch', nargs='+', choices=list(SUPPORTED_ARCHITECTURES), default=item['architectures'])
+    parser.add_argument('--force', action='store_true')
+    parser.add_argument('--continue-on-error', action='store_true')
+    parser.add_argument('--metadata', type=Path, help='Directory with release README.md, LICENSE and NOTICE')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--no-upload', action='store_true', help='Compile and stage without uploading')
+    modes.add_argument('--upload-only', action='store_true', help='Publish staged bundles')
+    args = parser.parse_args(argv)
+    architectures = args.arch
+    if not args.upload_only:
+        if read_bundle(args.source, kind)['source'] != expected_source:
+            raise ValueError(f"export source does not match {item['name']}")
+        compile_model = lambda source, out, architecture, force: compile_bundle(source, out, kind, architecture, force=force)
+        architectures = list(build_architectures(compile_model, args.source, args.staging / 'macos27', args.arch,
+                                                 force=args.force, continue_on_error=args.continue_on_error))
+    metadata = dict(license_file=license_file, expected_source=expected_source, architectures=architectures,
+                    metadata_dir=args.metadata)
+    if args.no_upload:
+        prepare_release(args.staging, kind, **metadata)
+        print(f'Release staged in {args.staging}')
+    else:
+        commit = upload_release(args.repo, args.staging, kind, args.tag, **metadata)
+        print(f'Published {args.repo} at {commit}')
+    return int(set(architectures) != set(args.arch))

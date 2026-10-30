@@ -2,12 +2,14 @@
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -56,6 +58,12 @@ with tempfile.TemporaryDirectory(prefix=".app-", dir=out) as temporary:
     shutil.copyfile(source / "worker.py", resources / "worker.py")
     # The offline model catalog: exactly the models this package version can run.
     shutil.copyfile(root / "src/tinkerbox_ane/models.json", resources / "models.json")
+    # Picker choices must work before setup or model download. Bundle the backend declarations.
+    sys.path.insert(0, str(root / 'src'))
+    catalog = json.loads((resources / 'models.json').read_text())['models']
+    capabilities = {model['id']: importlib.import_module(model['module']).SPEECH_CAPABILITIES
+                    for model in catalog if model['task'] == 'speech'}
+    (resources / 'speech-capabilities.json').write_text(json.dumps(capabilities))
     icon_plist = Path(temporary) / "icon.plist"
     subprocess.run([
         "xcrun", "actool", str(source / "Tinkerbox.icon"), "--compile", str(resources),
@@ -64,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix=".app-", dir=out) as temporary:
     ], check=True, stdout=subprocess.DEVNULL)
     requirements = subprocess.check_output([
         str(uv), "export", "--project", str(root), "--locked", "--no-dev",
-        "--no-emit-project", "--no-hashes", "--no-header", "--no-annotate",
+        "--no-emit-project", "--no-hashes", "--no-header", "--no-annotate", "--extra", "speech",
     ], text=True)
     package = f"tinkerbox-ane=={version}"
     if args.wheel:
@@ -72,7 +80,9 @@ with tempfile.TemporaryDirectory(prefix=".app-", dir=out) as temporary:
         shutil.copyfile(args.wheel, resources / args.wheel.name)
         package = f"tinkerbox-ane @ {(app / 'Contents/Resources' / args.wheel.name).as_uri()}"
     (resources / "requirements.txt").write_text(f"{package}\n" + requirements)
-    swift_sources = [source / name for name in ("Demo.swift", "Catalog.swift", "Runtime.swift", "Shortcuts.swift", "Storage.swift")]
+    swift_sources = [source / name for name in ("Demo.swift", "Catalog.swift", "Runtime.swift", "Shortcuts.swift", "Storage.swift", "Speech.swift", "AudioPlayback.swift", "AudioRecording.swift", "LogoActivity.swift")]
+    swift_sources.append(root / "src/tinkerbox_ane/transcription.swift")
+    swift_sources.append(root / "src/tinkerbox_ane/audio.swift")
     toolchain = Path(subprocess.check_output(["xcrun", "--find", "swiftc"], text=True).strip()).parents[1]
     sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
     const_values = Path(temporary) / "TinkerboxDemo.swiftconstvalues"
@@ -111,6 +121,7 @@ with tempfile.TemporaryDirectory(prefix=".app-", dir=out) as temporary:
         "CFBundleVersion": version,
         "LSMinimumSystemVersion": "27.0",
         "NSHighResolutionCapable": True,
+        "NSMicrophoneUsageDescription": "Record a voice sample to create your cloned voice on this Mac.",
     }
     info.update(plistlib.loads(icon_plist.read_bytes()))
     (contents / "Info.plist").write_bytes(plistlib.dumps(info))

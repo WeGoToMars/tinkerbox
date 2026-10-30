@@ -9,7 +9,6 @@ from tinkerbox_ane.d1 import DEFAULT_ASSET, MODEL
 from tinkerbox_ane.host import (
     BINARY,
     SUPPORTED_ARCHITECTURES,
-    UNSUPPORTED_ARCHITECTURES,
     device_architecture,
 )
 
@@ -21,7 +20,7 @@ def test_host_binary_architecture_handshake():
     result = subprocess.run([str(BINARY), "--architecture"], capture_output=True, text=True, check=True)
     arch = result.stdout.strip()
     assert arch, "host binary returned empty architecture string"
-    assert arch in SUPPORTED_ARCHITECTURES or arch in UNSUPPORTED_ARCHITECTURES, f"unexpected architecture: {arch}"
+    assert arch in SUPPORTED_ARCHITECTURES, f"unexpected architecture: {arch}"
     assert device_architecture() == arch
 
 

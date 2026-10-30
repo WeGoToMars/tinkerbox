@@ -1,18 +1,22 @@
 import Foundation
+import CoreAI
 
 // What a model does. Each task has its own page in the app and its own selected model.
 enum ModelTask: String, CaseIterable, Sendable {
     case decision
+    case speech
 
     var title: String {
         switch self {
         case .decision: "Decision (System One)"
+        case .speech: "Text to Speech"
         }
     }
 
     var symbol: String {
         switch self {
         case .decision: "arrow.triangle.branch"
+        case .speech: "waveform"
         }
     }
 
@@ -20,6 +24,7 @@ enum ModelTask: String, CaseIterable, Sendable {
     var heading: String {
         switch self {
         case .decision: "Decision"
+        case .speech: "Speech"
         }
     }
 }
@@ -39,9 +44,11 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     let repo: String
     let revision: String
     let inputs: [String]?
+    let nonVerbalTags: [String]?
     let context: Int?
     let downloadBytes: Int64?
     let license: String?
+    let architectures: [String]?
     let minVersion: String
 
     var kind: ModelTask? { ModelTask(rawValue: task) }
@@ -56,16 +63,109 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     // Matches tinkerbox_ane.bundle.CACHE: <model>/<revision>/macos27/<architecture>/model.json.
     nonisolated static let cacheURL = FileManager.default.homeDirectoryForCurrentUser
         .appending(path: "Library/Caches/tinkerbox-ane/models")
+    nonisolated static let deviceArchitecture = AIModel.deviceArchitectureName
+    nonisolated private static let bundledData = Bundle.main.url(forResource: "models", withExtension: "json")
+        .flatMap { try? Data(contentsOf: $0) }
+    nonisolated static let architectures: [String: String] = {
+        guard let data = bundledData,
+              let catalog = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return catalog["architectures"] as? [String: String] ?? [:]
+    }()
 
     // The bundled catalog lists exactly the models this app's Python package can run.
     nonisolated static let bundled: [CatalogModel] = {
-        guard let url = Bundle.main.url(forResource: "models", withExtension: "json"),
-              let data = try? Data(contentsOf: url) else { return [] }
+        guard let data = bundledData else { return [] }
         return (try? decode(data)) ?? []
     }()
 
-    var models = Catalog.bundled
+    // Backend declarations bundled at build time: Shortcuts pickers need no model or Python setup.
+    nonisolated static let speechCapabilities: [String: SpeechCapabilities] = {
+        guard let url = Bundle.main.url(forResource: "speech-capabilities", withExtension: "json"),
+              let data = try? Data(contentsOf: url) else { return [:] }
+        return (try? JSONDecoder().decode([String: SpeechCapabilities].self, from: data)) ?? [:]
+    }()
+
+    // A published revision the user accepted, newer than the one this app ships; kept as the raw
+    // catalog entry because the worker and downloader read it from TINKERBOX_CATALOG_UPDATES.
+    nonisolated static func pinnedEntry(_ id: String) -> String? {
+        UserDefaults.standard.string(forKey: "catalog.entry.\(id)")
+    }
+
+    // Entries of every accepted update, in the form tinkerbox_ane.models reads; `adding` is one being downloaded.
+    nonisolated static func updatesEnvironment(adding: String? = nil) -> String {
+        let entries = bundled.compactMap { model in current(model.id).flatMap { $0.revision == model.revision ? nil : pinnedEntry(model.id) } }
+        return "[" + (entries + [adding].compactMap { $0 }).joined(separator: ",") + "]"
+    }
+
+    nonisolated static func pin(_ raw: String, for id: String) {
+        UserDefaults.standard.set(raw, forKey: "catalog.entry.\(id)")
+    }
+
+    // The entry this app runs for a bundled model: its own, unless an accepted update is newer.
+    nonisolated static func current(_ id: String) -> CatalogModel? {
+        guard let bundled = bundled.first(where: { $0.id == id }) else { return nil }
+        guard let raw = pinnedEntry(id), let pinned = try? decode(Data("{\"schema\":1,\"models\":[\(raw)]}".utf8)).first,
+              isNewer(pinned.revision, than: bundled.revision), !isNewer(pinned.minVersion, than: appVersion)
+        else { return bundled }
+        return pinned
+    }
+
+    // Whether an earlier revision of the model is installed, so the current one is an update.
+    nonisolated static func hasOlderBundle(_ model: CatalogModel) -> Bool {
+        let folders = (try? FileManager.default.contentsOfDirectory(
+            at: cacheURL.appending(path: model.id), includingPropertiesForKeys: nil)) ?? []
+        return folders.contains { folder in
+            folder.lastPathComponent != model.revision
+                && bundleIssue(at: folder.appending(path: "macos27").appending(path: deviceArchitecture)) == nil
+        }
+    }
+
+    nonisolated static func bundleIssue(at url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url.appending(path: "model.json")),
+              let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              manifest["version"] as? Int == 2,
+              let target = manifest["architecture"] as? String else {
+            return "Choose a compiled bundle directory containing model.json."
+        }
+        guard target == deviceArchitecture else {
+            return "This bundle targets \(architectures[target] ?? target). Choose a bundle compiled for this Mac."
+        }
+        return nil
+    }
+
+    nonisolated static func cachedBundle(for model: CatalogModel) -> URL {
+        cacheURL.appending(path: model.id).appending(path: model.revision)
+            .appending(path: "macos27").appending(path: deviceArchitecture)
+    }
+
+    nonisolated static func localBundle(for model: CatalogModel) -> URL? {
+        let candidate = UserDefaults.standard.string(forKey: "asset.\(model.id)").map { URL(fileURLWithPath: $0) }
+            ?? cachedBundle(for: model)
+        return bundleIssue(at: candidate) == nil ? candidate : nil
+    }
+
+    // A development bundle that the worker loads for whichever model it runs.
+    nonisolated static let overrideAsset = ProcessInfo.processInfo.environment["TINKERBOX_ASSET"].map { URL(fileURLWithPath: $0) }
+
+    nonisolated static func availabilityIssue(for model: CatalogModel, asset: URL? = nil) -> String? {
+        guard architectures[deviceArchitecture] != nil else {
+            return "This Mac's Neural Engine is not supported by this version of Tinkerbox. Update Tinkerbox to use this Mac."
+        }
+        if let asset { return bundleIssue(at: asset) }
+        if let selected = UserDefaults.standard.string(forKey: "asset.\(model.id)") {
+            return bundleIssue(at: URL(fileURLWithPath: selected))
+        }
+        if localBundle(for: model) != nil { return nil }
+        if let supported = model.architectures, !supported.contains(deviceArchitecture) {
+            return "No \(model.name) bundle is available for this Mac. Choose another model or a matching local bundle."
+        }
+        return nil
+    }
+
+    var models = Catalog.bundled.map { Catalog.current($0.id) ?? $0 }
     var isRemote = false
+    // Newer published revisions of installed models this app can run, by model, with the raw entry.
+    var offers: [String: (model: CatalogModel, raw: String)] = [:]
     var downloaded: Set<String> = []
 
     // The catalog format this app reads; a newer one is ignored instead of misread.
@@ -102,7 +202,9 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
             let remote = try Self.decode(data)
             // Bundled entries describe what this app runs; the remote catalog only adds models to discover.
-            models = Self.bundled + remote.filter { model in !Self.bundled.contains { $0.id == model.id } }
+            let current = Self.bundled.map { Self.current($0.id) ?? $0 }
+            models = current + remote.filter { model in !Self.bundled.contains { $0.id == model.id } }
+            offers = Self.offers(in: data, remote: remote, current: current)
             isRemote = true
         } catch {
             models = Self.bundled
@@ -111,14 +213,41 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
         scanDownloads()
     }
 
+    // A published revision is offered when it is newer than the one this app runs and this app is new enough for it.
+    nonisolated private static func offers(in data: Data, remote: [CatalogModel], current: [CatalogModel])
+        -> [String: (model: CatalogModel, raw: String)] {
+        let entries = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["models"] as? [[String: Any]] ?? []
+        var offers: [String: (model: CatalogModel, raw: String)] = [:]
+        for model in current {
+            guard let newer = remote.first(where: { $0.id == model.id }),
+                  isNewer(newer.revision, than: model.revision), !isNewer(newer.minVersion, than: appVersion),
+                  let entry = entries.first(where: { $0["id"] as? String == model.id }),
+                  let raw = try? JSONSerialization.data(withJSONObject: entry),
+                  let text = String(data: raw, encoding: .utf8) else { continue }
+            offers[model.id] = (newer, text)
+        }
+        return offers
+    }
+
+    // What the model's row offers to replace: an installed older revision, or the newer published one.
+    func update(for model: CatalogModel) -> CatalogModel? {
+        if let offer = offers[model.id], Self.localBundle(for: model) != nil || Self.hasOlderBundle(model)
+            || Self.hasOlderBundle(offer.model) { return offer.model }
+        return !downloaded.contains(model.id) && Self.hasOlderBundle(model) ? model : nil
+    }
+
+    // Switches a model to its offered revision once that is downloaded; every launch of the app and worker follows.
+    func adopt(_ id: String) {
+        guard let offer = offers[id] else { return }
+        Self.pin(offer.raw, for: id)
+        models = models.map { $0.id == id ? offer.model : $0 }
+        offers[id] = nil
+        scanDownloads()
+    }
+
     func scanDownloads() {
-        let files = FileManager.default
         // Only the catalog's revision counts; an older one would be downloaded again on load.
-        downloaded = Set(models.filter { model in
-            let folder = Self.cacheURL.appending(path: model.id).appending(path: model.revision).appending(path: "macos27")
-            let bundles = (try? files.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
-            return bundles.contains { files.fileExists(atPath: $0.appending(path: "model.json").path) }
-        }.map(\.id))
+        downloaded = Set(models.filter { Self.localBundle(for: $0) != nil }.map(\.id))
     }
 }
 
@@ -133,14 +262,14 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     func contains(_ model: String) -> Bool { tasks[model] != nil }
 
     // Waits for a model's download, starting it unless it is already running.
-    func fetch(_ model: String) async throws {
+    func fetch(_ model: String, entry: String? = nil) async throws {
         if let task = tasks[model] { return try await task.value }
         let task = Task {
             defer {
                 tasks[model] = nil
                 progress[model] = nil
             }
-            try await run(model)
+            try await run(model, entry: entry)
         }
         tasks[model] = task
         try await task.value
@@ -155,12 +284,13 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
         _ = try? await task.value
     }
 
-    private func run(_ model: String) async throws {
+    private func run(_ model: String, entry: String?) async throws {
         struct Update: Decodable { let progress: Double? }
         defer { stopped.remove(model) }
         let process = Process(), output = Pipe(), errors = Pipe()
         Runtime.configure(process, python: ["-u", "-m", "tinkerbox_ane.download", model])
         process.environment!["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        process.environment!["TINKERBOX_CATALOG_UPDATES"] = Catalog.updatesEnvironment(adding: entry)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output
         process.standardError = errors

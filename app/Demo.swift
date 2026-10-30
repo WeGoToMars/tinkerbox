@@ -65,6 +65,7 @@ struct RunTotals {
     var status: String { downloads.contains(model) ? "Downloading model…" : runtime.state.status }
     var progress: Double? { downloads.contains(model) ? downloads.progress[model] : runtime.state.progress }
     var busy = false  // a request from the app is running
+    private(set) var updating: Set<String> = []
     var unloading = false
     var error: String?
     var setupMs: Double?
@@ -74,6 +75,8 @@ struct RunTotals {
     var questionTrees = false
     var settings: [ModelSetting] = []
     var info: [ModelInfo] = []
+    var speechParameters: [SpeechParameter] = []
+    var speechCapabilities: SpeechCapabilities? { Catalog.speechCapabilities[model] }
     // Only values that differ from the defaults are kept.
     var settingValues: [String: Int] = [:] {
         didSet { Runtime.store(settings: settingValues, for: model) }
@@ -82,6 +85,9 @@ struct RunTotals {
     private var generation = 0
 
     var current: CatalogModel? { catalog.models.first { $0.id == model } }
+    var compatibilityIssue: String? {
+        current.flatMap { Catalog.availabilityIssue(for: $0, asset: Catalog.overrideAsset) }
+    }
 
     func isDownloaded(_ id: String) -> Bool { catalog.downloaded.contains(id) && !downloads.contains(id) }
 
@@ -94,13 +100,37 @@ struct RunTotals {
 
     // Downloads run beside the runtime, so they never hold up requests or model switches.
     private func fetch(_ id: String) async throws {
+        if let model = catalog.models.first(where: { $0.id == id }),
+           let issue = Catalog.availabilityIssue(for: model, asset: Catalog.overrideAsset) {
+            throw DecisionError.invalid(issue)
+        }
         // The worker loads a local bundle given at launch instead.
-        guard !isDownloaded(id), ProcessInfo.processInfo.environment["TINKERBOX_ASSET"] == nil else { return }
+        if UserDefaults.standard.string(forKey: "asset.\(id)") != nil { return }
+        guard !isDownloaded(id), Catalog.overrideAsset == nil else { return }
         defer {
             catalog.scanDownloads()
             Task { await storage.refresh() }
         }
         try await downloads.fetch(id)
+    }
+
+    // Downloads a model's newer revision beside the installed one, switches to it and removes the outdated files.
+    func update(_ id: String) async {
+        guard !updating.contains(id), !storage.removing.contains(id) else { return }
+        updating.insert(id)
+        defer { updating.remove(id) }
+        do { try await downloads.fetch(id, entry: catalog.offers[id]?.raw) } catch {
+            if !(error is CancellationError) { self.error = error.localizedDescription }
+            return
+        }
+        catalog.adopt(id)
+        catalog.scanDownloads()
+        // A worker running the old revision restarts on the new one before its files are removed.
+        if runtime.state.model == id {
+            await runtime.unload()
+            await load()
+        }
+        await remove(id, outdated: true)
     }
 
     func load() async {
@@ -126,6 +156,7 @@ struct RunTotals {
             questionTrees = reply.questionTrees == true
             settings = reply.settings ?? []
             info = reply.info ?? []
+            speechParameters = reply.speechParameters ?? []
         } catch is CancellationError {
             // Its download was stopped to remove the model.
         } catch {
@@ -140,23 +171,24 @@ struct RunTotals {
         architecture = nil
         settings = []
         info = []
+        speechParameters = []
         settingValues = Runtime.settings(for: model)
     }
 
     // The previous model keeps serving Shortcuts until the chosen one has downloaded.
-    func choose(_ choice: CatalogModel) async {
+    func choose(_ choice: CatalogModel, asset: URL? = nil) async {
         guard let task = choice.kind, choice.isSupported, !storage.removing.contains(choice.id),
-              choice.id != model || !ready else { return }
+              choice.id != model || !ready || asset != nil else { return }
         generation += 1
         let current = generation
         model = choice.id  // reserve its files before yielding to the runtime
         forgetLoadedModel()  // its settings are not the chosen model's
-        do { try await fetch(choice.id) } catch {
+        do { if asset == nil { try await fetch(choice.id) } } catch {
             if current == generation && !(error is CancellationError) { self.error = error.localizedDescription }
             return
         }
         guard current == generation else { return }
-        await runtime.select(model: choice.id, for: task)
+        await runtime.select(model: choice.id, for: task, asset: asset?.path)
         guard current == generation else { return }
         setupMs = nil
         await load()
@@ -177,6 +209,11 @@ struct RunTotals {
         if !outdated {
             guard !keeps(id) else { return }
             await downloads.stop(id)
+            if UserDefaults.standard.string(forKey: "asset.\(id)") != nil {
+                UserDefaults.standard.removeObject(forKey: "asset.\(id)")
+                catalog.scanDownloads()
+                return
+            }
         }
         await storage.remove(id, outdated: outdated)
         catalog.scanDownloads()
@@ -242,7 +279,7 @@ struct RunTotals {
     var runMode: RunMode { demo.questionTrees && questions.count > 1 ? mode : .parallel }
 
     var canRun: Bool {
-        !demo.loading && !demo.busy && !(isBlank(state) && images.isEmpty)
+        !demo.loading && !demo.busy && demo.compatibilityIssue == nil && !(isBlank(state) && images.isEmpty)
             && questions.allSatisfy { $0.validation == nil && !isBlank($0.instructions) }
     }
 
@@ -522,17 +559,25 @@ struct AppView: View {
                 StorageSummary(storage: demo.storage) { destination = .storage }
             }
             .navigationSplitViewColumnWidth(min: 160, ideal: 180)
+            .disabled(demo.busy)
         } detail: {
             Group {
                 switch destination ?? .task(.decision) {
                 case .task(.decision): DecisionView(playground: decisions) { destination = .models }
+                case .task(.speech): SpeechView(demo: demo) { destination = .models }
                 case .models: ModelsView(demo: demo)
                 case .storage: StorageView(demo: demo)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { SystemFooter() }
         }
-        .task { await demo.load() }
+        .task(id: destination) {
+            if case .task(let task) = destination {
+                let selected = Runtime.selectedModel(for: task)
+                if demo.model == selected { if !demo.ready { await demo.load() } }
+                else if let model = demo.catalog.models.first(where: { $0.id == selected }) { await demo.choose(model) }
+            }
+        }
         .task { await demo.catalog.refresh() }
         .task { await Updates.shared.check() }
         .onChange(of: demo.model) { decisions.reset() }
@@ -573,6 +618,10 @@ struct ModelToolbar: ToolbarContent {
                     .foregroundStyle(.green)
                     .fixedSize()
                     .help("Unloads after 5 minutes without inference.")
+            } else if let issue = demo.compatibilityIssue {
+                Label("Model unavailable", systemImage: "exclamationmark.circle")
+                    .foregroundStyle(.secondary)
+                    .help(issue)
             } else {
                 Label("Model unloaded", systemImage: "moon")
                     .foregroundStyle(.secondary)
@@ -652,6 +701,22 @@ struct ModelInspector: View {
     }
 }
 
+struct ModelAvailability: View {
+    let demo: Demo
+    let showModels: () -> Void
+
+    var body: some View {
+        if let issue = demo.compatibilityIssue {
+            HStack(alignment: .top, spacing: 12) {
+                Label(issue, systemImage: "info.circle")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Manage Models…", action: showModels)
+            }
+        }
+    }
+}
+
 struct DecisionView: View {
     @Bindable var playground: DecisionPlayground
     let showModels: () -> Void
@@ -667,7 +732,8 @@ struct DecisionView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                if !demo.ready && (demo.loading || demo.error != nil) {
+                ModelAvailability(demo: demo, showModels: showModels)
+                if demo.compatibilityIssue == nil && !demo.ready && (demo.loading || demo.error != nil) {
                     HStack {
                         Text("First launch downloads Python, dependencies and model files.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -752,7 +818,7 @@ struct DecisionView: View {
                                 .help("Each question runs sequentially and reads the full input again.")
                         }
                     }
-                    if demo.busy && !demo.unloading { ProgressView().controlSize(.small) }
+                    if demo.busy && !demo.unloading { LogoActivity().frame(width: 36, height: 36).transition(.opacity) }
                     if let error = playground.previewError {
                         Text(error).font(.caption).foregroundStyle(.red).lineLimit(2)
                     } else if let preview = playground.preview {
@@ -774,7 +840,7 @@ struct DecisionView: View {
                     if !Task.isCancelled { await playground.updatePreview() }
                 }
 
-                if let error = playground.error ?? demo.error {
+                if let error = playground.error ?? demo.error, demo.compatibilityIssue == nil {
                     Label(error, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.red).textSelection(.enabled)
                 }
@@ -994,6 +1060,7 @@ struct QuestionCard: View {
 // Every catalog model, grouped by task, with downloads in progress shown in their row.
 struct ModelsView: View {
     let demo: Demo
+    @State private var removalError: String?
     @State private var pending: CatalogModel?
     @Environment(\.openURL) private var openURL
 
@@ -1022,6 +1089,8 @@ struct ModelsView: View {
         .toolbar {
             Button("Refresh", systemImage: "arrow.clockwise") { Task { await demo.catalog.refresh() } }
         }
+        .alert("Model files", isPresented: Binding(get: { removalError != nil }, set: { if !$0 { removalError = nil } })) {
+        } message: { Text(removalError ?? "") }
         .confirmationDialog("Delete \(pending?.name ?? "")?", isPresented: Binding(
             get: { pending != nil }, set: { if !$0 { pending = nil } }), presenting: pending) { model in
             Button("Delete", role: .destructive) { Task { await demo.remove(model.id) } }
@@ -1038,6 +1107,7 @@ struct ModelsView: View {
     private func row(_ model: CatalogModel) -> some View {
         let downloaded = demo.isDownloaded(model.id)
         let downloading = demo.downloads.contains(model.id)
+        let issue = Catalog.availabilityIssue(for: model)
         // Partial downloads count, so an interrupted one can be deleted.
         let stored = demo.catalog.downloaded.contains(model.id) || downloading
             || demo.storage.report?.models.contains { $0.id == model.id } == true
@@ -1053,6 +1123,13 @@ struct ModelsView: View {
                 }
                 Text(model.summary)
                 Text(details.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                if issue == nil, let update = demo.catalog.update(for: model) {
+                    Text("Update available · \(update.revision)")
+                        .font(.caption).foregroundStyle(.tint)
+                }
+                if model.isSupported, let issue {
+                    Text(issue).font(.caption).foregroundStyle(.secondary)
+                }
             }
             Spacer()
             Menu("Hugging Face", systemImage: "arrow.up.right.square") {
@@ -1077,7 +1154,10 @@ struct ModelsView: View {
                      ? "Requires Tinkerbox \(model.minVersion)" : "Update Tinkerbox to use this model")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                if model.id == demo.model && demo.loading {
+                if issue != nil {
+                    Button("Choose bundle…") { chooseBundle(model) }
+                        .disabled(demo.busy || demo.storage.removing.contains(model.id))
+                } else if model.id == demo.model && demo.loading {
                     VStack(alignment: .trailing, spacing: 4) {
                         Text(demo.status).font(.caption).foregroundStyle(.secondary)
                         ProgressView(value: demo.progress).frame(width: 120)
@@ -1090,7 +1170,11 @@ struct ModelsView: View {
                 } else if model.id == demo.model {
                     Label("Selected", systemImage: "checkmark.circle.fill")
                         .foregroundStyle(demo.ready ? .green : .secondary)
-                        .help("Used by Decision and Shortcuts")
+                        .help("Selected for \(model.kind?.title ?? model.task)")
+                }
+                if issue == nil, !downloading, demo.catalog.update(for: model) != nil {
+                    Button("Update") { Task { await demo.update(model.id) } }
+                        .disabled(demo.busy || demo.updating.contains(model.id) || demo.storage.removing.contains(model.id))
                 }
                 if demo.storage.removing.contains(model.id) {
                     ProgressView().controlSize(.small)
@@ -1100,13 +1184,21 @@ struct ModelsView: View {
                         .help(downloading ? "Stop the download and delete its files" : "Delete model files and cached copies")
                         .disabled(!demo.storage.removing.isEmpty)
                 }
-                if model.id != demo.model {
-                    Button(downloaded ? "Select" : "Download & Select") {
-                        Task { await demo.choose(model) }
-                    }
+                if model.id != demo.model && issue == nil {
+                    Button(downloaded ? "Select" : "Download & Select") { Task { await demo.choose(model) } }
                     .disabled(demo.busy || demo.storage.removing.contains(model.id))
                 }
             }
+        }
+    }
+    private func chooseBundle(_ model: CatalogModel) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.message = "Choose the compiled model bundle directory containing model.json."
+        if panel.runModal() == .OK, let url = panel.url {
+            if let issue = Catalog.bundleIssue(at: url) { removalError = issue }
+            else { Task { await demo.choose(model, asset: url) } }
         }
     }
 }

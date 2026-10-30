@@ -1,6 +1,6 @@
 [project]
 name = "tinkerbox-ane"
-version = "2.1.0"
+version = "2.2.0"
 description = "Optimized AI model runtime for practical tasks on Apple Neural Engine."
 readme = "README.md"
 license-files = ["LICENSES/*.txt", "NOTICE"]
@@ -20,9 +20,14 @@ dependencies = [
 Homepage = "https://github.com/WeGoToMars/tinkerbox"
 Issues = "https://github.com/WeGoToMars/tinkerbox/issues"
 
+[project.optional-dependencies]
+speech = ["omnivoice==0.2.1", "torchaudio==2.9.0"]
+
 [dependency-groups]
 dev = [
     "accelerate>=1.15.0",
+    "coreai-opt[coreai]==0.3.0",
+    "torchao==0.15.0",
     "coreai-torch==0.4.3",
     "pytest==9.1.1",
 ]
@@ -43,6 +48,11 @@ cache-keys = [
     { file = "src/tinkerbox_ane/*.swift" },
     { file = "src/tinkerbox_ane/cow-staging.m" },
 ]
+
+[tool.ruff.lint]
+# Pyflakes plus bugbear; zip() lengths are matched by construction.
+select = ["F", "B"]
+ignore = ["B905"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

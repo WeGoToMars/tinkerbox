@@ -80,7 +80,11 @@ def decide(model, entry, request):
 
 
 # One request handler per catalog task; a new task adds its own instead of branching inside another.
-HANDLERS = {"decision": decide}
+from tinkerbox_ane.speech import synthesize
+
+HANDLERS = {"decision": decide,
+            # Streamed speech sends its audio pieces before the complete reply.
+            "speech": lambda model, entry, request: synthesize(model, entry, request, emit=send)}
 
 
 def main():
@@ -108,6 +112,7 @@ def main():
               "cpuModel": cpu, "architecture": device_architecture(),
               "questionTrees": entry.get("question_trees", False),
               "settings": package.SETTINGS, "info": package.INFO,
+              "speechParameters": getattr(package, "SPEECH_PARAMETERS", []),
               "setupMs": (time.perf_counter() - started) * 1000})
         for line in sys.stdin:
             try:

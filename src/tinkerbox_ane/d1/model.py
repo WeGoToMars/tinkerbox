@@ -12,7 +12,7 @@ from torch import nn
 from torch.nn import functional as F
 from safetensors import safe_open
 
-from tinkerbox_ane.blocks import MLP, RMSNorm, block_scale, conv1x1, silu
+from tinkerbox_ane.blocks import MLP, RMSNorm, block_scale, conv1x1
 from tinkerbox_ane.d1 import CHUNK, RESIDUAL_SCALE
 
 PREFIX = "model.language_model."

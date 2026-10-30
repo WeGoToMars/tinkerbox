@@ -12,6 +12,7 @@ from torch import nn
 from torch.nn import functional as F
 from safetensors import safe_open
 
+from tinkerbox_ane.architectures.attention import BlockAttention
 from tinkerbox_ane.blocks import MLP, RMSNorm, block_scale, conv1x1, silu
 from tinkerbox_ane.d3 import CHUNK, RESIDUAL_SCALE
 
@@ -255,50 +256,6 @@ class AttentionBlock(nn.Module):
         return x + self.feed_forward(self.ffn_norm(x))
 
 
-class PromptAttention(nn.Module):
-    """Merge SDPA block means by their softmax masses."""
-
-    def __init__(self, cfg: Config, context: int):
-        super().__init__()
-        self.context = context
-        self.group = cfg.heads // cfg.kv_heads
-        self.block_size = 4096
-
-    def forward(self, q, k, v, mask):
-        if self.context <= self.block_size:
-            return F.scaled_dot_product_attention(
-                q,
-                k.repeat_interleave(self.group, dim=1),
-                v.repeat_interleave(self.group, dim=1),
-                attn_mask=mask,
-                scale=1.0,
-            )
-        batch, heads, tokens, dim = q.shape
-        # Block statistics broadcast query groups over shared KV heads instead of repeating keys.
-        grouped = q.view(batch, k.shape[1], self.group, tokens, dim)
-        maxima, masses, means = [], [], []
-        for start in range(0, self.context, self.block_size):
-            keys = k[:, :, start:start + self.block_size]
-            kb = keys.repeat_interleave(self.group, dim=1)
-            vb = v[:, :, start:start + self.block_size].repeat_interleave(self.group, dim=1)
-            block_mask = mask[..., start:start + self.block_size]
-            scores = (grouped @ keys.unsqueeze(2).transpose(-2, -1)).view(batch, heads, tokens, -1) + block_mask
-            maximum = scores.amax(-1, keepdim=True)
-            maxima.append(maximum)
-            masses.append(torch.exp(scores - maximum).sum(-1, keepdim=True))
-            means.append(F.scaled_dot_product_attention(q, kb, vb, attn_mask=block_mask, scale=1.0))
-        # Pairwise rescaling avoids a 32K AOT compiler reduction failure.
-        weights = []
-        for index, local in enumerate(maxima):
-            others = [value for j, value in enumerate(maxima) if j != index]
-            shift = torch.clamp(local - others[0], max=0)
-            for other in others[1:]:
-                shift = torch.minimum(shift, local - other)
-            weights.append(torch.exp(shift) * masses[index])
-        mass = sum(weights)
-        return sum((weight / mass) * mean for weight, mean in zip(weights, means))
-
-
 class Backbone(nn.Module):
     def __init__(self, cfg: Config, scales: list[tuple[float, float]]):
         super().__init__()
@@ -349,7 +306,7 @@ class AttendStage(nn.Module):
     def __init__(self, backbone: Backbone, layer: int, capacity: int):
         super().__init__()
         self.layer = backbone.layers[layer]
-        self.attention = PromptAttention(backbone.cfg, capacity)
+        self.attention = BlockAttention(backbone.cfg, capacity)
         self.final_norm = backbone.final_norm if layer == len(backbone.layers) - 1 else nn.Identity()
 
     def forward(self, x, q, gate, k, v, mask):

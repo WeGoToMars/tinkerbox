@@ -167,6 +167,128 @@ struct Reply: Decodable, Sendable {
     let counts: [TokenCount]?  // in the request's item order
     let elapsedMs: Double?
     let error: String?
+    let speechParameters: [SpeechParameter]?
+    let audio: [SpeechAudio]?
+    let aneMs: Double?
+    let cloneMs: Double?
+    let audioMs: Double?
+    let voicePrompt: Data?
+    let seed: Int64?
+    let chunk: SpeechChunk?  // streamed speech, before its complete reply
+    let firstAudioMs: Double?
+}
+
+enum SpeechValue: Codable, Sendable, Equatable {
+    case number(Double), boolean(Bool), text(String)
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let value = try? container.decode(Bool.self) { self = .boolean(value) }
+        else if let value = try? container.decode(String.self) { self = .text(value) }
+        else { self = .number(try container.decode(Double.self)) }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .number(let value): try container.encode(value)
+        case .boolean(let value): try container.encode(value)
+        case .text(let value): try container.encode(value)
+        }
+    }
+}
+
+struct SpeechParameter: Decodable, Identifiable, Sendable {
+    let key: String
+    let title: String
+    let type: String
+    let min: Double?
+    let max: Double?
+    let defaultValue: SpeechValue?
+    let choices: [SpeechChoice]?
+    let optional: Bool?
+    let help: String?
+    var id: String { key }
+    enum CodingKeys: String, CodingKey {
+        case key, title, type, min, max, choices, optional, help, defaultValue = "default"
+    }
+}
+
+struct SpeechChoice: Decodable, Identifiable, Sendable {
+    let value: String
+    let title: String
+    var id: String { value }
+}
+
+struct SpeechMode: Decodable, Identifiable, Sendable {
+    let id: String
+    let title: String
+    let reference: String?
+    let referenceTranscript: String?
+    let language: Bool?
+    let instructionTitle: String?
+    let instructionHint: String?
+    let instructionRequired: Bool?
+    let controls: [SpeechParameter]?
+    enum CodingKeys: String, CodingKey {
+        case id, title, reference, language, controls
+        case referenceTranscript = "reference_transcript"
+        case instructionTitle = "instruction_title", instructionHint = "instruction_hint"
+        case instructionRequired = "instruction_required"
+    }
+}
+
+struct SpeechCapabilities: Decodable, Sendable {
+    let modes: [SpeechMode]
+    let controls: [SpeechParameter]
+    let streaming: Bool?  // audio can play while one text is generated
+}
+
+struct SpeechItem: Encodable, Sendable {
+    var text: String
+    var language: String?
+    var instruct: String?
+    var refAudio: String?
+    var refText: String?
+    var voiceClonePrompt: String?
+    var duration: Double?
+    var speed: Double?
+    var mode: String?
+    var controls: [String: SpeechValue]?
+    enum CodingKeys: String, CodingKey {
+        case text, language, instruct, duration, speed, mode, controls
+        case refAudio = "ref_audio", refText = "ref_text", voiceClonePrompt = "voice_clone_prompt"
+    }
+}
+
+struct SpeechRequest: Encodable, Sendable {
+    var items: [SpeechItem]
+    var parameters: [String: SpeechValue] = [:]
+    var seed: Int64?
+    var stream: Bool?  // set by Runtime when the caller plays pieces as they arrive
+}
+
+struct SpeechVoiceRequest: Encodable, Sendable {
+    let operation = "create_voice"
+    let refAudio: String
+    var refText: String?
+    var preprocessPrompt: Bool?  // nil uses the model's default
+    var mode: String? = nil
+    enum CodingKeys: String, CodingKey {
+        case operation, mode, refAudio = "ref_audio", refText = "ref_text", preprocessPrompt = "preprocess_prompt"
+    }
+}
+
+struct SpeechAudio: Decodable, Sendable {
+    let wav: Data
+    let sampleRate: Int
+    let duration: Double
+}
+
+// One streamed piece: mono little-endian PCM16; in order, the pieces join into the reply's WAV.
+struct SpeechChunk: Decodable, Sendable {
+    let pcm: Data
+    let sampleRate: Int
 }
 
 @MainActor @Observable final class RuntimeState {
@@ -209,7 +331,7 @@ actor Runtime {
         kill(getpgid(pid) == pid ? -pid : pid, signal)
     }
 
-    // Each task remembers its own model; the UI and Shortcuts both use the one chosen in the app.
+    // Each task remembers the UI's selection. Speech Shortcuts pass their own saved model per request.
     nonisolated static func selectedModel(for task: ModelTask) -> String {
         let runnable = Catalog.bundled.filter { $0.isSupported && $0.kind == task }.map(\.id)
         let stored = UserDefaults.standard.string(forKey: "model.\(task.rawValue)")
@@ -226,11 +348,12 @@ actor Runtime {
     }
 
     // Change the saved selection after pending requests finish, then release the previous model.
-    func select(model: String, for task: ModelTask) async {
+    func select(model: String, for task: ModelTask, asset: String? = nil) async {
         await acquire()
         defer { release() }
         UserDefaults.standard.set(model, forKey: "model.\(task.rawValue)")
-        if readyReply?.modelId != model { await disconnect(graceful: true) }
+        if let asset { UserDefaults.standard.set(asset, forKey: "asset.\(model)") }
+        if readyReply?.modelId != model || asset != nil { await disconnect(graceful: true) }
     }
 
     // Queue behind active requests; unloading never interrupts inference or changes the selection.
@@ -281,6 +404,10 @@ actor Runtime {
     // One model is loaded at a time; a request for another one replaces it.
     private func prepare(model: String) async throws -> Reply {
         if let readyReply, readyReply.modelId == model, process?.isRunning == true, replies != nil { return readyReply }
+        if let selected = Catalog.current(model),
+           let issue = Catalog.availabilityIssue(for: selected, asset: Catalog.overrideAsset) {
+            throw DecisionError.invalid(issue)
+        }
         readyReply = nil
         await MainActor.run {
             state.model = model
@@ -308,6 +435,11 @@ actor Runtime {
         replies = output.fileHandleForReading.bytes.lines.makeAsyncIterator()
         Self.configure(process, python: ["-u", Bundle.main.resourceURL!.appending(path: "worker.py").path])
         process.environment!["TINKERBOX_MODEL"] = model
+        process.environment!["TINKERBOX_CATALOG_UPDATES"] = Catalog.updatesEnvironment()
+        if process.environment!["TINKERBOX_ASSET"] == nil,
+           let asset = UserDefaults.standard.string(forKey: "asset.\(model)") {
+            process.environment!["TINKERBOX_ASSET"] = asset
+        }
         try FileManager.default.createDirectory(at: Self.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: Self.logURL.path, contents: nil)
         let log = try FileHandle(forWritingTo: Self.logURL)
@@ -354,6 +486,9 @@ actor Runtime {
         for name in ["PYTHONPATH", "PYTHONHOME", "UV_INTERNAL__PARENT_INTERPRETER"] {
             environment.removeValue(forKey: name)
         }
+        // Return freed large blocks to macOS: the allocator's cache otherwise keeps a speech request's
+        // temporary buffers resident, about 1 GB, for a few percent of speed.
+        environment["MallocLargeCache"] = "0"
         process.environment = environment
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
     }
@@ -374,6 +509,40 @@ actor Runtime {
         let reply = try await exchange(request)
         guard let counts = reply.counts, counts.count == request.items.count else { throw DecisionError.invalidReply }
         return counts
+    }
+
+    // With `onAudio`, one text's pieces arrive in order while it is generated, then the complete reply.
+    func speak(_ request: SpeechRequest, model: String? = nil,
+               onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil) async throws -> Reply {
+        var request = request
+        request.stream = onAudio == nil ? nil : true
+        return try await speechReply(request, model: model, onAudio: onAudio)
+    }
+
+    func createVoice(_ request: SpeechVoiceRequest, model: String? = nil) async throws -> Data {
+        let reply = try await speechReply(request, model: model)
+        guard let prompt = reply.voicePrompt else { throw DecisionError.invalidReply }
+        return prompt
+    }
+
+    private func speechReply<R: Encodable>(_ request: R, model: String? = nil,
+                                           onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil) async throws -> Reply {
+        await acquire()
+        defer { release() }
+        try Task.checkCancellation()
+        _ = try await prepare(model: model ?? Self.selectedModel(for: .speech))
+        var data = try JSONEncoder().encode(request)
+        data.append(10)
+        do { try input!.fileHandleForWriting.write(contentsOf: data) } catch {
+            await disconnect()
+            throw Self.stopped()
+        }
+        while true {
+            let reply = try await readReply()
+            guard let chunk = reply.chunk else { return reply }
+            // Keep reading after a caller stops listening: the complete reply ends the exchange.
+            await onAudio?(chunk)
+        }
     }
 
     // Sends one request to the decision model, with its saved settings, and reads its reply.

@@ -89,9 +89,10 @@ def install_bundle(model: str, revision: str, source: Path, kind: str) -> Path:
 CHECKPOINT = "checkpoint"
 
 
-def write_checkpoint(upstream: Path, out: Path, tensors: Iterable[str]) -> Path:
+def write_checkpoint(upstream: Path, out: Path, tensors: Iterable[str], dtype=None) -> Path:
     """Copy upstream's code, tokenizer, configs and other small files into `out/checkpoint`, with a
-    model.safetensors that keeps only `tensors`, by name; a name ending in "." keeps every tensor under it."""
+    model.safetensors that keeps only `tensors`, by name; a name ending in "." keeps every tensor under it.
+    `dtype` stores floating-point tensors in the runtime's type, so it maps them from disk without a copy."""
     from safetensors import safe_open
     from safetensors.torch import save_file
 
@@ -110,11 +111,13 @@ def write_checkpoint(upstream: Path, out: Path, tensors: Iterable[str]) -> Path:
             selected.update({key: f.get_tensor(key) for key in f.keys() if any(matches(key, n) for n in wanted)})
     if missing := [name for name in wanted if not any(matches(key, name) for key in selected)]:
         raise ValueError(f"{upstream} lacks tensors {missing}")
+    if dtype is not None:
+        selected = {key: value.to(dtype) if value.is_floating_point() else value for key, value in selected.items()}
     staged = Path(tempfile.mkdtemp(prefix=f".{CHECKPOINT}-", dir=out))
     try:
         for path in sorted(upstream.rglob("*")):
             relative = path.relative_to(upstream)
-            if (path.is_file() and path.name not in weights and path != index
+            if (path.is_file() and str(relative) not in weights and path != index
                     and not any(part.startswith(".") or part == "__pycache__" for part in relative.parts)):
                 (staged / relative).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(path, staged / relative)
@@ -288,7 +291,7 @@ def compile_bundle(
             build.mkdir(parents=True)
         marker.write_text(json.dumps(identity))
     if "asset" in spec:
-        target = build / f"fused.{architecture}.aimodelc"
+        target = build / f"{Path(spec['asset']).stem}.{architecture}.aimodelc"
         compile_asset(source / spec["asset"], target, architecture=architecture, min_deployment_version="27.0",
                       expected_functions=(f"c{capacity}" for capacity in spec["tiers"]))
         spec.update(asset=target.name)

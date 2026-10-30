@@ -99,6 +99,7 @@ func formatBytes(_ bytes: Int64) -> String {
         try await Task.detached {
             let process = Process(), output = Pipe(), errors = Pipe()
             Runtime.configure(process, python: ["-m", "tinkerbox_ane.storage"] + arguments)
+            process.environment!["TINKERBOX_CATALOG_UPDATES"] = Catalog.updatesEnvironment()
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = output
             process.standardError = errors

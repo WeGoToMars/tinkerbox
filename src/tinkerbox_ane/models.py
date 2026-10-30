@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from pathlib import Path
 
 CATALOG = json.loads(Path(__file__).with_name("models.json").read_text())["models"]
+# The app lists newer published entries of models whose update the user accepted; they replace the shipped ones.
+_UPDATES = {item["id"]: item for item in json.loads(os.environ.get("TINKERBOX_CATALOG_UPDATES") or "[]")}
+CATALOG = [{**item, **_UPDATES.get(item["id"], {})} for item in CATALOG]
 
 
 def entry(model: str) -> dict:
@@ -22,9 +26,14 @@ def entry(model: str) -> dict:
 
 def download(model: str, progress=None) -> Path:
     """Fetch the AOT bundle for this Mac; `progress(done_bytes, total_bytes)` reports the download."""
-    from tinkerbox_ane.bundle import download_bundle
+    from tinkerbox_ane.bundle import CACHE, download_bundle
+    from tinkerbox_ane.host import device_architecture
 
     item = entry(model)
+    # Downloaded or locally installed: the manifest is written last, so a bundle that has one is complete.
+    bundle = CACHE / model / item["revision"] / "macos27" / device_architecture()
+    if (bundle / "model.json").is_file():
+        return bundle
     return download_bundle(item["id"], item["repo"], item["revision"], progress)
 
 

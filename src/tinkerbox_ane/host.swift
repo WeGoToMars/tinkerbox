@@ -48,13 +48,23 @@ func protectReplies() {
   dup2(2, 1)
 }
 
-func writeAll(_ bytes: [UInt8]) {
+func writeAll(_ bytes: UnsafeRawBufferPointer) {
   var done = 0
   while done < bytes.count {
-    let n = bytes.withUnsafeBytes { write(replyFD, $0.baseAddress! + done, bytes.count - done) }
+    let n = write(replyFD, bytes.baseAddress! + done, bytes.count - done)
     if n <= 0 { exit(1) }  // Python is gone
     done += n
   }
+}
+
+func writeAll(_ bytes: [UInt8]) {
+  bytes.withUnsafeBytes { writeAll($0) }
+}
+
+// Write a successful tensor reply without copying the values into one buffer.
+func sendTensor(_ shape: [Int], _ values: [Float16]) {
+  writeAll([0] + le32(shape.count) + shape.flatMap(le32))
+  values.withUnsafeBytes { writeAll($0) }
 }
 
 func u32(_ bytes: [UInt8], _ at: Int) -> Int {
@@ -113,33 +123,71 @@ func descriptor(_ value: InferenceValue.Descriptor?, _ name: String) throws -> N
   return nd
 }
 
-func loadAsset(_ url: URL) async throws -> AIModel {
-  // Core AI rejects an asset directory that is itself a symbolic link.
-  let canonicalURL = url.resolvingSymlinksInPath()
+let specializationOptions = {
   var options = SpecializationOptions(preferredComputeUnitKind: .neuralEngine)
   options.expectFrequentReshapes = false
-  // Recover invalid persistent function caches before processing input.
+  return options
+}()
+
+// An invalid persistent specialization fails with nilError: delete it once so the retry rebuilds it.
+func discardInvalidSpecialization(_ url: URL, after error: Error, attempt: Int) throws {
+  let message = String(reflecting: error)
+  if attempt == 1 || !message.contains("nilError") { throw error }
+  FileHandle.standardError.write(
+    Data("REBUILD_INVALID_SPECIALIZATION asset=\(url.lastPathComponent) error=\(message)\n".utf8))
+  try AIModelCache.default.deleteEntry(for: url.resolvingSymlinksInPath(), options: specializationOptions)
+}
+
+func loadAsset(_ url: URL, preloadFunctions: Bool = true) async throws -> AIModel {
   for attempt in 0..<2 {
     do {
+      // Core AI rejects an asset directory that is itself a symbolic link.
       let model = try await AIModel.specialize(
-        contentsOf: canonicalURL, options: options, cachePolicy: .persistent)
-      for name in model.functionNames {
+        contentsOf: url.resolvingSymlinksInPath(), options: specializationOptions, cachePolicy: .persistent)
+      for name in preloadFunctions ? model.functionNames : [] {
         guard try model.loadFunction(named: name) != nil else {
           throw HostError("missing function \(name)")
         }
       }
       return model
     } catch {
-      let message = String(reflecting: error)
-      if attempt == 1 || !message.contains("nilError") { throw error }
-      FileHandle.standardError.write(
-        Data(
-          "REBUILD_INVALID_SPECIALIZATION asset=\(url.lastPathComponent) error=\(message)\n".utf8))
-      try AIModelCache.default.deleteEntry(for: canonicalURL, options: options)
+      try discardInvalidSpecialization(url, after: error, attempt: attempt)
     }
   }
   fatalError("unreachable")
 }
+
+// Lazily load only the entry points a tensor runner actually uses.
+final class TensorFunctions {
+  let url: URL
+  var model: AIModel?
+  var functions: [String: InferenceFunction] = [:]
+
+  init(url: URL) async throws {
+    self.url = url
+    model = try await loadAsset(url, preloadFunctions: false)
+  }
+
+  func get(_ name: String) async throws -> InferenceFunction {
+    if let function = functions[name] { return function }
+    for attempt in 0..<2 {
+      do {
+        if model == nil { model = try await loadAsset(url, preloadFunctions: false) }
+        guard let function = try model!.loadFunction(named: name) else {
+          throw HostError("missing tensor function \(name)")
+        }
+        functions[name] = function
+        return function
+      } catch {
+        try discardInvalidSpecialization(url, after: error, attempt: attempt)
+        functions.removeAll()
+        model = nil
+      }
+    }
+    fatalError("unreachable")
+  }
+}
+
 @_silgen_name("installStaging") func installStaging()
 
 func column(_ array: NDArray, _ column: Int) -> [Float16] {
@@ -240,11 +288,67 @@ func forEachOffset(_ shape: [Int], _ strides: [Int], _ body: (Int, Int) -> Void)
   }
 }
 
+// Copy the largest contiguous suffix at once while honoring padded outer strides.
+func forEachContiguousBlock(_ shape: [Int], _ strides: [Int], _ body: (Int, Int, Int) -> Void) {
+  var axis = shape.count
+  var block = 1
+  while axis > 0 {
+    let next = axis - 1
+    if shape[next] != 1 && strides[next] != block { break }
+    block *= shape[next]
+    axis = next
+  }
+  forEachOffset(Array(shape.prefix(axis)), Array(strides.prefix(axis))) { linear, offset in
+    body(linear * block, offset, block)
+  }
+}
+
 @main struct Host {
   static func main() async {
     let args = CommandLine.arguments
     if args.count == 2 && args[1] == "--architecture" {
       print(AIModel.deviceArchitectureName)
+      exit(0)
+    }
+    if args.count == 4 && args[1] == "--convert-audio" {
+      protectReplies()
+      do {
+        try convertAudio(URL(fileURLWithPath: args[2]), to: URL(fileURLWithPath: args[3]))
+        sendJSON(["ready": true])
+        exit(0)
+      } catch {
+        sendJSON(["error": error.localizedDescription])
+        exit(1)
+      }
+    }
+    if (args.count == 3 || args.count == 4) && args[1] == "--transcribe" {
+      protectReplies()
+      do {
+        let locale = args.count == 4 ? Locale(identifier: args[3]) : Locale.current
+        let text = try await ReferenceTranscription.transcribe(URL(fileURLWithPath: args[2]), locale: locale)
+        sendJSON(["text": text])
+        exit(0)
+      } catch {
+        sendJSON(["error": error.localizedDescription])
+        exit(1)
+      }
+    }
+    if (args.count == 3 || args.count == 4) && args[1] == "--tensor" {
+      protectReplies()
+      installStaging()
+      await tensorHost(URL(fileURLWithPath: args[2]), output: args.count == 4 ? args[3] : "logits")
+      exit(0)
+    }
+    if args.count == 4 && args[1] == "--cached-tensor" {
+      protectReplies()
+      installStaging()
+      await cachedTensorHost(URL(fileURLWithPath: args[2]), configuration: args[3])
+      exit(0)
+    }
+    if args.count == 4 && args[1] == "--bidirectional-tensor" {
+      protectReplies()
+      installStaging()
+      await bidirectionalTensorHost(URL(fileURLWithPath: args[2]), configuration: args[3])
       exit(0)
     }
     guard args.count == 2 else {
@@ -285,9 +389,8 @@ func forEachOffset(_ shape: [Int], _ strides: [Int], _ body: (Int, Int) -> Void)
         let tokens = u32(header, 0)
         do {
           let h = try await model.hidden(tokens: tokens, answers: nil)
-          var reply: [UInt8] = [0]
-          h.withUnsafeBytes { reply += $0 }
-          writeAll(reply)
+          writeAll([0])
+          h.withUnsafeBytes { writeAll($0) }
         } catch { sendError("\(error)") }
       case UInt8(ascii: "T"):
         guard let header = readExact(8) else { exit(1) }
@@ -297,26 +400,16 @@ func forEachOffset(_ shape: [Int], _ strides: [Int], _ body: (Int, Int) -> Void)
         let answers = stride(from: 0, to: slots.count, by: 4).map { u32(slots, $0) }
         do {
           let h = try await model.hidden(tokens: tokens, answers: answers)
-          var reply: [UInt8] = [0]
-          h.withUnsafeBytes { reply += $0 }
-          writeAll(reply)
+          writeAll([0])
+          h.withUnsafeBytes { writeAll($0) }
         } catch { sendError("\(error)") }
       case UInt8(ascii: "V"):
         // Read every named input before validating, so an error leaves the pipe in sync.
-        guard let nameLength = readExact(4), let function = readExact(u32(nameLength, 0)),
-              let header = readExact(4) else { exit(1) }
-        var values: [String: [Float16]] = [:]
-        for _ in 0..<u32(header, 0) {
-          guard let length = readExact(4), let name = readExact(u32(length, 0)),
-                let count = readExact(4), let x = readHalves(u32(count, 0)) else { exit(1) }
-          values[String(decoding: name, as: UTF8.self)] = x
-        }
+        guard let function = readString(), let values = readInputs() else { exit(1) }
         do {
           guard let vision else { throw HostError("this bundle has no vision tower") }
-          let (shape, features) = try await vision.run(String(decoding: function, as: UTF8.self), values)
-          var reply: [UInt8] = [0] + le32(shape.count) + shape.flatMap(le32)
-          features.withUnsafeBytes { reply += $0 }
-          writeAll(reply)
+          let (shape, features) = try await vision.run(function, values)
+          sendTensor(shape, features)
         } catch { sendError("\(error)") }
       case UInt8(ascii: "M"):
         sendJSON(["seconds": engineSeconds, "calls": engineCalls])
@@ -329,5 +422,79 @@ func forEachOffset(_ shape: [Int], _ strides: [Int], _ body: (Int, Int) -> Void)
       }
     }
     exit(0)
+  }
+}
+
+func readString() -> String? {
+  guard let length = readExact(4), let bytes = readExact(u32(length, 0)) else { return nil }
+  return String(decoding: bytes, as: UTF8.self)
+}
+
+// A request's named FP16 inputs, each row-major; nil when Python is gone.
+func readInputs() -> [String: [Float16]]? {
+  guard let count = readExact(4) else { return nil }
+  var values: [String: [Float16]] = [:]
+  for _ in 0..<u32(count, 0) {
+    guard let key = readString(), let size = readExact(4), let value = readHalves(u32(size, 0)) else { return nil }
+    values[key] = value
+  }
+  return values
+}
+
+// Copy row-major values into a new input of the function's declared shape and strides.
+func inputArray(_ function: InferenceFunction, _ key: String, _ value: [Float16]) throws -> NDArray {
+  var array = NDArray(descriptor: try descriptor(function.descriptor.inputDescriptor(of: key), key))
+  var matches = false
+  write4(&array) { p, shape, strides in
+    matches = shape.reduce(1, *) == value.count
+    if matches {
+      value.withUnsafeBufferPointer { source in
+        forEachContiguousBlock(shape, strides) { linear, offset, count in
+          p.advanced(by: offset).update(from: source.baseAddress!.advanced(by: linear), count: count)
+        }
+      }
+    }
+  }
+  guard matches else { throw HostError("wrong element count for \(key)") }
+  return array
+}
+
+// Stateless named-tensor entry points, shared by diffusion and other non-cached tasks.
+// Swift owns each output so the Python bindings cannot retain ANE output buffers.
+func evaluateTensor(_ function: InferenceFunction, values: [String: [Float16]], output: String) async throws -> ([Int], [Float16]) {
+  var inputs: [String: NDArray] = [:]
+  for (key, value) in values { inputs[key] = try inputArray(function, key, value) }
+  var outputs = try await function.run(inputs: inputs)
+  guard let result = outputs.remove(output)?.ndArray else {
+    throw HostError("missing \(output) output")
+  }
+  return read4(result) { p, shape, strides in
+    var flat = [Float16](repeating: 0, count: shape.reduce(1, *))
+    flat.withUnsafeMutableBufferPointer { target in
+      forEachContiguousBlock(shape, strides) { linear, offset, count in
+        target.baseAddress!.advanced(by: linear).update(from: p.advanced(by: offset), count: count)
+      }
+    }
+    return (shape, flat)
+  }
+}
+
+func tensorHost(_ asset: URL, output: String) async {
+  let executable: TensorFunctions
+  do {
+    executable = try await TensorFunctions(url: asset)
+    sendJSON(["ready": true])
+  } catch {
+    sendJSON(["error": "\(error)"])
+    return
+  }
+  while let op = readExact(1)?.first {
+    if op == UInt8(ascii: "Q") { return }
+    guard op == UInt8(ascii: "F"), let name = readString(), let values = readInputs() else { return }
+    do {
+      let function = try await executable.get(name)
+      let (shape, flat) = try await evaluateTensor(function, values: values, output: output)
+      sendTensor(shape, flat)
+    } catch { sendError("\(error)") }
   }
 }

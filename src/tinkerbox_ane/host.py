@@ -13,52 +13,35 @@ from pathlib import Path
 BINARY = Path(__file__).with_name("tinkerbox-ane-host")
 
 
-SUPPORTED_ARCHITECTURES: dict[str, str] = {
-    "h18g": "Apple M6",
-    "h17d": "Apple M5 Ultra",
-    "h17c": "Apple M5 Max",
-    "h17s": "Apple M5 Pro",
-    "h17g": "Apple M5",
-    "h16c": "Apple M4 Max",
-    "h16s": "Apple M4 Pro",
-    "h16g": "Apple M4",
-}
+def native_command(*arguments, timeout=300):
+    """Run a native host command and read its framed JSON reply."""
+    result = subprocess.run([str(BINARY), *arguments], stdin=subprocess.DEVNULL,
+                            capture_output=True, timeout=timeout)
+    if len(result.stdout) < 4:
+        raise RuntimeError(result.stderr.decode(errors='replace').strip() or 'Native audio command failed.')
+    size = struct.unpack('<I', result.stdout[:4])[0]
+    reply = json.loads(result.stdout[4:4 + size])
+    if result.returncode or 'error' in reply:
+        raise RuntimeError(reply.get('error', 'Native audio command failed.'))
+    return reply
 
-UNSUPPORTED_ARCHITECTURES: dict[str, str] = {
-    "h15s": "Apple M3 Pro / Max",
-    "h15g": "Apple M3",
-    "h15m": "Apple M3",
-    "h14s": "Apple M2 Pro / Max",
-    "h14g": "Apple M2",
-    "h13s": "Apple M1 Pro / Max",
-    "h13g": "Apple M1",
-}
+
+SUPPORTED_ARCHITECTURES: dict[str, str] = json.loads(
+    Path(__file__).with_name("models.json").read_text()
+)["architectures"]
 
 
 def chip_name(architecture: str) -> str:
-    """Return a human-readable chip name for an Apple Silicon architecture code."""
-    if architecture in SUPPORTED_ARCHITECTURES:
-        return SUPPORTED_ARCHITECTURES[architecture]
-    if architecture in UNSUPPORTED_ARCHITECTURES:
-        return UNSUPPORTED_ARCHITECTURES[architecture]
-    return f"Apple Silicon ({architecture})"
+    """Return the compiler's chip label for an Apple Silicon architecture code."""
+    return SUPPORTED_ARCHITECTURES.get(architecture, f"Apple Silicon ({architecture})")
 
 
 def validate_architecture(architecture: str) -> None:
-    """Validate that the given architecture is supported by tinkerbox-ane."""
-    if architecture in UNSUPPORTED_ARCHITECTURES:
-        chip = UNSUPPORTED_ARCHITECTURES[architecture]
-        supported = ", ".join(SUPPORTED_ARCHITECTURES.values())
-        raise RuntimeError(
-            f"{chip} ({architecture}) is not supported. tinkerbox-ane requires "
-            f"Apple Silicon M4 or newer due to Neural Engine hardware and offline compiler constraints "
-            f"(supported: {supported})."
-        )
+    """Validate that the architecture is recognized; bundle availability is per model."""
     if architecture not in SUPPORTED_ARCHITECTURES:
-        supported = ", ".join(f"{name} [{code}]" for code, name in SUPPORTED_ARCHITECTURES.items())
         raise RuntimeError(
-            f"Architecture '{architecture}' is not supported. tinkerbox-ane requires "
-            f"Apple Silicon M4 or newer (supported: {supported})."
+            f"This Mac's Neural Engine architecture ({architecture}) is not supported by this version "
+            "of tinkerbox-ane. Update tinkerbox-ane to use this Mac."
         )
 
 
@@ -66,6 +49,21 @@ def validate_architecture(architecture: str) -> None:
 def device_architecture() -> str:
     result = subprocess.run([str(BINARY), "--architecture"], capture_output=True, text=True, check=True)
     return result.stdout.strip()
+
+
+def check_architecture(spec: dict) -> None:
+    """Reject a compiled bundle that targets another chip."""
+    current = device_architecture()
+    if spec.get("architecture") and spec["architecture"] != current:
+        raise ValueError(
+            f"Bundle targets {chip_name(spec['architecture'])} ({spec['architecture']}), but this Mac is "
+            f"{chip_name(current)} ({current}). Choose a bundle compiled for this Mac."
+        )
+
+
+def _string(value: str) -> bytes:
+    encoded = value.encode()
+    return struct.pack("<I", len(encoded)) + encoded
 
 
 def check_layout(spec: dict) -> None:
@@ -99,7 +97,128 @@ def check_flops(counted) -> None:
         raise ValueError("bundle lacks FLOP counts for its functions; re-export the model")
 
 
-class Host:
+class _PipeHost:
+    _timeout = 300.0
+
+    def _read_into(self, buffer) -> None:
+        """Fill a writable buffer, such as an output array, directly from the reply pipe."""
+        import select
+        import time
+
+        view = memoryview(buffer).cast('B')
+        deadline = time.monotonic() + self._timeout
+        done = 0
+        while done < len(view):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([self._process.stdout], [], [], remaining)[0]:
+                self._process.kill()
+                raise RuntimeError(f'Core AI host did not respond within {self._timeout:g} seconds')
+            count = os.readv(self._process.stdout.fileno(), [view[done:]])
+            if not count:
+                raise RuntimeError(f'the Core AI host exited (status {self._process.poll()})')
+            done += count
+
+    def _read(self, count: int) -> bytes:
+        data = bytearray(count)
+        self._read_into(data)
+        return bytes(data)
+
+    def _u32(self) -> int:
+        return struct.unpack("<I", self._read(4))[0]
+
+    def _reply(self) -> None:
+        if self._read(1) != b"\0":
+            raise RuntimeError(f"Core AI host: {self._read(self._u32()).decode()}")
+
+    def _send(self, *payloads) -> None:
+        try:
+            for payload in payloads:
+                self._process.stdin.write(payload)
+            self._process.stdin.flush()
+        except BrokenPipeError as error:
+            raise RuntimeError(f"the Core AI host exited (status {self._process.poll()})") from error
+
+    def _call(self, header: bytes, inputs: dict):
+        """Send named FP16 inputs after a request header and read back one FP16 tensor."""
+        import numpy as np
+
+        payload = [header + struct.pack("<I", len(inputs))]
+        for name, value in inputs.items():
+            array = np.ascontiguousarray(value, dtype=np.float16)
+            payload += [_string(name) + struct.pack("<I", array.size), memoryview(array).cast("B")]
+        self._send(*payload)
+        self._reply()
+        rank = self._u32()
+        output = np.empty(struct.unpack(f"<{rank}I", self._read(4 * rank)), np.float16)
+        self._read_into(output)
+        return output
+
+    def close(self) -> None:
+        process = getattr(self, "_process", None)
+        if process is not None and process.poll() is None:
+            try:
+                process.stdin.write(b"Q")
+                process.stdin.close()
+                process.wait(timeout=10)
+            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                process.kill()
+                process.wait()
+        if process is not None:
+            process.wait()
+            for stream in (process.stdin, process.stdout):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        self._directory.cleanup()
+
+
+class TensorHost(_PipeHost):
+    """Named FP16 calls, optionally with native transformer state."""
+
+    def __init__(self, asset: Path, timeout: float = 300, *, output: str = 'logits', cached=None, bidirectional=None):
+        asset = Path(asset).resolve()
+        if asset.suffix != '.aimodelc':
+            raise ValueError('TensorHost requires an AOT asset')
+        self._timeout = timeout
+        self._directory = tempfile.TemporaryDirectory(prefix='.host-', dir=asset.parent)
+        clones = Path(self._directory.name) / 'clones'
+        clones.mkdir()
+        environment = dict(os.environ, COW_CLIENT_DEST=str(clones), COW_ASSET_PREFIX=str(asset))
+        if bidirectional is not None:
+            arguments = ['--bidirectional-tensor', str(asset), json.dumps(bidirectional)]
+        elif cached is not None:
+            arguments = ['--cached-tensor', str(asset), json.dumps(dict(cached, output=output))]
+        else:
+            arguments = ['--tensor', str(asset), output]
+        try:
+            self._process = subprocess.Popen([str(BINARY), *arguments],
+                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment)
+            ready = json.loads(self._read(self._u32()))
+            if not ready.get('ready'):
+                raise RuntimeError(ready.get('error', 'native tensor host failed to load'))
+        except BaseException:
+            self.close()
+            raise
+
+    def run(self, function: str, inputs: dict):
+        return self._call(b'F' + _string(function), inputs)
+
+    def reset(self):
+        """Clear a cached host's transformer state."""
+        self._send(b'R')
+        self._reply()
+
+    def step(self, function: str, inputs: dict, count: int):
+        """Append `count` positions to a cached host's state and return their hidden rows."""
+        return self._call(b'C' + struct.pack('<I', count) + _string(function), inputs)
+
+    def full_attention(self, inputs: dict):
+        """Logits of a bidirectional host's sequence, in which every position attends every other."""
+        return self._call(b'B', inputs)
+
+
+class Host(_PipeHost):
     def __init__(self, asset: str | Path, kind: str, check=check_layout):
         """`check` validates the manifest fields the bundle's runner allocates state for."""
         from tinkerbox_ane.bundle import compiled, read_bundle
@@ -109,16 +228,7 @@ class Host:
         check(spec)
         if not compiled(spec):
             raise ValueError("load requires a compiled AOT bundle; compile the exported model first")
-        current = device_architecture()
-        if spec.get("architecture") and spec["architecture"] != current:
-            target_chip = chip_name(spec["architecture"])
-            current_chip = chip_name(current)
-            hint = ""
-            if current in UNSUPPORTED_ARCHITECTURES:
-                hint = f" Note that {current_chip} ({current}) is not supported by tinkerbox-ane (requires M4 or newer)."
-            raise ValueError(
-                f"Bundle targets {target_chip} ({spec['architecture']}), but this Mac is {current_chip} ({current}).{hint}"
-            )
+        check_architecture(spec)
         # Stage on the asset volume: APFS clones must stay on the same filesystem.
         self._directory = tempfile.TemporaryDirectory(prefix=".host-", dir=asset.parent)
         clones = Path(self._directory.name) / "clones"
@@ -140,43 +250,10 @@ class Host:
             self.close()
             raise
 
-    def _read(self, count: int) -> bytes:
-        data = self._process.stdout.read(count)
-        if len(data) != count:
-            raise RuntimeError(f"the Core AI host exited (status {self._process.poll()})")
-        return data
-
-    def _u32(self) -> int:
-        return struct.unpack("<I", self._read(4))[0]
-
-    def _reply(self) -> None:
-        if self._read(1) != b"\0":
-            raise RuntimeError(f"Core AI host: {self._read(self._u32()).decode()}")
-
-    def _send(self, *payloads) -> None:
-        try:
-            for payload in payloads:
-                self._process.stdin.write(payload)
-            self._process.stdin.flush()
-        except BrokenPipeError as error:
-            raise RuntimeError(f"the Core AI host exited (status {self._process.poll()})") from error
-
     def vision(self, inputs: dict, function: str = "main"):
         """Run a function of the bundle's vision asset on named FP16 inputs, each row-major in its
         declared shape, and return the `features` output."""
-        import numpy as np
-        encoded = function.encode()
-        payload = [b"V" + struct.pack("<I", len(encoded)) + encoded + struct.pack("<I", len(inputs))]
-        for name, value in inputs.items():
-            array = np.ascontiguousarray(value, dtype=np.float16)
-            encoded = name.encode()
-            payload += [struct.pack("<I", len(encoded)) + encoded + struct.pack("<I", array.size),
-                        memoryview(array).cast("B")]
-        self._send(*payload)
-        self._reply()
-        rank = self._u32()
-        shape = struct.unpack(f"<{rank}I", self._read(4 * rank))
-        return np.frombuffer(self._read(2 * int(np.prod(shape))), dtype=np.float16).reshape(shape).copy()
+        return self._call(b"V" + _string(function), inputs)
 
     def metrics(self) -> dict:
         """Neural Engine `seconds` and `calls` per function since the previous call."""
@@ -225,22 +302,3 @@ class Host:
                 self._process.kill()
             self.close()
             raise
-
-    def close(self) -> None:
-        process = getattr(self, "_process", None)
-        if process is not None and process.poll() is None:
-            try:
-                process.stdin.write(b"Q")
-                process.stdin.close()
-                process.wait(timeout=10)
-            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
-                process.kill()
-                process.wait()
-        if process is not None:
-            process.wait()
-            for stream in (process.stdin, process.stdout):
-                try:
-                    stream.close()
-                except OSError:
-                    pass
-        self._directory.cleanup()

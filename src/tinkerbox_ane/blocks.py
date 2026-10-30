@@ -39,8 +39,11 @@ def silu(x: torch.Tensor, scale: float) -> torch.Tensor:
 class MLP(nn.Module):
     splits = 8
 
-    def __init__(self, hidden: int, ffn: int, scale: float):
+    def __init__(self, hidden: int, ffn: int, scale: float, *, splits: int = 8):
         super().__init__()
+        if splits <= 0 or ffn % splits:
+            raise ValueError('MLP split must be positive and divide intermediate size')
+        self.splits = splits
         c = ffn // self.splits
         self.w1 = nn.ModuleList(conv1x1(hidden, c) for _ in range(self.splits))
         self.w3 = nn.ModuleList(conv1x1(hidden, c) for _ in range(self.splits))
@@ -53,3 +56,21 @@ class MLP(nn.Module):
             part = w2(silu(w1(x), self.scale) * w3(x))
             out = part if out is None else out + part
         return out
+
+
+class CompositeRMSNorm(nn.Module):
+    """Channel normalization exported through Core AI's overflow-safe RMS op."""
+
+    def __init__(self, dim: int, eps: float, axis: int = 1):
+        super().__init__()
+        from coreai_torch.composite_ops import RMSNormImpl
+
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.axis = axis
+        self.impl = RMSNormImpl(eps=eps)
+        self.impl.axes = axis
+
+    def forward(self, x):
+        shape = [1] * x.dim()
+        shape[self.axis] = -1
+        return self.impl(x, self.weight.view(shape))
