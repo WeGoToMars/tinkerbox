@@ -1,0 +1,56 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (for example, v2.2.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.11.28"
+      - name: Check release version and model bundles
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: uv run --no-project --python 3.12 --with huggingface-hub python scripts/release.py --verify "$RELEASE_TAG"
+      - name: Build distributions
+        run: uv build --python 3.12
+      - name: Check package metadata
+        run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: distributions
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tinkerbox-ane
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: distributions
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

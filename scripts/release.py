@@ -1,7 +1,7 @@
 """Prepare a release locally: preflight checks, tests on the Neural Engine, and an annotated tag.
 
-Pushing the tag starts the Release workflow, which builds the wheel and the signed app, drafts the
-GitHub release, and publishes to PyPI. `--verify TAG` runs only the preflight checks, as CI does.
+Push the tag, then run the manual Publish to PyPI workflow. Build and upload the signed app
+separately. `--verify TAG` runs only the preflight checks, as CI does.
 """
 
 from __future__ import annotations
@@ -74,10 +74,12 @@ def main(argv: list[str] | None = None) -> int:
     run("git", "tag", "-a", tag, "-m", f"Release {tag}")
 
     print(f"""
-Prepared {tag}. After review, push it; the Release workflow builds the wheel and the signed app,
-publishes to PyPI through trusted publishing, and drafts the GitHub release:
+Prepared {tag}. After review, push it and run the manual PyPI workflow:
 
   git push origin {branch} {tag}
+  gh workflow run publish.yml --ref main -f tag={tag}
+
+Build and upload the signed app separately.
 """)
     return 0
 
