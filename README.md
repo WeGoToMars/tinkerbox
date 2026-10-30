@@ -100,6 +100,8 @@ The [developer guide](docs/model-publishing.md#model-builds) describes model exp
 uv run python -m tinkerbox_ane.install <model> <bundle directory>
 ```
 
+For package releases, see [Releasing](docs/releasing.md).
+
 ## Tests
 
 ```sh
