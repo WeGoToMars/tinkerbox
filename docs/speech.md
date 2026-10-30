@@ -12,7 +12,7 @@ with tinkerbox_ane.load("omnivoice") as model:
     print(model.capabilities)
     audio = model.generate(
         "A familiar voice can tell a new story.", language="en",
-        mode="design", instruct="A warm, calm voice.",
+        mode="design", instruct="female, low pitch",
         controls={"speed": 1.25}, seed=42,
     )[0]
 ```
@@ -30,9 +30,10 @@ An optional field, such as a target duration, is omitted until explicitly enable
 lists. Omitted mode selects automatic, design or cloning from the supplied
 instruction/reference. Explicit mode selects exactly the advertised behavior.
 Unsupported controls and incompatible combinations return errors.
-OmniVoice batches containing reference voices run each item independently, using
-`seed + item_index` when seeded. This also applies to mixed automatic/cloned
-batches through the Python API and worker.
+VoxCPM2 items, and OmniVoice batches containing reference voices, run
+independently with `seed + item_index`: such an item matches a single request
+with that seed. OmniVoice batches of automatic and designed voices share one
+batched generation, so their items depend on the whole batch.
 
 A model whose capabilities include `streaming: True` also offers `stream`, which
 takes one text and the same arguments and yields its waveform in order while it

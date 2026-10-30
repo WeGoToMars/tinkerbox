@@ -62,7 +62,60 @@ commit = upload_to_hub(
 - **Synchronization:** `delete_patterns` removes matching remote files absent from the upload directory, allowing clean replacement of a release tree. Without `delete_patterns`, existing remote files are preserved.
 - **Release Tags:** If `tag` is specified, it creates a new release tag pointing to the uploaded commit. Pre-existing tags are rejected before uploading.
 
-## Reference CLI: d1
+## Model builds
+
+These commands are for developers creating bundles. End users download model
+files through the app or `tinkerbox_ane.load()`.
+
+Build from source with Xcode 27 and `uv sync --locked --extra speech`. Export to
+empty directories. Compilation uses the existing watchdog and verifies source
+identity, function manifests and full ANE placement. It defaults to this Mac's
+architecture; standard M4 is `h16g`. Cross-compilation establishes placement,
+not on-device correctness or performance.
+
+### d1-3B
+
+```sh
+uv run python -m tinkerbox_ane.d1.export
+uv run python -m tinkerbox_ane.d1.compile
+```
+
+The source is `artifacts/build/d1_fp16_fused128_ctx32768`; the compiled bundle is
+`artifacts/d1_fp16_fused128_ctx32768`. Use `--force` to rebuild and
+`--architecture` to select a different target.
+
+### d3-nano and d3-mini
+
+```sh
+uv run python -m tinkerbox_ane.d3.export d3-nano --out artifacts/build/d3-nano
+uv run python -m tinkerbox_ane.d3.compile artifacts/build/d3-nano --out artifacts/d3-nano
+```
+
+Substitute `d3-mini` for the larger variant. Failed bundle builds retain verified
+stages and resume on retry.
+
+### OmniVoice
+
+```sh
+uv run python -m tinkerbox_ane.omnivoice.export \
+  --out artifacts/omnivoice/source --compile-to artifacts/omnivoice/ane
+```
+
+`--checkpoint` selects a local upstream checkpoint. The export includes diffusion,
+fused short-context inference and the ANE acoustic codec decoder. M3 cannot place
+the current codec graph; published bundles target M4 and newer.
+
+### VoxCPM2
+
+```sh
+uv run python -m tinkerbox_ane.voxcpm2.export \
+  --out artifacts/voxcpm2/source --compile-to artifacts/voxcpm2/ane
+```
+
+`--checkpoint` selects a local upstream checkpoint. See the export command's
+`--help` for weight variants and stage options.
+
+## Model publishing
 
 `tinkerbox_ane.d1.publish` implements this workflow for the d1 model:
 
@@ -71,5 +124,39 @@ commit = upload_to_hub(
 python -m tinkerbox_ane.d1.publish --arch h17s h16g --no-upload
 
 # Publish prepared bundles and create a release tag
-python -m tinkerbox_ane.d1.publish --arch h17s h16g --upload-only --tag v2.0.1
+python -m tinkerbox_ane.d1.publish --arch h17s h16g --upload-only --tag <new-release-tag>
 ```
+
+The other entry points are `tinkerbox_ane.d3.publish MODEL`,
+`tinkerbox_ane.omnivoice.publish` and `tinkerbox_ane.voxcpm2.publish`.
+Pass `--source` to choose the export and `--no-upload` to stage without publishing.
+`--staging`, `--repo`, `--tag` and `--metadata` select the output and release
+metadata. With `--upload-only`, publish previously staged bundles. Update
+`src/tinkerbox_ane/models.json` after publishing.
+
+To use a compiled bundle locally:
+
+```sh
+uv run python -m tinkerbox_ane.install <model-id> <bundle-directory>
+```
+
+## Validation
+
+Run inference and compilation checks under `python -m tinkerbox_ane.guard`.
+Report the device, bundle and whether the check was on-device or cross-compiled.
+
+| Model | Reference and numerical checks | Public behavior |
+| --- | --- | --- |
+| d1-3B | `scripts/build_reference.py`, `scripts/validate.py` | `tests/test_runtime.py` |
+| d3 | `scripts/validate_d3.py` | `tests/test_d3_runtime.py` |
+| OmniVoice | `scripts/omnivoice/reference_logits.py`, `scripts/omnivoice/validate_context.py` | `tests/test_speech.py`, `app/test_speech.py` |
+| VoxCPM2 | `scripts/voxcpm2/reference.py`, `scripts/voxcpm2/validate.py`, `scripts/voxcpm2/full_length.py` | `tests/test_voxcpm2_speech.py`, `app/test_voxcpm2_speech.py` |
+
+Use each script's `--help` for checkpoint, bundle and output paths. D3's `--smoke`
+is a partial numerical check; full acceptance requires the pinned FP32 reference
+and coverage of all reachable capacities. Speech checks require a compiled bundle;
+set the asset and checkpoint variables documented by the tests. Generated reports
+belong under `artifacts/`.
+
+Exercise speech Shortcuts through `app/test_shortcuts.py --speech`; use
+`TINKERBOX_SPEECH_MODEL` and an absolute `TINKERBOX_ASSET` for each backend.

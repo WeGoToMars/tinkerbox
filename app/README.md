@@ -65,10 +65,9 @@ WAV/M4A export, and displays the seed for replay. Voice preparation and speech
 generation times are shown separately. With models that stream, such as VoxCPM2,
 **Play while generating** (on by default) starts playback as the first audio
 arrives and shows the time to first audio; the finished clip then replaces the live
-player for replay and export. Select a verified local bundle in
-the page toolbar or set `TINKERBOX_ASSET` before launch. Bundles are not distributed
-yet; see local setup and validation for [OmniVoice](../docs/models/omnivoice.md)
-and [VoxCPM2](../docs/models/voxcpm2.md).
+player for replay and export. Select a model in the page toolbar; its compatible
+bundle downloads automatically. See the usage guides for
+[OmniVoice](../docs/models/omnivoice.md) and [VoxCPM2](../docs/models/voxcpm2.md).
 Saved voices are specific to the selected model.
 Synthesis modes and control fields come from the backend's [speech capabilities](../docs/speech.md).
 The page shows native numeric, categorical, text and optional controls as supported

@@ -1,18 +1,17 @@
-# OmniVoice speech synthesis
+# OmniVoice
 
-OmniVoice runs its Qwen3 diffusion transformer, audio projection and the 24 kHz
-codec's acoustic decoder on ANE. Text processing, embeddings, scheduling, sampling,
-codebook lookup and reference encoding run on CPU through `omnivoice==0.2.1`.
-Bundles include the CPU embeddings and codec.
-The checkpoint is `k2-fsa/OmniVoice@c5fdb5ccb189668d56333f77ba2629f4cd7535f4`;
-weights are CC-BY-NC-4.0 and upstream code is Apache-2.0.
+[OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) generates multilingual speech
+with automatic voices, voice design and voice cloning. Output is mono **24 kHz**.
 
-## Local setup
+Requires macOS 27 and Apple M4 or newer. The model download is about 3.4 GB.
+In the app, select **OmniVoice** on Text to Speech; model files download
+automatically. Python users need Python 3.12 or 3.13 and the speech extra:
 
 ```sh
-uv sync --extra speech
-.venv/bin/python -m tinkerbox_ane.install omnivoice /path/to/verified-bundle
+python -m pip install "tinkerbox-ane[speech]==2.2.0"
 ```
+
+## Generate speech
 
 ```python
 import soundfile as sf
@@ -21,225 +20,55 @@ import tinkerbox_ane
 with tinkerbox_ane.load("omnivoice") as model:
     audio = model.generate("Hello! Welcome to Tinkerbox.", language="en", seed=42)[0]
     sf.write("speech.wav", audio, model.sampling_rate)
-    voice = model.create_voice_clone_prompt("reference.wav", ref_text="Reference transcript.")
+```
+
+The app provides playback, microphone recording, saved voices and WAV/M4A export.
+[Speech Shortcuts](../../app/README.md#shortcuts) can generate audio and prepare
+reusable voices.
+
+## Voices and controls
+
+| Mode | Inputs |
+| --- | --- |
+| `auto` | Text; the model chooses a voice |
+| `design` | Text and `instruct`, such as `"female, low pitch, british accent"` |
+| `clone` | Text and reference audio or a saved voice prompt |
+
+Voice design uses supported comma-separated attributes, such as `female`,
+`low pitch` and `british accent`.
+
+```python
+import soundfile as sf
+import tinkerbox_ane
+
+with tinkerbox_ane.load("omnivoice") as model:
+    voice = model.create_voice_clone_prompt(
+        "reference.m4a", ref_text="The words spoken in the recording."
+    )
     voice.save("voice.pt")
-    cloned = model.generate("A new sentence.", voice_clone_prompt=voice, seed=42)[0]
+    audio = model.generate("A new sentence.", voice_clone_prompt=voice, seed=42)[0]
+    sf.write("cloned.wav", audio, model.sampling_rate)
 ```
 
-Pass a bundle path as the second argument to `load` to use it directly.
-`generate` accepts ordered lists for text, language, instruction, duration and
-speed, plus upstream generation settings. Use `instruct` for voice design and
-`model.load_voice_clone_prompt("voice.pt")` for saved voices. Reference files,
-including M4A and WAV, are decoded with Apple's AVFoundation codecs. Omitting a reference
-transcript invokes Apple's on-device SpeechTranscriber through the native host.
-The system installs language assets as needed. If transcription is unavailable,
-provide `ref_text` manually. There is no alternative transcription backend.
-Transcription defaults to the system language. For another language, call
-`model.transcribe(audio, locale="en-US")` with its locale and pass the result as `ref_text`.
-The task API returns a seed for replay of initially unseeded requests.
+Reload a saved voice with `model.load_voice_clone_prompt("voice.pt")`. If you omit
+`ref_text`, on-device speech recognition supplies the transcript when available;
+you can also provide it manually.
 
-The app's Text to Speech page provides automatic voice, design, cloning, saved
-voices, waveform previews, microphone recording and WAV/M4A export. Clone preparation
-and speech generation times are reported separately. Download the bundle in the app's model list, or choose a local bundle in the toolbar
-or set `TINKERBOX_ASSET` before launch.
-The **Non-verbal tags** list reads `non_verbal_tags` from the shared `models.json`
-manifest, following the [upstream supported tags](https://github.com/k2-fsa/OmniVoice/tree/08be0b4ccbac3e13e374e86fbfead4b4cac343e2#non-verbal--pronunciation-control).
-
-## Export and check
-
-```sh
-PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.omnivoice.export \
-  --checkpoint /path/to/checkpoint --out artifacts/omnivoice/source \
-  --compile-to artifacts/omnivoice/ane
-```
-
-Use fresh output directories. The compiler selects the host architecture and
-verifies full ANE placement under the existing watchdog. The default export
-contains two assets: a fused transformer with 18 capacities from 128 to 4,096
-positions, and a blockwise transformer with attention tiers
-128/256/512/1024/2048/4096/8192/16384/32768/40960. Use `--architecture h16g`
-for standard M4 cross-compilation. Correctness and performance require execution
-on the target Mac.
-
-The blockwise path projects all keys and values for a layer before attending
-128-query blocks over the complete visible prefix. Large attention tiers use
-4,096-key blocks merged by their softmax masses. It composes the same Qwen3
-projections, norms and MLP with the full-attention block shared by D3. All
-transformer and audio-head computation stays on ANE. Diffusion steps recompute
-each layer's keys and values; a causal decode cache cannot be reused between
-those steps. Sequences up to 4,096 positions use the fused asset for latency.
-
-The validated full-context source is `artifacts/omnivoice/perf-src`; the
-deployment bundle is `artifacts/omnivoice/perf-ane`. Its centered
-audio head and attention value scale 16 are retained. Both assets were
-cross-compiled on M5 Pro for all 13 M3-and-newer targets (`h15*`, `h16*`,
-`h17*`, `h18g`) and passed full ANE placement verification on each; numerical,
-speech and performance results above were measured only on `h17s`. Clean
-sequential compile times ranged from 625 s (M4, M4 Pro) to 1,780 s (14-core
-M3 Max), dominated by the fused asset.
-
-M3 is not supported. Its Neural Engine limits a tensor's width to 16,384 elements,
-and the codec decoder's 24 kHz layers need up to 61,440 (see Codec decoder); every
-M3 target (`h15*`) fails placement. The diffusion assets themselves compile on M3.
-
-M1 and M2 are not supported either. Their ANE compiler rejects the long-context
-merge's rescaling, `exp(clamp(m_i - m_j, max=0))`, in every attention tier
-above 4,096 positions; the identical `softmax(block maxima) * block mass`
-form compiled on M1 in isolated probes, but has not been exported or
-validated. M1 also failed fused buckets of 2,048 and 2,560 positions while
-1,024 compiled. Stage the release with:
-
-```sh
-PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.omnivoice.publish \
-  --source artifacts/omnivoice/perf-src --no-upload --continue-on-error
-```
-
-Published `v2.2.0` bundles download automatically; local exports are optional.
-
-Run public speech regressions with `TINKERBOX_SPEECH_TEST_ASSET` and
-`TINKERBOX_OMNIVOICE_CHECKPOINT` set. Transcription checks use Apple's system
-speech assets. Build the current wheel and
-app, then run `app/test_speech.py` with `TINKERBOX_ASSET` to check the Swift worker.
-Run ANE checks under `python -m tinkerbox_ane.guard`.
-
-## Full-context validation
-
-Capture the original `omnivoice==0.2.1` CPU FP16 logits independently, then compare
-the ANE output and the 40,960-position attention kernel. The optional speech
-case generates a 60-second passage as a single chunk:
-
-```sh
-.venv/bin/python scripts/omnivoice/reference_logits.py \
-  --checkpoint artifacts/omnivoice/checkpoint --lengths 96 1100 2400 3000
-
-PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.guard artifacts/omnivoice/context-run -- \
-  .venv/bin/python -u scripts/omnivoice/validate_context.py \
-  --asset artifacts/omnivoice/perf-ane --speech
-```
-
-On Apple M5 Pro, 24 GB, macOS 27.0.1 (`h17s`), independent full-transformer
-comparisons at lengths 96, 1,100, 2,400 and 3,000 had cosine at least 0.999985
-and relative L2 at most 0.00541. The
-full 40,960-key attention kernel passed fully visible and mostly masked cases
-with cosine at least 0.999998 and relative L2 at most 0.00156.
-
-The speech case generates the 60-second passage for seeds 1, 2, 3, 5 and 42 and
-gates their mean normalized transcription error at 0.20. A single seed is not a
-usable gate here: the original CPU FP16 itself exceeded 0.20 on two of these five
-seeds. The engine seeds upstream's generator the same way, so each seed starts
-from the same random stream:
-
-| Seed | 1 | 2 | 3 | 5 | 42 | Mean |
-| --- | --- | --- | --- | --- | --- | --- |
-| Original CPU FP16 | 0.246 | 0.148 | 0.236 | 0.180 | 0.157 | 0.193 |
-| This bundle | 0.238 | 0.175 | 0.163 | 0.131 | 0.226 | 0.187 |
-
-The bundle passed with mean 0.187. Each clip took about 23 seconds including
-transcription, versus about 21 minutes for the original model on CPU. Capture the original clips one seed per
-watchdog run:
-
-```sh
-PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.guard artifacts/omnivoice/speech-reference-42 -- \
-  .venv/bin/python -u scripts/omnivoice/reference_speech.py --seed 42
-```
-
-These are FP16 arithmetic/content checks, not bitwise waveform equivalence.
-The commands above write local validation reports under `artifacts/omnivoice/`.
-Generated validation JSON is not committed.
-
-## Fused execution
-
-Upstream evaluates each guidance row padded to the batch length, but reads only
-the row's visible prefix. The runtime packs consecutive rows into one fused call
-with block-diagonal attention and per-row positions, which is exact. A row is
-added to a packed call when the bundle's `fused_cost` model predicts it cheaper
-than a separate call. Latency is modeled as `call + n + n**2/attention` positions
-of linear work, fitted on Apple M5 Pro (`h17s`) to within about 15% across all
-buckets. Rows longer than 4,096 positions use the blockwise transformer.
-
-Fused attention splits queries into 256-row blocks from 1,024 to 2,048 positions
-and 512-row blocks above that. The results are identical to one attention over
-all queries; 256-row blocks above 2,048 positions failed ANE compilation.
-Steady-state fused latency on `h17s`, including Python/native transfers:
-
-| Positions | 256 | 512 | 1,024 | 2,048 | 3,072 | 4,096 |
-| --- | --- | --- | --- | --- | --- | --- |
-| Milliseconds | 21.9 | 54.8 | 135 | 377 | 972 | 1,575 |
-
-Unblocked attention took 170 ms at 1,024 and 504 ms at 2,048. The blockwise
-runner took 1.27 s at 2,048 and 2.9 s at 4,096 positions, so fusion now extends
-to 4,096. Fused 6,144 and 8,192 buckets failed ANE compilation. Above 4,096 the
-blockwise runner is ANE-bound: native copies are about 6% of a 12.9-second
-8,192-position forward, and 512-query calls were no faster than 128. Per-channel
-INT8 weights did not change fused latency and are not used.
-
-Warm end-to-end requests on `h17s`, with the energy of the ANE (`powermetrics`, median of three runs):
-
-| Request | Audio | Time | ANE energy |
-| --- | --- | --- | --- |
-| Automatic voice | 4.4 s | 1.11 s | 4.2 J |
-| Saved clone | 2.9 s | 1.03 s | 3.8 J |
-| Two-text batch | — | 2.14 s | — |
-| Passage, default chunking | 18.5 s | 5.74 s | 21.2 J |
-
-Peak wired memory was 1.35 GiB, which includes the ANE's reserved weights. The Neural Engine keeps one copy
-of an asset's weights per width group (up to 64 positions, up to 128, and 129 or more), so the buckets all start at
-192 positions: one group, one copy. The Python process peaked at 1.49 GiB while encoding a reference recording and stayed under 0.8 GiB otherwise.
-
-The fused-versus-blockwise comparison can be reproduced on a target Mac with:
-
-```sh
-PYTHONPATH=src .venv/bin/python -m tinkerbox_ane.guard artifacts/omnivoice/paths-run -- \
-  .venv/bin/python scripts/omnivoice/benchmark_paths.py \
-  --asset artifacts/omnivoice/perf-ane --repeats 3 --out artifacts/omnivoice/paths.json
-```
-
-These results do not establish the best buckets or cost model for other chips.
-
-## Codec decoder
-
-The DAC acoustic decoder runs on ANE in calls of 64 frames (61,440 samples): the
-Neural Engine limits a tensor axis to 65,536 elements. Each call keeps 10 frames of
-context on both sides, which covers the decoder's receptive field, so 44 frames of
-audio come from each call. A frame mask before every convolution reproduces the
-original zero padding at the true start and end, so chunked FP32 decoding matches
-whole-sequence decoding to rounding (115 dB SNR). Two rewrites keep the graph on ANE
-and within FP16:
-
-- Transposed convolutions do not place on ANE. Each has kernel = 2 × stride, so it
-  becomes one kernel-2 convolution over all output phases, interleaved; this is exact.
-- Some Snake α are about 4e-7, and the original 1/α overflows FP16. The bundle
-  computes x ± (sin(αx)·|α|^-½)² instead.
-
-On `h17s` the bundle decodes 18.5 s of audio in 149 ms in 11 calls; the original
-decoder took 517 ms on CPU. The output stays within 47 dB SNR of the original codec
-(largest sample error 6e-3), and generated tokens are unchanged. Codebook lookup and
-the codec's input projection stay on CPU; the CPU acoustic and semantic decoders are
-not loaded. The codec asset is 39 MB and adds about 0.13 GiB of wired memory.
-
-Warm requests on `h17s` with the codec decoder on ANE (median of five, seed 1):
-
-| Request | Audio | Time |
-| --- | --- | --- |
-| Automatic voice | 4.4 s | 0.83 s |
-| Saved clone | 2.9 s | 0.80 s |
-| Passage | 18.5 s | 4.3 s |
-
-The end-to-end table above, including energy, was measured before this change.
+`duration` sets a target length in seconds. `speed` adjusts the duration estimate
+(above 1 is faster); an explicit duration takes precedence. `num_step` controls
+generation steps, with a default of 32. A seed replays the same request;
+`generate` also accepts ordered lists of texts.
 
 ## Limits
 
-The combined context limit is now the checkpoint's 40,960 text, reference and
-generated-audio positions per diffusion call. Upstream still chunks long-form
-generation above its default thirty-second threshold into roughly fifteen-second
-text chunks. Oversized target lengths are rejected before target allocation;
-combined conditioning is checked before the batch mask and embeddings are allocated. The upstream scheduler still creates a CPU mask proportional
-to the square of its active batch length, and returned logits also grow with
-context: maximum context is not negligible total RAM or a constant-latency
-operation. Native blockwise attention avoids a full square ANE attention graph.
+OmniVoice returns completed audio and does not stream. Long text is split into
+chunks automatically. Text, reference audio and output share a **40,960-position**
+context per chunk; long requests use more memory and take longer.
 
-Automatic unreferenced speech gains missing terminal punctuation and at least
-three seconds of generation context at normal speed to avoid short-input noise.
-Explicit durations bypass that minimum; speed scales it. Pynini-based number/date
-normalization is not exposed. Write numbers as spoken words when pronunciation
-needs to be explicit.
+Very short text uses at least three seconds of generation context unless you
+set an explicit duration. Write numbers as spoken words when exact pronunciation
+matters. Saved voices belong to the model that created them.
+
+Model weights use **CC-BY-NC-4.0**. The codec has separate license terms;
+see the [bundle's license and notices](https://huggingface.co/wegotomars/OmniVoice-CoreAI-ANE/tree/v2.2.0).
+[Full speech API](../speech.md) · [Developer commands](../model-publishing.md#model-builds).

@@ -8,8 +8,8 @@ Run models on Apple's Neural Engine through Core AI. Critical inference always r
 | --- | --- | --- |
 | [LiquidAI/d1-3B](https://huggingface.co/LiquidAI/d1-3B) (`d1-3b`) | Decisions over text and images | [docs/models/d1.md](docs/models/d1.md) |
 | [vllm-sr/d3-nano](https://huggingface.co/vllm-sr/d3-nano) (`d3-nano`), [vllm-sr/d3-mini](https://huggingface.co/vllm-sr/d3-mini) (`d3-mini`) | Decisions over text and images, one question per pass | [docs/models/d3.md](docs/models/d3.md) |
-| [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) (`omnivoice`) | Speech synthesis, voice cloning and voice design | [Local bundle setup](docs/models/omnivoice.md) |
-| [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) (`voxcpm2`) | Multilingual speech synthesis, voice design, cloning and continuation | [Local bundle setup](docs/models/voxcpm2.md) |
+| [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) (`omnivoice`) | Speech synthesis, voice cloning and voice design | [Usage](docs/models/omnivoice.md) |
+| [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) (`voxcpm2`) | Multilingual speech synthesis, voice design, cloning and continuation | [Usage](docs/models/voxcpm2.md) |
 
 Requires Apple Silicon (M1–M6), macOS 27, and Python 3.12 or 3.13. Bundle availability
 varies by model and chip. VoxCPM2 has fully ANE-compiled bundles across M1–M6;
@@ -43,7 +43,7 @@ with tinkerbox_ane.load("d1-3b") as model:
 
 Decision models expose the System One API: `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries, plus `count_tokens`. Models with parallel decisions (`question_trees` in the catalog, such as d1-3B) answer several questions about one input in a shared pass; the others answer them one after another and warn when a call asks more than one. Inputs, limits, and execution details are in each model's notes.
 
-OmniVoice and VoxCPM2 expose `generate`, reusable voice prompts, and on-device transcription. They currently require locally compiled bundles and the `speech` dependency extra; the app includes a Text to Speech page with playback and WAV/M4A export. Saved voices belong to the model that created them.
+OmniVoice and VoxCPM2 expose `generate`, reusable voice prompts, and on-device transcription. Python users need the `speech` dependency extra; compatible model bundles download automatically. The app includes a Text to Speech page with playback and WAV/M4A export. Saved voices belong to the model that created them.
 
 The [speech API](docs/speech.md) advertises each model's native modes and controls.
 The UI uses those capabilities to display supported controls. OmniVoice supplies
@@ -98,7 +98,7 @@ uv build
 
 The wheel in `dist/` bundles the native `tinkerbox-ane-host` executable and links against macOS system frameworks. Source and editable installs compile the host during installation. Compilation verifies source identity, function manifests, and full ANE placement.
 
-Each model's notes describe its export, compile, and publishing commands. Reusable Core AI compilation and Hugging Face publishing utilities are provided in `tinkerbox_ane.coreai` and `tinkerbox_ane.publish`. To use a compiled bundle locally before publishing:
+The [developer guide](docs/model-publishing.md#model-builds) describes model export, compilation, publishing and validation. Reusable Core AI compilation and Hugging Face publishing utilities are provided in `tinkerbox_ane.coreai` and `tinkerbox_ane.publish`. To use a compiled bundle locally before publishing:
 
 ```sh
 uv run python -m tinkerbox_ane.install <model> <bundle directory>
