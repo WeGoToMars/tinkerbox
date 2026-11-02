@@ -37,7 +37,11 @@ Continue one or more prompts with GPT-2 (any size, FP16, INT8 or LUT8). Each pro
 
 **Models** in the sidebar lists every model by task, from the catalog on GitHub (the bundled copy when offline). Pick a size and quantization to see that variant's download size and status. **Select** or **Download & Select** makes it the model for its task. Downloads continue in the background.
 
-Each installed model shows its disk usage, **Show in Finder** and **Remove**. **Remove Outdated** deletes earlier revisions after an update. **Clean Up** in the toolbar deletes Core AI's compiled copies that no installed model uses. A model with no bundle for this Mac can use a local one through **Choose bundle…**.
+Each installed model shows its disk usage, **Show in Finder** and **Remove**. **Remove Outdated** deletes earlier revisions after an update. A model with no bundle for this Mac can use a local one through **Choose bundle…**.
+
+## Storage
+
+**Storage** in the sidebar shows everything Tinkerbox keeps on this Mac, split into model bundles, Core AI's compiled copies, earlier revisions, upstream checkpoints, unused compiled copies and Python. Hover over the bar or a row to highlight that kind in every model's bar. Earlier revisions, upstream checkpoints and unused compiled copies are never loaded, so each can be deleted in one step. The models are ranked by size, and each one's menu shows it in Finder, removes its earlier revisions or deletes it.
 
 ## Shortcuts
 

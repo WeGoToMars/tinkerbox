@@ -18,7 +18,6 @@ struct ModelsView: View {
     let demo: Demo
     @State private var removalError: String?
     @State private var pending: CatalogModel?
-    @State private var confirmingCleanup = false
     @State private var choosingBundle: CatalogModel?
     @State private var variants: [String: String] = [:]
     @Environment(\.openURL) private var openURL
@@ -100,13 +99,8 @@ struct ModelsView: View {
         }
         .frame(minWidth: 650, minHeight: 650)
         .navigationTitle("Models")
-        .navigationSubtitle(subtitle)
+        .navigationSubtitle(demo.catalog.isRemote ? "" : "Offline catalog")
         .toolbar {
-            if let unused = demo.storage.report?.unusedCompiled, !unused.paths.isEmpty {
-                Button("Clean Up \(formatBytes(unused.bytes))", systemImage: "trash") { confirmingCleanup = true }
-                    .disabled(!demo.storage.removing.isEmpty)
-                    .help("Delete compiled copies that no downloaded model uses")
-            }
             Button("Refresh", systemImage: "arrow.clockwise") {
                 Task {
                     await demo.catalog.refresh()
@@ -116,21 +110,13 @@ struct ModelsView: View {
         }
         .alert("Model files", isPresented: Binding(get: { removalError != nil }, set: { if !$0 { removalError = nil } })) {
         } message: { Text(removalError ?? "") }
-        .alert("Could not update storage", isPresented: Binding(get: { demo.storage.error != nil },
-                                                                set: { if !$0 { demo.storage.error = nil } })) {
-        } message: { Text(demo.storage.error ?? "") }
         .confirmationDialog("Delete \(pending?.name ?? "")?", isPresented: Binding(
             get: { pending != nil }, set: { if !$0 { pending = nil } }), presenting: pending) { model in
             Button("Delete", role: .destructive) { Task { await demo.remove(model.id) } }
         } message: { model in
-            if let stored = demo.storage.report?.models.first(where: { $0.id == model.id }) {
-                Text(Storage.removal(of: stored))
+            if let report = demo.storage.report, let stored = report.models.first(where: { $0.id == model.id }) {
+                Text(report.removal(of: stored))
             }
-        }
-        .confirmationDialog("Delete unused compiled copies?", isPresented: $confirmingCleanup) {
-            Button("Delete", role: .destructive) { Task { await demo.storage.removeUnused() } }
-        } message: {
-            Text("Core AI copies of deleted bundles and earlier macOS builds. Local exports may need to compile again.")
         }
         .fileImporter(isPresented: Binding { choosingBundle != nil } set: { if !$0 { choosingBundle = nil } },
                       allowedContentTypes: [.folder]) { result in
@@ -145,13 +131,6 @@ struct ModelsView: View {
     }
 
     // Disk use, and where the catalog came from when it is the built-in copy.
-    private var subtitle: String {
-        let used = demo.storage.report.map { report in
-            "\(formatBytes(report.bytes)) on disk, including \(formatBytes(report.python.bytes + report.packages.bytes)) of Python"
-        }
-        return [used, demo.catalog.isRemote ? nil : "Offline catalog"].compactMap { $0 }.joined(separator: " · ")
-    }
-
     private func row(_ model: CatalogModel, title: String) -> some View {
         let downloaded = demo.isDownloaded(model.id)
         let downloading = demo.downloads.contains(model.id)

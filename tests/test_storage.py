@@ -46,8 +46,11 @@ def storage(home, *arguments):
     environment = {**os.environ, "HOME": str(home), "HF_HOME": str(home / "hf"), "HF_HUB_CACHE": str(home / "hub")}
     result = subprocess.run([sys.executable, "-m", "tinkerbox_ane.storage", *arguments], env=environment,
                             capture_output=True, text=True, check=True)
-    report = json.loads(result.stdout)
-    return {model["id"]: model for model in report["models"]}, set(report["unused_compiled"]["paths"])
+    return json.loads(result.stdout)
+
+
+def models(report):
+    return {model["id"]: model for model in report["models"]}
 
 
 def test_report_and_remove_a_model_with_everything_it_downloaded(tmp_path: Path):
@@ -59,29 +62,35 @@ def test_report_and_remove_a_model_with_everything_it_downloaded(tmp_path: Path)
     d1 = checkpoint(tmp_path / "hub", "LiquidAI/d1-3B")
     unused = {specialization(tmp_path, build, "ab" * 32), specialization(tmp_path, "25A000", other_compiled.name)}
 
-    models, found = storage(tmp_path)
-    assert set(models) == {"d1-3b", "d3-nano"}
-    bundles = [(b["revision"], b["current"], b["compiled"]["paths"]) for b in models["d3-nano"]["bundles"]]
+    report = storage(tmp_path)
+    stored = models(report)
+    assert set(stored) == {"d1-3b", "d3-nano"}
+    bundles = [(b["revision"], b["current"], b["compiled"]["paths"]) for b in stored["d3-nano"]["bundles"]]
     assert bundles == [("v2.0.0", False, [str(old_compiled)]), ("v2.2.0", True, [str(current_compiled)])]
-    assert models["d3-nano"]["checkpoint"]["repo"] == "vllm-sr/d3-nano"
+    assert [(c["repo"], c["models"]) for c in report["checkpoints"]] == [
+        ("LiquidAI/d1-3B", ["d1-3b"]), ("vllm-sr/d3-nano", ["d3-nano"])]
     # Clones share the bundle's blocks, so compiled copies add nothing to the model's size.
-    assert all(b["compiled"]["bytes"] == 0 for b in models["d3-nano"]["bundles"])
-    assert 2 * 100_000 + 200_000 <= models["d3-nano"]["bytes"] < 2 * 100_000 + 200_000 + 50_000
-    assert found == set(map(str, unused))
+    assert all(b["compiled"]["bytes"] == 0 for b in stored["d3-nano"]["bundles"])
+    assert 2 * 100_000 <= stored["d3-nano"]["bytes"] < 2 * 100_000 + 50_000
+    assert report["bytes"] >= sum(m["bytes"] for m in stored.values()) + 2 * 200_000
+    assert set(report["unused_compiled"]["paths"]) == set(map(str, unused))
 
-    models, _ = storage(tmp_path, "--remove", "d3-nano", "--outdated")
-    assert [b["revision"] for b in models["d3-nano"]["bundles"]] == ["v2.2.0"]
+    stored = models(storage(tmp_path, "--remove", "d3-nano", "--outdated"))
+    assert [b["revision"] for b in stored["d3-nano"]["bundles"]] == ["v2.2.0"]
     assert not old.exists() and not old_compiled.exists()
     assert current.exists() and current_compiled.exists() and nano.exists()
 
-    models, _ = storage(tmp_path, "--remove", "d3-nano")
-    assert set(models) == {"d1-3b"}
+    report = storage(tmp_path, "--remove", "d3-nano")
+    assert set(models(report)) == {"d1-3b"}
     assert not current.parent.exists() and not current_compiled.exists() and not nano.exists()
     assert other.exists() and other_compiled.exists() and d1.exists()
 
-    models, found = storage(tmp_path, "--remove-unused")
-    assert found == set() and not any(path.exists() for path in unused)
-    assert models["d1-3b"]["bundles"][0]["compiled"]["paths"] == [str(other_compiled)]
+    report = storage(tmp_path, "--remove-checkpoint", "LiquidAI/d1-3B")
+    assert report["checkpoints"] == [] and not d1.exists() and other.exists()
+
+    report = storage(tmp_path, "--remove-unused")
+    assert report["unused_compiled"]["paths"] == [] and not any(path.exists() for path in unused)
+    assert models(report)["d1-3b"]["bundles"][0]["compiled"]["paths"] == [str(other_compiled)]
 
 
 def test_removal_stays_inside_real_model_directories(tmp_path):
@@ -108,9 +117,9 @@ def test_partial_clones_have_the_same_size_after_renaming(tmp_path):
         stream.write(os.urandom(1024**2))
         stream.flush()
         os.fsync(stream.fileno())
-    first, _ = storage(tmp_path)
+    first = models(storage(tmp_path))
     original.rename(folder / "swap.bin")
     cloned.rename(original)
     (folder / "swap.bin").rename(cloned)
-    second, _ = storage(tmp_path)
+    second = models(storage(tmp_path))
     assert first["leftover"]["bytes"] == second["leftover"]["bytes"] == 5 * 1024**2

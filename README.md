@@ -43,7 +43,7 @@ with tinkerbox_ane.load("d1-3b") as model:
 - **Speech** (OmniVoice, VoxCPM2): `generate`, reusable voice prompts and on-device transcription. VoxCPM2 also streams. See the [speech API](docs/speech.md).
 - **Text completion** (GPT-2): OpenAI-style `complete(prompt=..., max_tokens=...)` with streaming, sampling and batching.
 
-`python -m tinkerbox_ane.storage` lists what each model keeps on disk. `--remove MODEL` deletes a model's files (add `--outdated` to keep the current revision), and `--remove-unused` deletes compiled copies that no bundle uses.
+`python -m tinkerbox_ane.storage` lists what each model keeps on disk. `--remove MODEL` deletes a model's files (with `--outdated`, only revisions the catalog no longer loads; `--outdated` alone does that for every model). `--remove-checkpoint REPO...` deletes upstream checkpoints, and `--remove-unused` deletes compiled copies that no bundle uses.
 
 ## Development
 

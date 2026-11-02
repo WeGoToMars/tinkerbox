@@ -146,7 +146,7 @@ func duration(_ milliseconds: Double?) -> String {
 }
 
 enum Destination: Hashable {
-    case home, task(ModelTask), models
+    case home, task(ModelTask), models, storage
 }
 
 struct AppView: View {
@@ -175,6 +175,7 @@ struct AppView: View {
                 }
                 Section("Library") {
                     Label("Models", systemImage: "square.stack.3d.up").tag(Destination.models)
+                    Label("Storage", systemImage: "internaldrive").tag(Destination.storage)
                 }
             }
             .navigationSplitViewColumnWidth(min: 160, ideal: 180)
@@ -187,6 +188,7 @@ struct AppView: View {
                 case .task(.speech): SpeechView(playground: speech) { destination = .models }
                 case .task(.completion): CompletionView(playground: completions) { destination = .models }
                 case .models: ModelsView(demo: demo)
+                case .storage: StorageView(demo: demo)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { SystemFooter() }
