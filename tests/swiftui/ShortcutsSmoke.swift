@@ -46,9 +46,9 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         invalid.options = ["Same", "Same"]
         do {
             _ = try await invalid.perform()
-            throw DecisionError.invalid("Duplicate choices were accepted")
-        } catch DecisionError.invalid(let message) {
-            try require(message.contains("unique"), "Expected a useful duplicate-options error")
+            try require(false, "Duplicate choices were accepted")
+        } catch let error as TinkerboxError {
+            try require(error.errorDescription!.contains("unique"), "Expected a useful duplicate-options error")
         }
         let invalidScore = ScoreTextIntent()
         invalidScore.text = score.text
@@ -56,18 +56,18 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         invalidScore.levels = Array(repeating: "Level", count: 11)
         do {
             _ = try await invalidScore.perform()
-            throw DecisionError.invalid("Too many levels were accepted")
-        } catch DecisionError.invalid(let message) {
-            try require(message.contains("2–10"), "Expected a useful score-level error")
+            try require(false, "Too many levels were accepted")
+        } catch let error as TinkerboxError {
+            try require(error.errorDescription!.contains("2–10"), "Expected a useful score-level error")
         }
         let blank = YesNoDecisionIntent()
         blank.text = " \n "
         blank.question = yes.question
         do {
             _ = try await blank.perform()
-            throw DecisionError.invalid("Blank text was accepted")
-        } catch DecisionError.invalid(let message) {
-            try require(message.contains("empty"), "Expected a useful empty-text error")
+            try require(false, "Blank text was accepted")
+        } catch let error as TinkerboxError {
+            try require(error.errorDescription!.contains("empty"), "Expected a useful empty-text error")
         }
 
         // Cold startup, multiple Shortcuts, and the UI's runtime entry point overlap.
@@ -85,7 +85,7 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         let negative = noReply.value!
         let chosen = choiceReply.value!
         let scored = scoreReply.value!
-        try require(setupReply.ready == true, "Concurrent UI setup did not finish")
+        try require(setupReply.modelId == Runtime.selectedModel(for: .decision), "Concurrent UI setup did not finish")
         try require(affirmative.answer && affirmative.yesProbability > 0.9, "Expected a greeting")
         try require(!negative.answer && negative.yesProbability < 0.5, "Expected a non-greeting")
         try require(chosen.chosenOption == "Greeting", "Expected Greeting option")
@@ -141,7 +141,7 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         oversized.question = yes.question
         do {
             _ = try await oversized.perform()
-            throw DecisionError.invalid("Oversized input was accepted")
+            try require(false, "Oversized input was accepted")
         } catch {
             try require(error.localizedDescription.contains("context limit"), "Expected a context-limit error")
         }
@@ -173,7 +173,7 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         while ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(200))
             do { _ = try await idle.count(request) }
-            catch DecisionError.invalid { expired = true; break }
+            catch is TinkerboxError { expired = true; break }
         }
         let disconnected = await !idle.isConnected
         try require(expired && disconnected, "Token previews kept an idle model loaded")

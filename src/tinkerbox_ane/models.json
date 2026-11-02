@@ -54,6 +54,9 @@
     },
     {
       "id": "d3-nano",
+      "family": "d3",
+      "size": "Nano (2B)",
+      "quantization": "FP16",
       "name": "d3-nano",
       "publisher": "vllm-sr",
       "summary": "Typed yes/no, choice and score decisions from text and images; one pass per question.",
@@ -82,6 +85,9 @@
     },
     {
       "id": "d3-mini",
+      "family": "d3",
+      "size": "Mini (4B)",
+      "quantization": "FP16",
       "name": "d3-mini",
       "publisher": "vllm-sr",
       "summary": "Typed yes/no, choice and score decisions from text and images; one pass per question.",
@@ -151,6 +157,8 @@
     },
     {
       "id": "voxcpm2",
+      "family": "VoxCPM2",
+      "quantization": "FP16",
       "name": "VoxCPM2",
       "publisher": "OpenBMB",
       "summary": "Multilingual speech synthesis, voice design, reference cloning and audio continuation.",
@@ -193,6 +201,8 @@
     },
     {
       "id": "voxcpm2-lut8",
+      "family": "VoxCPM2",
+      "quantization": "LUT8",
       "name": "VoxCPM2 LUT8",
       "publisher": "OpenBMB",
       "summary": "VoxCPM2 with 8-bit lookup-table main-model weights: less memory and faster, slightly lower fidelity.",

@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import traceback
 
 output = os.fdopen(os.dup(1), "w")
 os.dup2(2, 1)  # Native code and child processes print to fd 1 too; keep the reply channel clean.
@@ -19,19 +20,20 @@ def send(reply):
 
 def question(request):
     kind = request["type"]
+    if not request["instructions"].strip():
+        raise ValueError("Questions must not be empty.")
     result = {"type": kind, "instructions": request["instructions"]}
+    criteria = [item.strip() for item in request.get("criteria", [])]
+    if "" in criteria:
+        raise ValueError("Options and levels must not be empty.")
     if kind == "choice":
-        criteria = request["criteria"]
         if len(criteria) < 2 or len(set(criteria)) != len(criteria):
-            raise ValueError("Choice needs at least two unique options.")
+            raise ValueError("Add at least two unique options.")
         result["criteria"] = dict.fromkeys(criteria)
     elif kind == "score":
-        criteria = request["criteria"]
         if not 2 <= len(criteria) <= 10:
-            raise ValueError("Score needs 2–10 ordered levels.")
+            raise ValueError("Add 2–10 levels, ordered from lowest to highest.")
         result["criteria"] = criteria
-    elif kind != "noul":
-        raise ValueError(f"Unknown question type: {kind}")
     return result
 
 
@@ -61,7 +63,9 @@ def decide(model, entry, request):
         images = [ImageOps.exif_transpose(Image.open(path)) for path in item.get("images", [])]
         if images and "image" not in entry["inputs"]:
             raise ValueError(f"{entry['name']} does not accept images.")
-        state = item["state"] if item["state"].strip() or not images else None
+        if not item["state"].strip() and not images:
+            raise ValueError("Input text must not be empty unless you add an image.")
+        state = item["state"] if item["state"].strip() else None
         batch.append((state, questions, images))
     if request.get("count"):
         # What a run would read, without running the model.
@@ -81,8 +85,10 @@ def decide(model, entry, request):
 
 # One request handler per catalog task; a new task adds its own instead of branching inside another.
 from tinkerbox_ane.speech import synthesize
+from tinkerbox_ane.completion import complete
 
 HANDLERS = {"decision": decide,
+            "text-generation": lambda model, entry, request: complete(model, entry, request, emit=send),
             # Streamed speech sends its audio pieces before the complete reply.
             "speech": lambda model, entry, request: synthesize(model, entry, request, emit=send)}
 
@@ -112,22 +118,27 @@ def main():
               "cpuModel": cpu, "architecture": device_architecture(),
               "questionTrees": entry.get("question_trees", False),
               "settings": package.SETTINGS, "info": package.INFO,
-              "speechParameters": getattr(package, "SPEECH_PARAMETERS", []),
+              "batchSizes": list(getattr(model, "batch_sizes", [])),
               "setupMs": (time.perf_counter() - started) * 1000})
         for line in sys.stdin:
             try:
                 request = json.loads(line)
+                if request.get("operation") == "tokenize":
+                    send({"tokenSpans": model.token_spans(request["text"])})
+                    continue
                 # Every request carries its settings; missing ones fall back to their defaults.
                 for setting in package.SETTINGS:
                     setattr(model, setting["key"], request.get("settings", {}).get(setting["key"], setting["default"]))
                 send(handle(model, entry, request))
             except Exception as error:
-                send({"error": str(error)})
+                traceback.print_exc()
+                send({"error": str(error) or type(error).__name__})
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        send({"error": str(error)})
+        traceback.print_exc()
+        send({"error": str(error) or type(error).__name__})
         sys.exit(1)

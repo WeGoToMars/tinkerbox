@@ -2,17 +2,23 @@ import AppIntents
 import Foundation
 import UniformTypeIdentifiers
 
-// Shortcuts hands over file data; the worker opens images by path.
-func decide(text: String?, images: [IntentFile]?, questions: [Question]) async throws -> Decisions {
-    let folder = FileManager.default.temporaryDirectory.appending(path: "tinkerbox-\(UUID().uuidString)")
+// Shortcuts hands over file data and the worker opens files by path, so they live in a folder for one request.
+func withTemporaryFolder<T>(_ body: (URL) async throws -> T) async throws -> T {
+    let folder = URL.temporaryDirectory.appending(path: "tinkerbox-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: folder) }
-    let paths = try (images ?? []).enumerated().map { index, file in
-        let url = folder.appending(path: "\(index)")  // Pillow detects the format from the contents.
-        try file.data.write(to: url)
-        return url.path
+    return try await body(folder)
+}
+
+func decide(text: String?, images: [IntentFile]?, questions: [Question]) async throws -> Decisions {
+    try await withTemporaryFolder { folder in
+        let paths = try (images ?? []).enumerated().map { index, file in
+            let url = folder.appending(path: "\(index)")  // Pillow detects the format from the contents.
+            try file.data.write(to: url)
+            return url.path
+        }
+        return try await Runtime.shared.decide(Request(items: [Item(state: text ?? "", images: paths)], questions: questions))
     }
-    return try await Runtime.shared.decide(Request(items: [Item(state: text ?? "", images: paths)], questions: questions))
 }
 
 // One question about each nonblank list item, packed into one batch; blank lines are dropped.
@@ -58,8 +64,8 @@ struct YesNoDecision: TransientAppEntity {
     }
 
     init() {}
-    init(question: String, threshold: Double, answer value: Answer, tokens: Int, elapsed: Double) throws {
-        guard value.type == .noul, let probability = value.noul else { throw DecisionError.invalidReply }
+    init(question: String, threshold: Double, answer value: Answer, tokens: Int, elapsed: Double) {
+        let probability = value.noul!
         self.question = question
         answer = probability >= threshold
         yesProbability = probability
@@ -84,11 +90,9 @@ struct ChoiceDecision: TransientAppEntity {
     }
 
     init() {}
-    init(_ decisions: Decisions, minimumConfidence: Double) throws {
+    init(_ decisions: Decisions, minimumConfidence: Double) {
         let value = decisions.results[0].answers[0]
-        guard value.type == .choice, let option = value.choice, let confidence = value.confidence else {
-            throw DecisionError.invalidReply
-        }
+        let (option, confidence) = (value.choice!, value.confidence!)
         chosenOption = confidence >= minimumConfidence ? option : nil
         mostLikelyOption = option
         self.confidence = confidence
@@ -112,9 +116,9 @@ struct ScoreDecision: TransientAppEntity {
     }
 
     init() {}
-    init(_ decisions: Decisions, levels: [String]) throws {
+    init(_ decisions: Decisions, levels: [String]) {
         let value = decisions.results[0].answers[0]
-        (score, level) = try scored(value, levels: levels)
+        (score, level) = scored(value, levels: levels)
         maximumScore = levels.count - 1
         probabilities = value.probabilities.map(DecisionProbability.init)
         inputTokens = decisions.results[0].tokens
@@ -123,11 +127,9 @@ struct ScoreDecision: TransientAppEntity {
 }
 
 // The expected score and the most likely level of a score answer.
-func scored(_ value: Answer, levels: [String]) throws -> (Double, String) {
+func scored(_ value: Answer, levels: [String]) -> (Double, String) {
     let values = value.probabilities.map(\.value)
-    guard value.type == .score, let score = value.score, values.count == levels.count,
-          let best = values.indices.max(by: { values[$0] < values[$1] }) else { throw DecisionError.invalidReply }
-    return (score, levels[best])
+    return (value.score!, levels[values.indices.max { values[$0] < values[$1] }!])
 }
 
 struct RankedItem: TransientAppEntity {
@@ -144,9 +146,9 @@ struct RankedItem: TransientAppEntity {
     }
 
     init() {}
-    init(item: String, answer: Answer, levels: [String]) throws {
+    init(item: String, answer: Answer, levels: [String]) {
         self.item = item
-        (score, level) = try scored(answer, levels: levels)
+        (score, level) = scored(answer, levels: levels)
         maximumScore = levels.count - 1
     }
 }
@@ -175,7 +177,7 @@ struct YesNoDecisionIntent: AppIntent {
     func perform() async throws -> some IntentResult & ReturnsValue<YesNoDecision> {
         let decisions = try await decide(text: text, images: images,
                                          questions: [Question(type: .noul, instructions: question)])
-        return .result(value: try YesNoDecision(question: question, threshold: threshold,
+        return .result(value: YesNoDecision(question: question, threshold: threshold,
                                                 answer: decisions.results[0].answers[0],
                                                 tokens: decisions.results[0].tokens, elapsed: decisions.elapsedMs))
     }
@@ -208,7 +210,7 @@ struct ChooseOptionIntent: AppIntent {
     func perform() async throws -> some IntentResult & ReturnsValue<ChoiceDecision> {
         let decisions = try await decide(text: text, images: images,
                                          questions: [Question(type: .choice, instructions: question, criteria: options)])
-        return .result(value: try ChoiceDecision(decisions, minimumConfidence: minimumConfidence))
+        return .result(value: ChoiceDecision(decisions, minimumConfidence: minimumConfidence))
     }
 }
 
@@ -235,7 +237,7 @@ struct ScoreTextIntent: AppIntent {
     func perform() async throws -> some IntentResult & ReturnsValue<ScoreDecision> {
         let decisions = try await decide(text: text, images: images,
                                          questions: [Question(type: .score, instructions: question, criteria: levels)])
-        return .result(value: try ScoreDecision(decisions, levels: levels))
+        return .result(value: ScoreDecision(decisions, levels: levels))
     }
 }
 
@@ -264,8 +266,8 @@ struct AskQuestionsIntent: AppIntent {
         let decisions = try await decide(text: text, images: images,
                                          questions: questions.map { Question(type: .noul, instructions: $0) })
         let result = decisions.results[0]
-        return .result(value: try zip(questions, result.answers).map { question, answer in
-            try YesNoDecision(question: question, threshold: threshold, answer: answer,
+        return .result(value: zip(questions, result.answers).map { question, answer in
+            YesNoDecision(question: question, threshold: threshold, answer: answer,
                               tokens: result.tokens, elapsed: decisions.elapsedMs)
         })
     }
@@ -316,7 +318,7 @@ struct SortListIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ReturnsValue<[RankedItem]> {
         let answers = try await decide(items: items, question: Question(type: .score, instructions: question, criteria: levels))
-        let ranked = try answers.map { try RankedItem(item: $0.item, answer: $0.answer, levels: levels) }
+        let ranked = answers.map { RankedItem(item: $0.item, answer: $0.answer, levels: levels) }
         // Ties keep the list's order.
         let order = ranked.indices.sorted { a, b in
             ranked[a].score == ranked[b].score ? a < b : (ranked[a].score > ranked[b].score) == highestFirst
@@ -327,28 +329,28 @@ struct SortListIntent: AppIntent {
 
 struct SpeechModelEntity: AppEntity {
     static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Speech Model")
-    static var defaultQuery = SpeechModelQuery()
+    static let defaultQuery = SpeechModelQuery()
     let id: String
     let name: String
     var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(name)") }
 }
 
-struct SpeechModelQuery: EntityQuery {
-    func suggestedEntities() async throws -> [SpeechModelEntity] {
-        Catalog.bundled.filter { $0.kind == .speech && Catalog.speechCapabilities[$0.id] != nil }
-            .map { SpeechModelEntity(id: $0.id, name: $0.name) }
+struct SpeechModelQuery: EnumerableEntityQuery {
+    func entities(for identifiers: [String]) async throws -> [SpeechModelEntity] {
+        let all = try await allEntities()
+        return identifiers.compactMap { id in all.first { $0.id == id } }
     }
 
-    func entities(for identifiers: [SpeechModelEntity.ID]) async throws -> [SpeechModelEntity] {
-        let available = try await suggestedEntities()
-        return identifiers.compactMap { id in available.first { $0.id == id } }
+
+    func allEntities() async throws -> [SpeechModelEntity] {
+        Catalog.bundled.filter { $0.kind == .speech }.map { SpeechModelEntity(id: $0.id, name: $0.name) }
     }
 }
 
 // Persist the model and mode IDs; app selection changes never change a saved Shortcut.
 struct SpeechModeEntity: AppEntity {
     static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Speech Mode")
-    static var defaultQuery = SpeechModeQuery()
+    static let defaultQuery = SpeechModeQuery()
 
     let modelID: String
     let modeID: String
@@ -363,17 +365,17 @@ struct SpeechModeEntity: AppEntity {
     }
 }
 
-struct SpeechModeQuery: EntityQuery {
-    func suggestedEntities() async throws -> [SpeechModeEntity] {
-        let models = try await SpeechModelQuery().suggestedEntities()
-        return models.flatMap { model in
-            (Catalog.speechCapabilities[model.id]?.modes ?? []).map { SpeechModeEntity(model: model.id, mode: $0) }
-        }
+struct SpeechModeQuery: EnumerableEntityQuery {
+    func entities(for identifiers: [String]) async throws -> [SpeechModeEntity] {
+        let all = try await allEntities()
+        return identifiers.compactMap { id in all.first { $0.id == id } }
     }
 
-    func entities(for identifiers: [SpeechModeEntity.ID]) async throws -> [SpeechModeEntity] {
-        let available = try await suggestedEntities()
-        return identifiers.compactMap { id in available.first { $0.id == id } }
+
+    func allEntities() async throws -> [SpeechModeEntity] {
+        Catalog.speechCapabilities.flatMap { model, capabilities in
+            capabilities.modes.map { SpeechModeEntity(model: model, mode: $0) }
+        }
     }
 }
 
@@ -392,7 +394,7 @@ struct SpeechVoiceModeOptions: DynamicOptionsProvider {
     func results() async throws -> [SpeechModeEntity] {
         guard let model = intent?.model else { return [] }
         return (Catalog.speechCapabilities[model.id]?.modes ?? [])
-            .filter { $0.reference == "required" || $0.reference == "optional" }
+            .filter { $0.reference == .required || $0.reference == .optional }
             .map { SpeechModeEntity(model: model.id, mode: $0) }
     }
 }
@@ -401,7 +403,7 @@ struct SpeechVoiceModeOptions: DynamicOptionsProvider {
 func speechMode(_ selection: SpeechModeEntity?, model: SpeechModelEntity) throws -> String? {
     guard let selection else { return nil }
     guard selection.modelID == model.id else {
-        throw DecisionError.invalid("\(model.name) does not support the selected mode ‘\(selection.title)’. Choose a mode for this model.")
+        throw TinkerboxError("\(model.name) does not support the selected mode ‘\(selection.title)’. Choose a mode for this model.")
     }
     return selection.modeID
 }
@@ -446,9 +448,13 @@ struct GenerateSpeechIntent: AppIntent {
     }
 
     func perform() async throws -> some IntentResult & ReturnsValue<[IntentFile]> {
-        let folder = FileManager.default.temporaryDirectory.appending(path: "tinkerbox-speech-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: folder) }
+        let reply = try await withTemporaryFolder { folder in try await speak(in: folder) }
+        return .result(value: reply.audio.enumerated().map { index, clip in
+            IntentFile(data: clip.wav, filename: "speech-\(reply.seed)-\(index + 1).wav", type: .wav)
+        })
+    }
+
+    private func speak(in folder: URL) async throws -> SpeechReply {
         var referencePath: String?
         var voicePath: String?
         if let reference {
@@ -469,12 +475,8 @@ struct GenerateSpeechIntent: AppIntent {
         var parameters: [String: SpeechValue] = [:]
         if let steps { parameters["num_step"] = .number(Double(steps)) }
         if let guidance { parameters["guidance_scale"] = .number(guidance) }
-        let reply = try await Runtime.shared.speak(SpeechRequest(items: items, parameters: parameters,
-                                                                 seed: seed.map(Int64.init)), model: model.id)
-        guard let audio = reply.audio, let requestSeed = reply.seed else { throw DecisionError.invalidReply }
-        return .result(value: audio.enumerated().map { index, clip in
-            IntentFile(data: clip.wav, filename: "speech-\(requestSeed)-\(index + 1).wav", type: .wav)
-        })
+        return try await Runtime.shared.speak(SpeechRequest(items: items, parameters: parameters,
+                                                            seed: seed.map(Int64.init)), model: model.id)
     }
 }
 
@@ -501,14 +503,13 @@ struct CreateVoicePromptIntent: AppIntent {
     }
 
     func perform() async throws -> some IntentResult & ReturnsValue<IntentFile> {
-        let folder = FileManager.default.temporaryDirectory.appending(path: "tinkerbox-voice-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: folder) }
-        let path = folder.appending(path: "reference.\(URL(fileURLWithPath: reference.filename).pathExtension)")
-        try reference.data.write(to: path)
-        let prompt = try await Runtime.shared.createVoice(SpeechVoiceRequest(refAudio: path.path,
-            refText: transcript.flatMap { isBlank($0) ? nil : $0 }, preprocessPrompt: preprocess,
-            mode: try speechMode(mode, model: model)), model: model.id)
+        let prompt = try await withTemporaryFolder { folder in
+            let path = folder.appending(path: "reference.\(URL(fileURLWithPath: reference.filename).pathExtension)")
+            try reference.data.write(to: path)
+            return try await Runtime.shared.createVoice(SpeechVoiceRequest(refAudio: path.path,
+                refText: transcript.flatMap { isBlank($0) ? nil : $0 }, preprocessPrompt: preprocess,
+                mode: try speechMode(mode, model: model)), model: model.id)
+        }
         return .result(value: IntentFile(data: prompt, filename: "voice.pt", type: .data))
     }
 }

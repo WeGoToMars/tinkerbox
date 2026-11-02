@@ -74,13 +74,13 @@ func check(_ condition: Bool, _ message: String) {
         catch { check(error.localizedDescription.contains("does not support"), "Mode validation: \(error)") }
 
         // Exercise every advertised reference-required conditioning mode through both actual actions.
-        for mode in capabilities.modes where mode.reference == "required" {
+        for mode in capabilities.modes where mode.reference == .required {
             let prepare = CreateVoicePromptIntent()
             prepare.model = shortcutModel
             prepare.reference = first[0]
             prepare.mode = options.first { $0.modeID == mode.id }!
             prepare.preprocess = false
-            prepare.transcript = mode.referenceTranscript == "none" ? nil : generate.texts[0]
+            prepare.transcript = mode.referenceTranscript == Requirement.none ? nil : generate.texts[0]
             let saved = try await prepare.perform().value!
             check(saved.filename == "voice.pt" && !saved.data.isEmpty, "Missing voice prompt")
             let clone = GenerateSpeechIntent()
@@ -121,7 +121,7 @@ func check(_ condition: Bool, _ message: String) {
         async let shortcut = single.perform()
         async let ui = runtime.speak(SpeechRequest(items: [SpeechItem(text: single.texts[0])], seed: 42))
         let (shortcutReply, uiReply) = try await (shortcut, ui)
-        check(shortcutReply.value![0].data == standalone[0].data && uiReply.audio![0].wav == standalone[0].data,
+        check(shortcutReply.value![0].data == standalone[0].data && uiReply.audio[0].wav == standalone[0].data,
               "Concurrent UI/Shortcut request isolation or replay differs")
         await runtime.unload()
         print("PASS: \(model) speech App Intents, ordered WAV files, seed replay, voice prompts, cloning/continuation after unload, design, errors and concurrent UI requests")

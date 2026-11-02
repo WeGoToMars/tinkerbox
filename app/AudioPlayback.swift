@@ -176,12 +176,10 @@ struct AudioPlayback: View {
     }
 
     func append(_ chunk: SpeechChunk) {
-        guard !stopped else { return }
         let count = chunk.pcm.count / 2
+        guard !stopped, count > 0 else { return }
         if sampleRate == 0 {
-            guard let format = AVAudioFormat(standardFormatWithSampleRate: Double(chunk.sampleRate), channels: 1) else {
-                return fail("Unsupported speech sample rate.")
-            }
+            let format = AVAudioFormat(standardFormatWithSampleRate: Double(chunk.sampleRate), channels: 1)!
             sampleRate = format.sampleRate
             engine.attach(node)
             do {
@@ -190,9 +188,8 @@ struct AudioPlayback: View {
                 try node.playAudio()
             } catch { return fail(error.localizedDescription) }
         }
-        guard Double(chunk.sampleRate) == sampleRate, count > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: node.outputFormat(forBus: 0), frameCapacity: AVAudioFrameCount(count)),
-              let samples = buffer.floatChannelData?[0] else { return fail("The model returned unplayable audio.") }
+        let buffer = AVAudioPCMBuffer(pcmFormat: node.outputFormat(forBus: 0), frameCapacity: AVAudioFrameCount(count))!
+        let samples = buffer.floatChannelData![0]
         buffer.frameLength = AVAudioFrameCount(count)
         chunk.pcm.withUnsafeBytes { raw in
             for index in 0..<count {

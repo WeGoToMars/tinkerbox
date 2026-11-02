@@ -52,7 +52,8 @@ import SwiftUI
             ])
             recorder.isMeteringEnabled = true
             guard recorder.record(forDuration: 20) else {
-                throw CocoaError(.fileWriteUnknown)
+                error = "Could not start recording from the microphone."
+                return
             }
             self.recorder = recorder
             self.completion = completion

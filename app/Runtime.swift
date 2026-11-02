@@ -24,6 +24,11 @@ func isBlank(_ text: String) -> Bool {
     text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 }
 
+struct TinkerboxError: LocalizedError {
+    let errorDescription: String?
+    init(_ message: String) { errorDescription = message }
+}
+
 struct Question: Encodable, Hashable, Sendable {
     let type: QuestionType
     let instructions: String
@@ -36,46 +41,12 @@ struct Item: Encodable, Hashable, Sendable {
 }
 
 // Every question is asked about every item. Several questions about one item share a single tree
-// pass; one question about many items is packed into one batch.
+// pass; one question about many items is packed into one batch. The worker validates requests.
 struct Request: Encodable, Sendable {
     let items: [Item]
     let questions: [Question]
     var settings: [String: Int] = [:]  // filled in by Runtime from the model's saved values
     var count = false  // report tokens and image tiles instead of answering
-
-    func validate() throws {
-        if items.isEmpty || questions.isEmpty {
-            throw DecisionError.invalid("Ask at least one question about at least one input.")
-        }
-        if items.contains(where: { isBlank($0.state) && $0.images.isEmpty }) {
-            throw DecisionError.invalid("Input text must not be empty unless you add an image.")
-        }
-        for question in questions {
-            let (type, criteria) = (question.type, question.criteria)
-            if isBlank(question.instructions) { throw DecisionError.invalid("Questions must not be empty.") }
-            if type == .choice && (criteria.count < 2 || Set(criteria).count != criteria.count) {
-                throw DecisionError.invalid("Add at least two unique options.")
-            }
-            if type == .score && !(2...10).contains(criteria.count) {
-                throw DecisionError.invalid("Add 2–10 levels, ordered from lowest to highest.")
-            }
-            if type != .noul && criteria.contains(where: isBlank) {
-                throw DecisionError.invalid("Options and levels must not be empty.")
-            }
-        }
-    }
-}
-
-enum DecisionError: LocalizedError {
-    case invalid(String)
-    case invalidReply
-
-    var errorDescription: String? {
-        switch self {
-        case .invalid(let message): message
-        case .invalidReply: "The model returned an incomplete response."
-        }
-    }
 }
 
 struct Answer: Decodable, Sendable {
@@ -100,12 +71,20 @@ struct ItemResult: Decodable, Sendable {
     let neuralEngineMs: Double?
 }
 
-struct Decisions: Sendable {
+struct Decisions: Decodable, Sendable {
     let results: [ItemResult]  // in the request's item order
     let elapsedMs: Double
 }
 
+// A run of input text that one or more tokens cover, in UTF-16 offsets.
+struct TokenSpan: Decodable, Equatable, Sendable {
+    let startUtf16: Int
+    let endUtf16: Int
+    let tokenIds: [Int]
+}
+
 // What one item of a request reads: input tokens and image tiles, each tile one vision pass.
+
 struct TokenCount: Decodable, Equatable, Sendable {
     var tokens = 0
     var tiles = 0
@@ -151,31 +130,66 @@ struct ModelInfo: Decodable, Sendable {
     let value: String
 }
 
-struct Reply: Decodable, Sendable {
-    let status: String?
-    let progress: Double?
-    let ready: Bool?
-    let modelId: String?
-    let setupMs: Double?
-    let modelName: String?
-    let cpuModel: String?
-    let architecture: String?
-    let questionTrees: Bool?  // several questions can share one pass
-    let settings: [ModelSetting]?
-    let info: [ModelInfo]?
-    let results: [ItemResult]?
-    let counts: [TokenCount]?  // in the request's item order
-    let elapsedMs: Double?
-    let error: String?
-    let speechParameters: [SpeechParameter]?
-    let audio: [SpeechAudio]?
-    let aneMs: Double?
-    let cloneMs: Double?
-    let audioMs: Double?
-    let voicePrompt: Data?
-    let seed: Int64?
-    let chunk: SpeechChunk?  // streamed speech, before its complete reply
-    let firstAudioMs: Double?
+struct CompletionRequest: Encodable, Sendable {
+    var prompt: [String]
+    var maxTokens = 16
+    var temperature = 1.0
+    var topK = 0
+    var topP = 1.0
+    var seed: Int64?
+    var batchSize: Int?
+    var stream = false
+    var count = false
+}
+
+struct CompletionMetrics: Decodable, Sendable {
+    let inputTokens: Int
+    let outputTokens: Int
+    let batchSize: Int
+}
+
+struct TextCompletion: Decodable, Sendable {
+    let text: String
+    let finishReason: String
+    let tokenIds: [Int]
+    let metrics: CompletionMetrics
+}
+
+struct CompletionDelta: Decodable, Sendable {
+    let index: Int
+    let text: String
+}
+
+struct CompletionChunk: Decodable, Sendable {
+    let choices: [CompletionDelta]
+}
+
+struct TextCompletions: Decodable, Sendable {
+    struct Timing: Decodable, Sendable { let elapsedMs: Double }
+    let choices: [TextCompletion]  // in prompt order
+    let metrics: Timing
+}
+
+// The loaded model, as its worker describes it once ready.
+struct ReadyReply: Decodable, Sendable {
+    let modelId: String
+    let modelName: String
+    let cpuModel: String
+    let architecture: String
+    let questionTrees: Bool  // several questions can share one pass
+    let settings: [ModelSetting]
+    let info: [ModelInfo]
+    let batchSizes: [Int]  // text completion only
+    let setupMs: Double
+}
+
+struct SpeechReply: Decodable, Sendable {
+    let audio: [SpeechAudio]  // in item order
+    let seed: Int64
+    let cloneMs: Double
+    let audioMs: Double
+    let aneMs: Double
+    let firstAudioMs: Double?  // streamed requests
 }
 
 enum SpeechValue: Codable, Sendable, Equatable {
@@ -199,9 +213,10 @@ enum SpeechValue: Codable, Sendable, Equatable {
 }
 
 struct SpeechParameter: Decodable, Identifiable, Sendable {
+    enum Kind: String, Decodable, Sendable { case int, float, bool, text, `enum` }
     let key: String
     let title: String
-    let type: String
+    let type: Kind
     let min: Double?
     let max: Double?
     let defaultValue: SpeechValue?
@@ -220,27 +235,25 @@ struct SpeechChoice: Decodable, Identifiable, Sendable {
     var id: String { value }
 }
 
+enum Requirement: String, Decodable, Sendable { case none, optional, required }
+
 struct SpeechMode: Decodable, Identifiable, Sendable {
     let id: String
     let title: String
-    let reference: String?
-    let referenceTranscript: String?
+    let reference: Requirement?  // absent: none
+    let referenceTranscript: Requirement?  // absent: used when available, recognized on-device otherwise
     let language: Bool?
     let instructionTitle: String?
     let instructionHint: String?
     let instructionRequired: Bool?
     let controls: [SpeechParameter]?
-    enum CodingKeys: String, CodingKey {
-        case id, title, reference, language, controls
-        case referenceTranscript = "reference_transcript"
-        case instructionTitle = "instruction_title", instructionHint = "instruction_hint"
-        case instructionRequired = "instruction_required"
-    }
 }
 
+// A speech model's modes and controls, bundled at build time so pickers work before setup.
 struct SpeechCapabilities: Decodable, Sendable {
     let modes: [SpeechMode]
-    let controls: [SpeechParameter]
+    let controls: [SpeechParameter]  // per item
+    let parameters: [SpeechParameter]  // per request
     let streaming: Bool?  // audio can play while one text is generated
 }
 
@@ -255,10 +268,6 @@ struct SpeechItem: Encodable, Sendable {
     var speed: Double?
     var mode: String?
     var controls: [String: SpeechValue]?
-    enum CodingKeys: String, CodingKey {
-        case text, language, instruct, duration, speed, mode, controls
-        case refAudio = "ref_audio", refText = "ref_text", voiceClonePrompt = "voice_clone_prompt"
-    }
 }
 
 struct SpeechRequest: Encodable, Sendable {
@@ -274,9 +283,6 @@ struct SpeechVoiceRequest: Encodable, Sendable {
     var refText: String?
     var preprocessPrompt: Bool?  // nil uses the model's default
     var mode: String? = nil
-    enum CodingKeys: String, CodingKey {
-        case operation, mode, refAudio = "ref_audio", refText = "ref_text", preprocessPrompt = "preprocess_prompt"
-    }
 }
 
 struct SpeechAudio: Decodable, Sendable {
@@ -293,24 +299,48 @@ struct SpeechChunk: Decodable, Sendable {
 
 @MainActor @Observable final class RuntimeState {
     nonisolated init() {}
-    var reply: Reply?
+    var reply: ReadyReply?
     var model: String?  // loaded, or being loaded
     var loading = false
     var status = "Preparing runtime…"
     var progress: Double?
 }
 
+extension Process {
+    // Darwin calls a termination handler that is set after the process exited, too.
+    func exited() async {
+        await withCheckedContinuation { continuation in terminationHandler = { _ in continuation.resume() } }
+    }
+}
+
+// Every worker message: status while loading, an error, a streamed piece, or else the reply itself.
+private struct Envelope: Decodable {
+    let status: String?
+    let progress: Double?
+    let error: String?
+    let chunk: SpeechChunk?
+    let completionChunk: CompletionChunk?
+}
+
 actor Runtime {
     static let shared = Runtime()
     @MainActor static var workerProcess: Process?
     nonisolated let state = RuntimeState()
-    static let logURL = FileManager.default.homeDirectoryForCurrentUser
-        .appending(path: "Library/Logs/tinkerbox-ane/demo.log")
+    static let logURL = URL.libraryDirectory.appending(path: "Logs/tinkerbox-ane/demo.log")
+    nonisolated static let encoder = {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        return encoder
+    }()
+    nonisolated static let decoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }()
     private var process: Process?
     private var input: Pipe?
-    private var output: Pipe?
     private var replies: AsyncLineSequence<FileHandle.AsyncBytes>.AsyncIterator?
-    private var readyReply: Reply?
+    private var readyReply: ReadyReply?
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private let idleTimeout: Duration
@@ -325,10 +355,10 @@ actor Runtime {
 
     var isConnected: Bool { readyReply != nil && process?.isRunning == true && replies != nil }
 
+    // Workers run in their own process group, so this also stops their native hosts.
     nonisolated static func stop(_ process: Process?, signal: Int32 = SIGTERM) {
         guard let process, process.isRunning else { return }
-        let pid = process.processIdentifier
-        kill(getpgid(pid) == pid ? -pid : pid, signal)
+        kill(-process.processIdentifier, signal)
     }
 
     // Each task remembers the UI's selection. Speech Shortcuts pass their own saved model per request.
@@ -352,7 +382,7 @@ actor Runtime {
         await acquire()
         defer { release() }
         UserDefaults.standard.set(model, forKey: "model.\(task.rawValue)")
-        if let asset { UserDefaults.standard.set(asset, forKey: "asset.\(model)") }
+        if let asset { Catalog.setLocalAsset(asset, for: model) }
         if readyReply?.modelId != model || asset != nil { await disconnect(graceful: true) }
     }
 
@@ -383,18 +413,14 @@ actor Runtime {
         }
         busy = false
         guard isConnected, let deadline = idleDeadline else { return }
-        idleTask = Task { [weak self] in
+        idleTask = Task {
             do { try await ContinuousClock().sleep(until: deadline) } catch { return }
-            await self?.unloadIfIdle()
+            guard !busy, idleDeadline == deadline else { return }
+            await unload()
         }
     }
 
-    private func unloadIfIdle() async {
-        guard !Task.isCancelled, !busy, let deadline = idleDeadline, .now >= deadline else { return }
-        await unload()
-    }
-
-    func start(model: String) async throws -> Reply {
+    func start(model: String) async throws -> ReadyReply {
         await acquire()
         defer { release() }
         try Task.checkCancellation()
@@ -402,17 +428,17 @@ actor Runtime {
     }
 
     // One model is loaded at a time; a request for another one replaces it.
-    private func prepare(model: String) async throws -> Reply {
-        if let readyReply, readyReply.modelId == model, process?.isRunning == true, replies != nil { return readyReply }
+    private func prepare(model: String) async throws -> ReadyReply {
+        if let readyReply, readyReply.modelId == model, isConnected { return readyReply }
         if let selected = Catalog.current(model),
            let issue = Catalog.availabilityIssue(for: selected, asset: Catalog.overrideAsset) {
-            throw DecisionError.invalid(issue)
+            throw TinkerboxError(issue)
         }
-        readyReply = nil
+        // The previous worker releases its Neural Engine memory before the next one loads.
+        await disconnect(graceful: true)
         await MainActor.run {
             state.model = model
             state.loading = true
-            state.reply = nil
             state.status = "Preparing runtime…"
             state.progress = nil
         }
@@ -424,20 +450,12 @@ actor Runtime {
         }
     }
 
-    private func launch(model: String) async throws -> Reply {
-        Self.stop(process)
-        input?.fileHandleForWriting.closeFile()
-        output?.fileHandleForReading.closeFile()
+    private func launch(model: String) async throws -> ReadyReply {
         let process = Process(), input = Pipe(), output = Pipe()
-        self.process = process
-        self.input = input
-        self.output = output
-        replies = output.fileHandleForReading.bytes.lines.makeAsyncIterator()
-        Self.configure(process, python: ["-u", Bundle.main.resourceURL!.appending(path: "worker.py").path])
+        Self.configure(process, python: ["-u", Bundle.main.url(forResource: "worker", withExtension: "py")!.path])
         process.environment!["TINKERBOX_MODEL"] = model
         process.environment!["TINKERBOX_CATALOG_UPDATES"] = Catalog.updatesEnvironment()
-        if process.environment!["TINKERBOX_ASSET"] == nil,
-           let asset = UserDefaults.standard.string(forKey: "asset.\(model)") {
+        if process.environment!["TINKERBOX_ASSET"] == nil, let asset = Catalog.localAsset(for: model) {
             process.environment!["TINKERBOX_ASSET"] = asset
         }
         try FileManager.default.createDirectory(at: Self.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -447,6 +465,11 @@ actor Runtime {
         process.standardInput = input
         process.standardOutput = output
         process.standardError = log
+        // A worker that crashes or is killed between requests stops counting as loaded.
+        process.terminationHandler = { process in Task { await Runtime.shared.exited(process) } }
+        self.process = process
+        self.input = input
+        replies = output.fileHandleForReading.bytes.lines.makeAsyncIterator()
         try await MainActor.run {
             try process.run()
             Runtime.workerProcess = process
@@ -455,23 +478,29 @@ actor Runtime {
         input.fileHandleForReading.closeFile()
         output.fileHandleForWriting.closeFile()
         while true {
-            let reply = try await readReply()
-            if let message = reply.status {
+            let line = try await nextLine()
+            let envelope = try Self.decoder.decode(Envelope.self, from: line)
+            if let error = envelope.error { throw TinkerboxError(error) }
+            if let status = envelope.status {
                 await MainActor.run {
-                    state.status = message
-                    state.progress = reply.progress
+                    state.status = status
+                    state.progress = envelope.progress
                 }
-            } else {
-                guard reply.ready == true else { throw DecisionError.invalidReply }
-                readyReply = reply
-                await MainActor.run {
-                    state.reply = reply
-                    state.loading = false
-                    state.progress = nil
-                }
-                return reply
+                continue
             }
+            let reply = try Self.decoder.decode(ReadyReply.self, from: line)
+            readyReply = reply
+            await MainActor.run {
+                state.reply = reply
+                state.loading = false
+                state.progress = nil
+            }
+            return reply
         }
+    }
+
+    private func exited(_ process: Process) async {
+        if process === self.process { await disconnect() }
     }
 
     // Runs Python with these arguments in the app's environment: its pinned tinkerbox-ane and dependencies.
@@ -480,7 +509,7 @@ actor Runtime {
         process.arguments = [
             "run", "--no-project", "--no-config", "--isolated", "--managed-python",
             "--python", "3.12", "--no-build", "--with-requirements",
-            Bundle.main.resourceURL!.appending(path: "requirements.txt").path, "python",
+            Bundle.main.url(forResource: "requirements", withExtension: "txt")!.path, "python",
         ] + arguments
         var environment = ProcessInfo.processInfo.environment
         for name in ["PYTHONPATH", "PYTHONHOME", "UV_INTERNAL__PARENT_INTERPRETER"] {
@@ -490,100 +519,110 @@ actor Runtime {
         // temporary buffers resident, about 1 GB, for a few percent of speed.
         environment["MallocLargeCache"] = "0"
         process.environment = environment
-        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        process.currentDirectoryURL = URL.homeDirectory
     }
 
     func decide(_ request: Request) async throws -> Decisions {
-        let reply = try await exchange(request)
-        guard let results = reply.results, let elapsed = reply.elapsedMs, results.count == request.items.count,
-              results.allSatisfy({ $0.answers.count == request.questions.count }) else {
-            throw DecisionError.invalidReply
-        }
-        return Decisions(results: results, elapsedMs: elapsed)
+        let model = Self.selectedModel(for: .decision)
+        var request = request
+        request.settings = Self.settings(for: model)
+        return try await exchange(request, model: model)
     }
 
     // What each item would read, from the same prompt and settings as a run, without running the model.
     func count(_ request: Request) async throws -> [TokenCount] {
+        let model = Self.selectedModel(for: .decision)
+        var request = request
+        request.settings = Self.settings(for: model)
+        request.count = true
+        return try await counts(request, model: model)
+    }
+
+    func count(_ request: CompletionRequest) async throws -> [TokenCount] {
         var request = request
         request.count = true
-        let reply = try await exchange(request)
-        guard let counts = reply.counts, counts.count == request.items.count else { throw DecisionError.invalidReply }
-        return counts
+        return try await counts(request, model: Self.selectedModel(for: .completion))
+    }
+
+    private struct Counts: Decodable { let counts: [TokenCount] }
+
+    private func counts(_ request: some Encodable & Sendable, model: String) async throws -> [TokenCount] {
+        let reply: Counts = try await exchange(request, model: model, load: false)
+        return reply.counts
+    }
+
+    // With `onText`, each prompt's new text arrives while it is generated, then the complete reply.
+    func complete(_ request: CompletionRequest,
+                  onText: (@Sendable ([CompletionDelta]) async -> Void)? = nil) async throws -> TextCompletions {
+        var request = request
+        request.stream = onText != nil
+        return try await exchange(request, model: Self.selectedModel(for: .completion)) { envelope in
+            if let chunk = envelope.completionChunk { await onText?(chunk.choices) }
+        }
     }
 
     // With `onAudio`, one text's pieces arrive in order while it is generated, then the complete reply.
     func speak(_ request: SpeechRequest, model: String? = nil,
-               onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil) async throws -> Reply {
+               onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil) async throws -> SpeechReply {
         var request = request
         request.stream = onAudio == nil ? nil : true
-        return try await speechReply(request, model: model, onAudio: onAudio)
+        return try await exchange(request, model: model ?? Self.selectedModel(for: .speech)) { envelope in
+            if let chunk = envelope.chunk { await onAudio?(chunk) }
+        }
     }
 
     func createVoice(_ request: SpeechVoiceRequest, model: String? = nil) async throws -> Data {
-        let reply = try await speechReply(request, model: model)
-        guard let prompt = reply.voicePrompt else { throw DecisionError.invalidReply }
-        return prompt
+        struct Voice: Decodable { let voicePrompt: Data }
+        let reply: Voice = try await exchange(request, model: model ?? Self.selectedModel(for: .speech))
+        return reply.voicePrompt
     }
 
-    private func speechReply<R: Encodable>(_ request: R, model: String? = nil,
-                                           onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil) async throws -> Reply {
+    // Raw input only, with the loaded model's tokenizer.
+    func tokenSpans(_ text: String, model: String) async throws -> [TokenSpan] {
+        struct Tokenize: Encodable, Sendable {
+            let operation = "tokenize"
+            let text: String
+        }
+        struct Spans: Decodable { let tokenSpans: [TokenSpan] }
+        let reply: Spans = try await exchange(Tokenize(text: text), model: model, load: false)
+        return reply.tokenSpans
+    }
+
+    // One request and its reply. Previews (`load: false`) never load a model or extend its idle timeout.
+    // Streamed pieces go to `onPiece` until the reply; the exchange drains them even if no one listens.
+    private func exchange<T: Decodable>(_ request: some Encodable & Sendable, model: String, load: Bool = true,
+                                        onPiece: ((Envelope) async -> Void)? = nil) async throws -> T {
         await acquire()
-        defer { release() }
+        defer { release(activity: load) }
         try Task.checkCancellation()
-        _ = try await prepare(model: model ?? Self.selectedModel(for: .speech))
-        var data = try JSONEncoder().encode(request)
-        data.append(10)
-        do { try input!.fileHandleForWriting.write(contentsOf: data) } catch {
+        if load {
+            _ = try await prepare(model: model)
+        } else if !isConnected || readyReply?.modelId != model {
+            throw TinkerboxError("Load the model to preview its tokens.")
+        }
+        do { try input!.fileHandleForWriting.write(contentsOf: try Self.encoder.encode(request) + [10]) } catch {
             await disconnect()
             throw Self.stopped()
         }
         while true {
-            let reply = try await readReply()
-            guard let chunk = reply.chunk else { return reply }
-            // Keep reading after a caller stops listening: the complete reply ends the exchange.
-            await onAudio?(chunk)
+            let line = try await nextLine()
+            let envelope = try Self.decoder.decode(Envelope.self, from: line)
+            if let error = envelope.error { throw TinkerboxError(error) }
+            if envelope.chunk != nil || envelope.completionChunk != nil {
+                await onPiece?(envelope)
+                continue
+            }
+            return try Self.decoder.decode(T.self, from: line)
         }
     }
 
-    // Sends one request to the decision model, with its saved settings, and reads its reply.
-    private func exchange(_ request: Request) async throws -> Reply {
-        try request.validate()
-        await acquire()
-        defer { release(activity: !request.count) }
-        try Task.checkCancellation()
-        let model = Self.selectedModel(for: .decision)
-        if request.count {
-            guard isConnected, readyReply?.modelId == model else {
-                throw DecisionError.invalid("Load a model before counting tokens.")
-            }
-        } else {
-            _ = try await prepare(model: model)
-        }
-        var request = request
-        request.settings = Self.settings(for: model)
-        var data = try JSONEncoder().encode(request)
-        data.append(10)
-        do { try input!.fileHandleForWriting.write(contentsOf: data) } catch {
+    private func nextLine() async throws -> Data {
+        guard var replies, let line = try await replies.next() else {
             await disconnect()
             throw Self.stopped()
         }
-        return try await readReply()
-    }
-
-    private func readReply() async throws -> Reply {
-        let reply: Reply
-        do {
-            guard var replies, let line = try await replies.next() else { throw Self.stopped() }
-            self.replies = replies
-            reply = try JSONDecoder().decode(Reply.self, from: Data(line.utf8))
-        } catch {
-            await disconnect()
-            throw error
-        }
-        if let error = reply.error {
-            throw NSError(domain: "Tinkerbox", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
-        }
-        return reply
+        self.replies = replies
+        return Data(line.utf8)
     }
 
     private func disconnect(graceful: Bool = false) async {
@@ -593,11 +632,9 @@ actor Runtime {
         replies = nil
         readyReply = nil
         input?.fileHandleForWriting.closeFile()
-        output?.fileHandleForReading.closeFile()
+        input = nil
         let process = self.process
         self.process = nil
-        input = nil
-        output = nil
         if let process, process.isRunning {
             if !graceful { Self.stop(process) }
             // EOF lets the worker close its native host and ANE resources. Bound shutdown if stuck.
@@ -605,7 +642,7 @@ actor Runtime {
                 do { try await Task.sleep(for: .seconds(12)) } catch { return }
                 Self.stop(process, signal: SIGKILL)
             }
-            await Task.detached { process.waitUntilExit() }.value
+            await process.exited()
             watchdog.cancel()
         }
         await MainActor.run {
@@ -617,9 +654,8 @@ actor Runtime {
         }
     }
 
-    private static func stopped() -> NSError {
-        let details = (try? String(contentsOf: logURL, encoding: .utf8))?.suffix(2000) ?? ""
-        return NSError(domain: "Tinkerbox", code: 2,
-                       userInfo: [NSLocalizedDescriptionKey: "The runtime stopped.\n\(details)"])
+    private static func stopped() -> TinkerboxError {
+        let lines = ((try? String(contentsOf: logURL, encoding: .utf8)) ?? "").split(separator: "\n").suffix(10)
+        return TinkerboxError("The model process quit unexpectedly. From \(logURL.path):\n\(lines.joined(separator: "\n"))")
     }
 }
