@@ -413,6 +413,13 @@ class Speech:
     generation_parameters = staticmethod(validate)
     load_voice_clone_prompt = staticmethod(VoiceClonePrompt.load)
 
+    def token_spans(self, text):
+        """Visible raw-input tokens, before speech conditioning or audio tokens."""
+        from tinkerbox_ane.tokenization import token_spans
+
+        with self._lock:
+            return token_spans(self.tokenizer, text)
+
     def transcribe(self, audio, *, locale=None):
         return transcribe(audio, locale=locale)
 

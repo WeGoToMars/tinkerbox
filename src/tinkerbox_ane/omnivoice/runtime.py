@@ -300,6 +300,13 @@ class Speech:
     def supported_language_names(self):
         return self.engine.supported_language_names()
 
+    def token_spans(self, text):
+        """Visible raw-input tokens, before speech conditioning or audio tokens."""
+        from tinkerbox_ane.tokenization import token_spans
+
+        with self._lock:
+            return token_spans(self.engine.text_tokenizer, text)
+
     def transcribe(self, audio, *, locale=None):
         with self._lock:
             return transcribe(audio, locale=locale)

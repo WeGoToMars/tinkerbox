@@ -262,6 +262,15 @@ def load(asset: Path):
                      "usage": {"input_tokens": read, "output_tokens": 0, **compute}}
                     for (_, named, _), (questions, probs, read, compute) in zip(requests, done)]
 
+        def token_spans(self, text):
+            """Visible raw-input tokens, excluding task templates and image tokens."""
+            from tinkerbox_ane.tokenization import token_spans
+
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("the model is closed")
+                return token_spans(self._tokenizer, text)
+
         def count_tokens(self, state, questions, images=None) -> dict:
             """Input tokens and vision passes `system_one` would use, without running the model, and how
             each picture is fed to it (see `VisionPipeline.layout`)."""
