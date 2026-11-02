@@ -11,12 +11,10 @@ from importlib.machinery import SOURCE_SUFFIXES, FileFinder, SourceFileLoader
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import sys
 import tempfile
 import types
-import warnings
 
 from tinkerbox_ane.coreai import compile_asset, source_hash, verify_aot
 
@@ -27,14 +25,10 @@ CACHE = Path.home() / "Library/Caches/tinkerbox-ane/models"
 def download_bundle(model: str, repo: str, revision: str, progress=None, *, subfolder: str = "") -> Path:
     from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
-    from tinkerbox_ane.host import chip_name, device_architecture, validate_architecture
+    from tinkerbox_ane.host import device_architecture
 
     architecture = device_architecture()
-    validate_architecture(architecture)
-
-    if subfolder and ("\\" in subfolder or any(p in {"", ".", ".."} for p in subfolder.split("/"))):
-        raise ValueError("subfolder must be a relative repository directory")
-    folder = f"{subfolder}/macos27/{architecture}" if subfolder else f"macos27/{architecture}"
+    folder = "/".join(filter(None, (subfolder, "macos27", architecture)))
     root = CACHE / model / revision
     bundle = root / "macos27" / architecture
 
@@ -46,37 +40,28 @@ def download_bundle(model: str, repo: str, revision: str, progress=None, *, subf
         if subfolder:
             bundle.parent.mkdir(parents=True, exist_ok=True)
             replace_directory(root / folder, bundle)
+            shutil.rmtree(root / subfolder.split("/")[0])
 
-    try:
-        if progress is None:
-            fetch()
-        else:
-            # List this bundle directly: repository-wide metadata can truncate large multi-model repos.
-            files = HfApi().list_repo_tree(repo, path_in_repo=folder, revision=revision, recursive=True)
-            total = sum(getattr(f, "size", 0) or 0 for f in files)
-            with ThreadPoolExecutor(1) as pool:
-                done = pool.submit(fetch)
-                # Partial files grow under the local cache folder until they are moved into place.
-                while wait([done], timeout=0.5).not_done:
-                    progress(sum(p.stat().st_size for p in root.rglob("*") if p.is_file()), total)
-                done.result()
-            progress(total, total)
-    except Exception as error:
-        # Offline, or installed with install_bundle() before the revision is published.
-        if not (bundle / "model.json").is_file():
-            raise
-        warnings.warn(f"using cached {bundle}: {error}", stacklevel=2)
+    if progress is None:
+        fetch()
         return bundle
-    if not (bundle / "model.json").is_file():
-        chip = chip_name(architecture)
-        raise RuntimeError(f"Failed to download AOT bundle for {chip} ({architecture}) from {repo}@{revision}.")
+    # A multi-model repository holds other bundles too, so size only this one.
+    total = sum(f.size for f in HfApi().list_repo_tree(repo, path_in_repo=folder, revision=revision, recursive=True)
+                if hasattr(f, "size"))
+    with ThreadPoolExecutor(1) as pool:
+        done = pool.submit(fetch)
+        # Partial files grow under the local cache folder until they are moved into place.
+        while wait([done], timeout=0.5).not_done:
+            progress(sum(p.stat().st_size for p in root.rglob("*") if p.is_file()), total)
+        done.result()
+    progress(total, total)
     return bundle
 
 
 def install_bundle(model: str, revision: str, source: Path, kind: str) -> Path:
     """Copy a locally compiled bundle into the cache where download_bundle() expects that revision."""
-    spec = read_bundle(source, kind)
-    if not compiled(spec) or not spec.get("architecture"):
+    spec = verify_bundle(source, kind)
+    if not compiled(spec):
         raise ValueError("install requires a compiled bundle; compile the export first")
     target = CACHE / model / revision / "macos27" / spec["architecture"]
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -207,12 +192,6 @@ def checkpoint_modules(checkpoint: Path, package: str, *names: str) -> list[type
     return [importlib.import_module(f"{package}.{name}") for name in names]
 
 
-def check_asset_name(name: str) -> None:
-    if (not name or name != Path(name).name or "\\" in name or name in {".", ".."}
-            or Path(name).suffix not in {".aimodel", ".aimodelc"}):
-        raise ValueError(f"unsafe or unsupported asset path: {name!r}")
-
-
 def resources(spec: dict) -> list[tuple[dict, str, str]]:
     """Each Core AI asset as (manifest entry, name key, identity key): the text asset, or one per
     stage, then the vision tower."""
@@ -232,57 +211,37 @@ def compiled(spec: dict) -> bool:
 
 
 def read_bundle(root: Path, kind: str) -> dict:
-    """The manifest after checking its kind and each asset's identity and placement.
-
-    Model-specific fields are validated by the runtime that uses them."""
-    root = Path(root)
-    spec = json.loads((root / "model.json").read_text())
+    """The manifest after checking its kind and version; each runtime reads the fields it uses."""
+    spec = json.loads((Path(root) / "model.json").read_text())
     if spec.get("kind") != kind or spec.get("version") != 2:
         raise ValueError("unsupported bundle manifest; re-export and compile the model")
-    if not resources(spec) or ("asset" in spec) == ("assets" in spec):
-        raise ValueError("bundle needs one text asset or a list of stage assets")
-    names = asset_names(spec)
-    if len(set(names)) != len(names):
-        raise ValueError("bundle assets must be distinct")
-    for entry, name, identity in resources(spec):
-        check_asset_name(entry[name])
-        expected = entry[identity]
-        if (not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)
-                or source_hash(root / entry[name]) != expected):
-            raise ValueError(f"bundle {name} source identity mismatch")
-        if Path(entry[name]).suffix == ".aimodelc":
-            verify_aot(root / entry[name], expected)
     return spec
 
 
-def compile_bundle(
-    source: Path,
-    out: Path,
-    kind: str,
-    architecture: str | None = None,
-    force: bool = False,
-    allow_unsupported: bool = False,
-) -> Path:
+def verify_bundle(root: Path, kind: str) -> dict:
+    """The manifest after checking each asset's source identity and, once compiled, full ANE placement."""
+    spec = read_bundle(root, kind)
+    for entry, name, identity in resources(spec):
+        if Path(entry[name]).suffix == ".aimodelc":
+            verify_aot(Path(root) / entry[name], entry[identity])
+        elif source_hash(Path(root) / entry[name]) != entry[identity]:
+            raise ValueError(f"bundle {name} source identity mismatch")
+    return spec
+
+
+def compile_bundle(source: Path, out: Path, kind: str, architecture: str | None = None, force: bool = False) -> Path:
     """Compile an exported bundle for one architecture, then write its manifest after verification."""
     from tinkerbox_ane.host import device_architecture, validate_architecture
 
     source, out = Path(source).resolve(), Path(out).resolve()
-    if source == out:
-        raise ValueError("keep source exports and deployment bundles in separate directories")
-    spec = read_bundle(source, kind)
+    spec = verify_bundle(source, kind)
     if any(Path(name).suffix != ".aimodel" for name in asset_names(spec)):
         raise ValueError("compile requires a source .aimodel bundle")
     checkpoint = bundled_checkpoint(source)
-    checkpoint_hash = checkpoint_digest(checkpoint)
-    if spec.get("checkpoint_hash") != checkpoint_hash:
+    if spec.get("checkpoint_hash") != checkpoint_digest(checkpoint):
         raise ValueError("checkpoint identity mismatch; re-export the bundle")
-    if architecture is None:
-        architecture = device_architecture()
-    if (not architecture or Path(architecture).name != architecture
-            or "\\" in architecture or architecture in {".", ".."}):
-        raise ValueError(f"invalid architecture: {architecture!r}")
-    if not allow_unsupported:
-        validate_architecture(architecture)
+    architecture = architecture or device_architecture()
+    validate_architecture(architecture)
     # Keep verified stages after a compiler failure, without touching the deployment bundle.
     build = out.with_name(f".{out.name}.build")
     identity = {"source": spec, "architecture": architecture, "force": force}

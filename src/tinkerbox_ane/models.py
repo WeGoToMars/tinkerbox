@@ -34,16 +34,12 @@ def cached(model: str) -> Path:
 
 def download(model: str, progress=None) -> Path:
     """Fetch the AOT bundle for this Mac; `progress(done_bytes, total_bytes)` reports the download."""
-    from tinkerbox_ane.bundle import CACHE, download_bundle
-    from tinkerbox_ane.host import device_architecture
+    from tinkerbox_ane.bundle import download_bundle
 
-    item = entry(model)
-    # Downloaded or locally installed: the manifest is written last, so a bundle that has one is complete.
-    bundle = CACHE / model / item["revision"] / "macos27" / device_architecture()
+    item, bundle = entry(model), cached(model)
+    # The manifest is written last, so a bundle that has one is complete.
     if (bundle / "model.json").is_file():
         return bundle
-    if item.get('architectures') == []:
-        raise ValueError(f"{model} has no published bundles; export and compile it, then pass the bundle to load()")
     return download_bundle(item["id"], item["repo"], item["revision"], progress,
                            subfolder=item.get("subfolder", ""))
 

@@ -1,6 +1,6 @@
 """Helpers for compiling multi-architecture models and publishing releases to Hugging Face Hub."""
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 import json
 import logging
 from pathlib import Path
@@ -9,7 +9,7 @@ import time
 
 
 def build_architectures(
-    compile_model: Callable[..., Path],
+    kind: str,
     source: Path,
     out: Path,
     architectures: Iterable[str],
@@ -17,7 +17,9 @@ def build_architectures(
     force: bool = False,
     continue_on_error: bool = False,
 ) -> dict[str, Path]:
-    """Compile a model across target architectures and return paths to successful bundles."""
+    """Compile an export into `out/<architecture>` for each target; returns the bundles that compiled."""
+    from tinkerbox_ane.bundle import compile_bundle
+
     architectures = list(dict.fromkeys(architectures))
     started = time.monotonic()
     print(f"Building {len(architectures)} architectures: {', '.join(architectures)}", flush=True)
@@ -27,10 +29,7 @@ def build_architectures(
         architecture_started = time.monotonic()
         print(f"{label}: preparing bundle", flush=True)
         try:
-            bundles[architecture] = compile_model(
-                source=source, out=Path(out) / architecture,
-                architecture=architecture, force=force,
-            )
+            bundles[architecture] = compile_bundle(source, Path(out) / architecture, kind, architecture, force)
         except Exception as error:
             print(f"{label}: failed after {time.monotonic() - architecture_started:.1f}s: {error}", flush=True)
             if not continue_on_error:
@@ -62,8 +61,6 @@ def upload_to_hub(
     """
     from huggingface_hub import HfApi
 
-    if tag is not None and not tag.strip():
-        raise ValueError("tag must not be empty")
     api = HfApi(token=token)
     api.create_repo(repo, repo_type="model", exist_ok=True)
     if tag is not None and any(ref.name == tag for ref in api.list_repo_refs(repo).tags):
@@ -90,7 +87,7 @@ def prepare_release(
 
     Release metadata (LICENSE, NOTICE, README.md) comes from `metadata_dir`, or else from staging and
     then the repository root; `license_file` is the LICENSE source relative to that directory."""
-    from tinkerbox_ane.bundle import CHECKPOINT, asset_names, bundled_checkpoint, checkpoint_digest, read_bundle, resources
+    from tinkerbox_ane.bundle import CHECKPOINT, asset_names, bundled_checkpoint, checkpoint_digest, resources, verify_bundle
 
     staging = Path(staging)
     if architectures is None:
@@ -101,7 +98,7 @@ def prepare_release(
     bundles = {}
     for architecture in architectures:
         directory = staging / "macos27" / architecture
-        spec = read_bundle(directory, kind)
+        spec = verify_bundle(directory, kind)
         names = asset_names(spec)
         if (spec.get("architecture") != architecture
                 or any(not name.endswith(f".{architecture}.aimodelc") for name in names)):
@@ -157,17 +154,18 @@ def upload_release(
     return upload_to_hub(repo, staging, tag, allow_patterns=patterns, delete_patterns=["macos27/**"], token=token)
 
 
-def release_main(model: str, kind: str, source: Path, expected_source: dict, license_file: str, argv=None) -> int:
+def release_main(model: str, kind: str, source: Path | None, expected_source: dict, license_file: str,
+                 argv=None) -> int:
     """Command line that compiles, stages and publishes a model's bundles; returns 1 if any target failed."""
     import argparse
 
-    from tinkerbox_ane.bundle import compile_bundle, read_bundle
+    from tinkerbox_ane.bundle import read_bundle
     from tinkerbox_ane.host import SUPPORTED_ARCHITECTURES
     from tinkerbox_ane.models import entry
 
     item = entry(model)
     parser = argparse.ArgumentParser(description=f"Compile, stage and publish {item['name']} bundles to Hugging Face Hub.")
-    parser.add_argument('--source', type=Path, default=source)
+    parser.add_argument('--source', type=Path, default=source, required=source is None)
     parser.add_argument('--staging', type=Path,
                         default=Path('artifacts/huggingface') / item['repo'].split('/')[-1])
     parser.add_argument('--repo', default=item['repo'])
@@ -184,8 +182,7 @@ def release_main(model: str, kind: str, source: Path, expected_source: dict, lic
     if not args.upload_only:
         if read_bundle(args.source, kind)['source'] != expected_source:
             raise ValueError(f"export source does not match {item['name']}")
-        compile_model = lambda source, out, architecture, force: compile_bundle(source, out, kind, architecture, force=force)
-        architectures = list(build_architectures(compile_model, args.source, args.staging / 'macos27', args.arch,
+        architectures = list(build_architectures(kind, args.source, args.staging / 'macos27', args.arch,
                                                  force=args.force, continue_on_error=args.continue_on_error))
     metadata = dict(license_file=license_file, expected_source=expected_source, architectures=architectures,
                     metadata_dir=args.metadata)

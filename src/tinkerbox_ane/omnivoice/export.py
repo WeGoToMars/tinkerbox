@@ -14,7 +14,7 @@ from tinkerbox_ane.architectures.qwen3 import Backbone, Config
 from tinkerbox_ane.architectures.attention import BlockAttention
 from tinkerbox_ane.architectures.dac import Decoder
 from tinkerbox_ane.coreai import source_hash
-from tinkerbox_ane.bundle import checkpoint_digest, compile_bundle, write_checkpoint
+from tinkerbox_ane.bundle import checkpoint_digest, write_checkpoint
 from . import KIND, REPO, REVISION, SOURCE, checkpoint
 
 
@@ -187,10 +187,6 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4, short_capa
     return out
 
 
-def compile(source, out, architecture=None, *, force=False):
-    return compile_bundle(source, out, KIND, architecture, force=force)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, default=SOURCE)
@@ -198,12 +194,8 @@ def main():
     parser.add_argument('--capacities', type=int, nargs='+', default=list(CAPACITIES))
     parser.add_argument('--short-capacities', type=int, nargs='+', default=list(SHORT_CAPACITIES))
     parser.add_argument('--splits', type=int, default=4)
-    parser.add_argument('--compile-to', type=Path)
-    parser.add_argument('--architecture')
     args = parser.parse_args()
     export(args.out, args.checkpoint, tuple(args.capacities), args.splits, tuple(args.short_capacities))
-    if args.compile_to:
-        compile(args.out, args.compile_to, args.architecture)
 
 
 if __name__ == '__main__':

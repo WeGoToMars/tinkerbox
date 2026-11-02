@@ -37,8 +37,6 @@ def silu(x: torch.Tensor, scale: float) -> torch.Tensor:
 
 
 class MLP(nn.Module):
-    splits = 8
-
     def __init__(self, hidden: int, ffn: int, scale: float, *, splits: int = 8):
         super().__init__()
         if splits <= 0 or ffn % splits:

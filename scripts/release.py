@@ -1,4 +1,4 @@
-"""Prepare a release locally: preflight checks, tests on the Neural Engine, and an annotated tag.
+"""Prepare a release locally: preflight checks, every test on the Neural Engine, and an annotated tag.
 
 Push the tag, then run the manual Publish to PyPI workflow. Build and upload the signed app
 separately. `--verify TAG` runs only the preflight checks, as CI does.
@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +49,15 @@ def check_catalog(version: str) -> None:
         print(f"✓ {model['id']}: {model['repo']}@{model['revision']}")
 
 
+def test() -> None:
+    """Run the suite through the watchdog; model tests skip without a bundle, which a release does not allow."""
+    report = ROOT / "artifacts/validation" / f"release-{time.strftime('%Y%m%d-%H%M%S')}"
+    run("uv", "run", "python", "-m", "tinkerbox_ane.guard", str(report), "--", "uv", "run", "pytest", "-q", "-rs")
+    summary = report.with_suffix(".log").read_text().strip().splitlines()[-1]
+    if "skipped" in summary:
+        fail(f"{summary}; install every catalog bundle for this Mac before releasing")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-tests", action="store_true")
@@ -70,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         fail(f"tag {tag} already exists")
     check_catalog(version)
     if not args.skip_tests:
-        run("uv", "run", "pytest", "-q")
+        test()
     run("git", "tag", "-a", tag, "-m", f"Release {tag}")
 
     print(f"""
@@ -82,6 +92,7 @@ Prepared {tag}. After review, push it and run the manual PyPI workflow:
 Build and upload the signed app separately.
 """)
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

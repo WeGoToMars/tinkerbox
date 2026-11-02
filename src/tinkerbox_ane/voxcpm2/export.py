@@ -11,8 +11,8 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from tinkerbox_ane.architectures.minicpm import Config, Transformer
-from tinkerbox_ane.bundle import compile_bundle, write_checkpoint, checkpoint_digest
-from tinkerbox_ane.coreai import source_hash
+from tinkerbox_ane.bundle import write_checkpoint, checkpoint_digest
+from tinkerbox_ane.coreai import compress, source_hash
 from . import KIND, REPO, REVISION, UPSTREAM_REVISION, SOURCE, checkpoint
 from .codec import AudioVAE, AudioVAEConfig, fold_weight_norm
 
@@ -48,20 +48,6 @@ BASE_GROUP = 28
 INT8_ROLES = ('residual', 'encoder', 'dit')
 MAIN_WEIGHTS = ('float16', 'lut8-group32')
 
-
-def compress(program, weights):
-    from coreai_opt.coreai_utils import CompressionGranularity, DType, palettize_weights, quantize_weights
-    if weights == 'int8-per-channel':
-        quantize_weights(program, dtype=DType.INT8, granularity=CompressionGranularity.PER_CHANNEL,
-                         weight_num_threshold=2048, in_place=True)
-    elif weights == 'lut8-group32':
-        palettize_weights(program, lut_dtype=None, n_bits=8, granularity=CompressionGranularity.PER_GROUPED_CHANNEL,
-                          group_size=32, weight_num_threshold=2048, in_place=True)
-    else:
-        return program
-    with program._module:  # Core AI optimizes the program when its module context exits.
-        pass
-    return program
 # Uncached widths. The encoder reads one patch (special token plus four frames)
 # while decoding and packs reference patches for prompts. The diffusion
 # transformer evaluates its guided and unguided rows (two mu, time, four
@@ -205,12 +191,8 @@ def main():
     parser.add_argument('--stages', nargs='+')
     parser.add_argument('--base-group', type=int, default=BASE_GROUP, help='main-model layers per asset')
     parser.add_argument('--main-weights', choices=MAIN_WEIGHTS, default='float16')
-    parser.add_argument('--compile-to', type=Path)
-    parser.add_argument('--architecture')
     args = parser.parse_args()
     export(args.out, args.checkpoint, tuple(args.capacities), args.stages, args.base_group, args.main_weights)
-    if args.compile_to:
-        compile_bundle(args.out, args.compile_to, KIND, args.architecture)
 
 
 if __name__ == '__main__':
