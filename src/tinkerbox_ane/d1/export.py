@@ -10,10 +10,10 @@ import time
 import torch
 from coreai_torch import TorchConverter, get_decomp_table
 
-from tinkerbox_ane.coreai import count_flops, source_hash
+from tinkerbox_ane.coreai import asset_metadata, count_flops, source_hash
 from tinkerbox_ane.bundle import checkpoint_digest, write_checkpoint
-from tinkerbox_ane.d1 import (CHUNK, CONTEXT, INPUT, KIND, OUTPUT, REPO, REVISION, RUNTIME_TENSORS, SOURCE, TIERS,
-                              checkpoint)
+from tinkerbox_ane.d1 import (CHUNK, CONTEXT, INPUT, KIND, MODEL, OUTPUT, REPO, REVISION, RUNTIME_TENSORS, SOURCE,
+                              TIERS, checkpoint)
 from tinkerbox_ane.d1.model import FusedBackbone, load_weights
 from tinkerbox_ane.d1.vision import export_vision_asset, load_vision_tower
 
@@ -41,7 +41,7 @@ def export(out: Path = SOURCE) -> Path:
             )
             print(f"staged c{capacity} ({time.monotonic() - started:.1f}s)", flush=True)
     asset = out / "fused.aimodel"
-    converter.to_coreai().save_asset(asset)
+    converter.to_coreai().save_asset(asset, metadata=asset_metadata(MODEL))
     manifest = {
         "kind": KIND, "version": 2, "width": CHUNK, "context": CONTEXT,
         "hidden": cfg.hidden, "heads": cfg.heads, "kv_heads": cfg.kv_heads,

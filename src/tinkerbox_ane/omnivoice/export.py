@@ -13,9 +13,9 @@ from tinkerbox_ane.blocks import conv1x1
 from tinkerbox_ane.architectures.qwen3 import Backbone, Config
 from tinkerbox_ane.architectures.attention import BlockAttention
 from tinkerbox_ane.architectures.dac import Decoder
-from tinkerbox_ane.coreai import source_hash
+from tinkerbox_ane.coreai import asset_metadata, source_hash
 from tinkerbox_ane.bundle import checkpoint_digest, write_checkpoint
-from . import KIND, REPO, REVISION, SOURCE, checkpoint
+from . import KIND, MODEL, REPO, REVISION, SOURCE, checkpoint
 
 
 class Diffusion(nn.Module):
@@ -95,7 +95,7 @@ def export_codec(out, weights):
             decoder, export_fn=lambda value: torch.export.export(value, inputs).run_decompositions(get_decomp_table()),
             input_names=['hidden', 'mask'], output_names=['audio'], entrypoint_name=function)
     asset = Path(out) / 'codec.aimodel'
-    converter.to_coreai().save_asset(asset)
+    converter.to_coreai().save_asset(asset, metadata=asset_metadata(MODEL))
     stage = dict(role='codec', asset=asset.name, source_hash=source_hash(asset), functions=[function])
     return stage, dict(codec_width=CODEC_WIDTH, codec_overlap=CODEC_OVERLAP, codec_hop=decoder.hop)
 
@@ -155,7 +155,7 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4, short_capa
         add(Output(model), (zeros(1, cfg.hidden, 1, WIDTH),), ['hidden'], 'omnivoice_output', output='logits')
     out.mkdir(parents=True, exist_ok=True)
     asset = out / 'diffusion.aimodel'
-    converter.to_coreai().save_asset(asset)
+    converter.to_coreai().save_asset(asset, metadata=asset_metadata(MODEL))
     long_functions = list(functions)
     converter, functions = TorchConverter(), []
     with torch.no_grad():
@@ -167,7 +167,7 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, splits=4, short_capa
                 ['hidden', 'cos', 'sin', 'mask'], name, output='logits')
             short_functions.append(name)
     short_asset = out / 'short.aimodel'
-    converter.to_coreai().save_asset(short_asset)
+    converter.to_coreai().save_asset(short_asset, metadata=asset_metadata(MODEL))
     codec, codec_fields = export_codec(out, weights)
     cpu = write_checkpoint(weights, out, ['llm.embed_tokens.weight', 'audio_embeddings.weight'])
     spec = dict(kind=KIND, version=2, assets=[

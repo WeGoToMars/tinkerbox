@@ -47,7 +47,7 @@ Compilation runs under the watchdog, verifies source identity, function manifest
 | VoxCPM2 | `python -m tinkerbox_ane.voxcpm2.export` (to `artifacts/voxcpm2/export`); `--main-weights` selects LUT8 |
 | GPT-2 | `python -m tinkerbox_ane.gpt2.export gpt2 --batch-sizes 1 4 8 --out artifacts/gpt2/export` |
 
-`--checkpoint` selects a local upstream checkpoint. GPT-2 takes any size (`gpt2-medium`, `gpt2-large`, `gpt2-xl`) and `--weights int8-per-channel` or `lut8-group32`. Each export writes a `checkpoint` folder with the tokenizer, configuration and CPU weights, and records its hash; compilation and publishing check it.
+`--checkpoint` selects a local upstream checkpoint. GPT-2 takes any size (`gpt2-medium`, `gpt2-large`, `gpt2-xl`) and `--weights int8-per-channel` or `lut8-group32`. Each export writes a `checkpoint` folder with the tokenizer, configuration and CPU weights, and records its hash; compilation and publishing check it. Each Core AI asset carries its catalog entry's publisher, license and summary as asset metadata, which compiled assets keep, so register a model before exporting it.
 
 To use a bundle locally before publishing:
 

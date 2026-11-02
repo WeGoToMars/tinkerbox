@@ -241,3 +241,20 @@ def test_publish_rejects_changed_cpu_checkpoint(release):
     (staging / "macos27/h17s/checkpoint/model.safetensors").write_bytes(b"other tensors")
     with pytest.raises(ValueError, match="checkpoint identity mismatch"):
         upload(staging, metadata_dir=metadata)
+
+
+def test_exported_assets_describe_their_catalog_variant(tmp_path):
+    import torch
+    from coreai.authoring.asset import AIModelAsset
+    from coreai_torch import TorchConverter, get_decomp_table
+
+    inputs = (torch.zeros(1, 4, dtype=torch.float16),)
+    program = torch.export.export(torch.nn.Linear(4, 4).half().eval(), inputs).run_decompositions(get_decomp_table())
+    converter = TorchConverter()
+    converter.add_exported_program(program, input_names=["x"], output_names=["y"], entrypoint_name="main")
+    asset = tmp_path / "decoder.aimodel"
+    converter.to_coreai().save_asset(asset, metadata=coreai.asset_metadata("gpt2-xl", "lut8-group32"))
+    metadata = AIModelAsset.load(asset).metadata
+    assert (metadata.author, metadata.license) == ("OpenAI", "MIT")
+    assert metadata.model_description.startswith("GPT-2 XL LUT8: ")
+    assert metadata.creator_defined_metadata == {"model": "gpt2-xl-lut8", "original_model": "openai-community/gpt2-xl"}

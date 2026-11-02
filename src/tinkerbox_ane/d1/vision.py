@@ -12,8 +12,8 @@ from safetensors import safe_open
 from transformers import AutoConfig, AutoModel, Lfm2VlConfig, Lfm2VlProcessor
 from transformers.models.lfm2_vl.modeling_lfm2_vl import Lfm2VlMultiModalProjector
 
-from tinkerbox_ane.coreai import count_flops, source_hash
-from tinkerbox_ane.d1 import RESIDUAL_SCALE
+from tinkerbox_ane.coreai import asset_metadata, count_flops, source_hash
+from tinkerbox_ane.d1 import MODEL, RESIDUAL_SCALE
 
 MAX_PATCHES = 1024
 PATCH_DIM = 768
@@ -95,7 +95,7 @@ def export_vision_asset(tower: VisionTower, out_path: Path) -> tuple[str, dict[s
             entrypoint_name="main",
         )
         coreai_model = converter.to_coreai()
-    coreai_model.save_asset(out_path)
+    coreai_model.save_asset(out_path, metadata=asset_metadata(MODEL))
     return source_hash(out_path), flops
 
 

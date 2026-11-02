@@ -38,6 +38,26 @@ def count_flops(module, inputs) -> int:
     return counter.get_total_flops()
 
 
+# Catalog IDs of compressed variants end in their weight format's short name.
+VARIANT_SUFFIXES = {"float16": "", "int8-per-channel": "-int8", "lut8-group32": "-lut8"}
+
+
+def asset_metadata(model: str, weights: str = "float16"):
+    """Core AI metadata for an asset of a catalog model, in the weight format its variant stores: publisher,
+    license, description, and the catalog and upstream IDs. Compilation carries it into compiled assets."""
+    from coreai.runtime import AIModelAssetMetadata
+    from tinkerbox_ane.models import entry
+
+    item = entry(model + VARIANT_SUFFIXES[weights])
+    metadata = AIModelAssetMetadata()
+    metadata.author = item["publisher"]
+    metadata.license = item["license"]
+    metadata.model_description = f"{item['name']}: {item['summary']}"
+    metadata.set_custom("model", item["id"])
+    metadata.set_custom("original_model", item["original_model"])
+    return metadata
+
+
 def compress(program, weights):
     """Quantize ("int8-per-channel") or palettize ("lut8-group32") a converted program's weights in place."""
     from coreai_opt.coreai_utils import CompressionGranularity, DType, palettize_weights, quantize_weights

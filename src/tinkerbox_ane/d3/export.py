@@ -11,7 +11,7 @@ import torch
 from coreai_torch import TorchConverter, get_decomp_table
 
 from tinkerbox_ane.bundle import checkpoint_digest, write_checkpoint
-from tinkerbox_ane.coreai import count_flops, source_hash
+from tinkerbox_ane.coreai import asset_metadata, count_flops, source_hash
 from tinkerbox_ane.d3 import CHUNK, INPUT, KIND, OUTPUT, PROMPT_WIDTHS, RUNTIME_TENSORS, VARIANTS, checkpoint
 from tinkerbox_ane.d3.model import AttendStage, PromptStage, ScanStage, load_weights, stage_ranges
 from tinkerbox_ane.d3.vision import export_vision_asset
@@ -69,7 +69,7 @@ def export(model: str, out: Path, include_vision: bool = True) -> Path:
                     entrypoint_name=f"prompt{i}c{width}",
                 )
             asset = out / f"stage{i}.aimodel"
-            converter.to_coreai().save_asset(asset)
+            converter.to_coreai().save_asset(asset, metadata=asset_metadata(model))
             assets.append({"asset": asset.name, "source_hash": source_hash(asset),
                            "functions": [f"scan{i}"] + [f"attend{i}c{capacity}" for capacity in tiers]
                            + [f"prompt{i}c{width}" for width in PROMPT_WIDTHS], "flops": flops})
@@ -85,7 +85,7 @@ def export(model: str, out: Path, include_vision: bool = True) -> Path:
         "source": {"repo": repo, "revision": revision},
     }
     if include_vision:
-        manifest.update(export_vision_asset(path, out / "vision.aimodel"))
+        manifest.update(export_vision_asset(path, out / "vision.aimodel", model))
         print(f"exported vision tower ({time.monotonic() - started:.1f}s)", flush=True)
     manifest["checkpoint_hash"] = checkpoint_digest(write_checkpoint(path, out, RUNTIME_TENSORS))
     (out / "model.json").write_text(json.dumps(manifest, indent=2) + "\n")

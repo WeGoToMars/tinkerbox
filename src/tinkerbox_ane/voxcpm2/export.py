@@ -12,8 +12,8 @@ from safetensors.torch import save_file
 
 from tinkerbox_ane.architectures.minicpm import Config, Transformer
 from tinkerbox_ane.bundle import write_checkpoint, checkpoint_digest
-from tinkerbox_ane.coreai import compress, source_hash
-from . import KIND, REPO, REVISION, UPSTREAM_REVISION, SOURCE, checkpoint
+from tinkerbox_ane.coreai import asset_metadata, compress, source_hash
+from . import KIND, MODEL, REPO, REVISION, UPSTREAM_REVISION, SOURCE, checkpoint
 from .codec import AudioVAE, AudioVAEConfig, fold_weight_norm
 
 
@@ -156,7 +156,7 @@ def export(out=SOURCE, weights=None, capacities=CAPACITIES, stages=None, group=B
         path = out / f'{role}.aimodel'
         stored = 'int8-per-channel' if role in INT8_ROLES else main_weights
         program = compress(converter.to_coreai(), stored)
-        program.save_asset(path)
+        program.save_asset(path, metadata=asset_metadata(MODEL, main_weights))
         assets.append(dict(role=role, asset=path.name, source_hash=source_hash(path), functions=functions,
                            config=asdict(cfg), start=start, end=end, cached=cached,
                            cache_functions=cache_functions, local_functions=local,

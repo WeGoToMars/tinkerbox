@@ -14,7 +14,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5VisionRotaryEmbedding,
 )
 
-from tinkerbox_ane.coreai import count_flops, source_hash
+from tinkerbox_ane.coreai import asset_metadata, count_flops, source_hash
 from tinkerbox_ane.d3 import PATCH_TIERS, RESIDUAL_SCALE
 from tinkerbox_ane.d3.model import MASK_MIN, CheckpointReader
 
@@ -140,7 +140,7 @@ def load_visual(checkpoint_dir: Path) -> nn.Module:
     return visual.eval().requires_grad_(False)
 
 
-def export_vision_asset(checkpoint_dir: Path, out_path: Path) -> dict:
+def export_vision_asset(checkpoint_dir: Path, out_path: Path, model: str) -> dict:
     """Export one tower function per patch capacity, sharing weights; returns the manifest fields."""
     from coreai_torch import TorchConverter, get_decomp_table
 
@@ -161,7 +161,7 @@ def export_vision_asset(checkpoint_dir: Path, out_path: Path) -> dict:
                 program, input_names=["pixel_values", "pos_embeds", "cos", "sin", "attn_mask"],
                 output_names=["features"], entrypoint_name=f"p{patches}")
     out_path = Path(out_path)
-    converter.to_coreai().save_asset(out_path)
+    converter.to_coreai().save_asset(out_path, metadata=asset_metadata(model))
     return {"vision_asset": out_path.name, "vision_source_hash": source_hash(out_path),
             "vision_functions": [f"p{patches}" for patches in PATCH_TIERS],
             "vision_flops": flops,

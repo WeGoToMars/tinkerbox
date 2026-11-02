@@ -12,7 +12,7 @@ from safetensors import safe_open
 
 from tinkerbox_ane.architectures.gpt2 import Config, Transformer
 from tinkerbox_ane.bundle import write_checkpoint, checkpoint_digest
-from tinkerbox_ane.coreai import compress, source_hash
+from tinkerbox_ane.coreai import asset_metadata, compress, source_hash
 from . import KIND, VARIANTS, checkpoint
 
 PREFILL_WIDTH = 64
@@ -69,7 +69,7 @@ def _export_stage(model, out, weights, capacities, batches, weight_format, start
     # LUT8 clusters the PyTorch weights above; INT8 quantizes the converted program.
     if weight_format == 'int8-per-channel':
         compress(program, weight_format)
-    program.save_asset(asset)
+    program.save_asset(asset, metadata=asset_metadata(model, weight_format))
     return dict(asset=asset.name, source_hash=source_hash(asset), start=start, end=end,
                 functions=names, cache_functions=functions)
 
