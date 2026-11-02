@@ -47,4 +47,4 @@ A list of prompts runs as batches of 1, 4 or 8. Prompts can have different lengt
 
 ## Build
 
-See the [developer guide](../model-publishing.md#gpt-2). Without `--batch-sizes`, exports support batches of 1 and 4. Original weights use the [GPT-2 Modified MIT License](../../LICENSES/GPT-2-MIT.txt).
+See the [developer guide](../model-publishing.md#export-and-compile). Without `--batch-sizes`, exports support batches of 1 and 4. Original weights use the [GPT-2 Modified MIT License](../../LICENSES/GPT-2-MIT.txt).

@@ -3,12 +3,12 @@
 [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) generates multilingual speech
 with automatic voices, voice design and voice cloning. Output is mono **24 kHz**.
 
-Requires macOS 27 and Apple M4 or newer. The model download is about 3.4 GB.
+Runs on M4–M6 with macOS 27; the download is about 3.4 GB.
 In the app, select **OmniVoice** on Text to Speech; model files download
 automatically. Python users need Python 3.12 or 3.13 and the speech extra:
 
 ```sh
-python -m pip install "tinkerbox-ane[speech]==2.2.0"
+python -m pip install "tinkerbox-ane[speech]"
 ```
 
 ## Generate speech
@@ -71,4 +71,4 @@ matters. Saved voices belong to the model that created them.
 
 Model weights use **CC-BY-NC-4.0**. The codec has separate license terms;
 see the [bundle's license and notices](https://huggingface.co/wegotomars/OmniVoice-CoreAI-ANE/tree/v2.2.0).
-[Full speech API](../speech.md) · [Developer commands](../model-publishing.md#model-builds).
+[Full speech API](../speech.md) · [Developer commands](../model-publishing.md#export-and-compile).
