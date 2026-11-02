@@ -154,7 +154,7 @@ struct RankedItem: TransientAppEntity {
 }
 
 struct YesNoDecisionIntent: AppIntent {
-    static let title: LocalizedStringResource = "Yes/No Decision"
+    static let title: LocalizedStringResource = "[Decision] Yes/No Decision"
     static let description = IntentDescription(
         "Answer a yes/no question about text or images, with a confidence score. Uses the model selected on Tinkerbox’s Decision screen."
     )
@@ -184,7 +184,7 @@ struct YesNoDecisionIntent: AppIntent {
 }
 
 struct ChooseOptionIntent: AppIntent {
-    static let title: LocalizedStringResource = "Choose Option"
+    static let title: LocalizedStringResource = "[Decision] Choose Option"
     static let description = IntentDescription(
         "Choose the best option for text or images. Returns no choice below Minimum Confidence. Uses the model selected on Tinkerbox’s Decision screen."
     )
@@ -215,7 +215,7 @@ struct ChooseOptionIntent: AppIntent {
 }
 
 struct ScoreTextIntent: AppIntent {
-    static let title: LocalizedStringResource = "Score Text"
+    static let title: LocalizedStringResource = "[Decision] Score Text"
     static let description = IntentDescription(
         "Rate text or images using your ordered levels. Uses the model selected on Tinkerbox’s Decision screen."
     )
@@ -242,7 +242,7 @@ struct ScoreTextIntent: AppIntent {
 }
 
 struct AskQuestionsIntent: AppIntent {
-    static let title: LocalizedStringResource = "Ask Several Questions"
+    static let title: LocalizedStringResource = "[Decision] Ask Several Questions"
     static let description = IntentDescription(
         "Answer several yes/no questions about the same text or images. Returns answers in question order. Uses the model selected on Tinkerbox’s Decision screen."
     )
@@ -274,7 +274,7 @@ struct AskQuestionsIntent: AppIntent {
 }
 
 struct FilterListIntent: AppIntent {
-    static let title: LocalizedStringResource = "Filter List by Question"
+    static let title: LocalizedStringResource = "[Decision] Filter List by Question"
     static let description = IntentDescription(
         "Keep list items that answer Yes to your question, in their original order. Skips blank items. Uses the model selected on Tinkerbox’s Decision screen."
     )
@@ -298,7 +298,7 @@ struct FilterListIntent: AppIntent {
 }
 
 struct SortListIntent: AppIntent {
-    static let title: LocalizedStringResource = "Sort List by Score"
+    static let title: LocalizedStringResource = "[Decision] Sort List by Score"
     static let description = IntentDescription(
         "Rank list items using your question and ordered levels. Skips blank items and keeps ties in their original order. Uses the model selected on Tinkerbox’s Decision screen."
     )
@@ -409,7 +409,7 @@ func speechMode(_ selection: SpeechModeEntity?, model: SpeechModelEntity) throws
 }
 
 struct GenerateSpeechIntent: AppIntent {
-    static let title: LocalizedStringResource = "Generate Speech"
+    static let title: LocalizedStringResource = "[TTS] Generate Speech"
     static let description = IntentDescription(
         "Turn text into WAV audio files, ready to play or save. The model is saved with this action."
     )
@@ -422,7 +422,7 @@ struct GenerateSpeechIntent: AppIntent {
     @Parameter(title: "Reference Audio", description: "Audio to clone or continue. Use this or Saved Voice, not both.",
                supportedContentTypes: [.audio]) var reference: IntentFile?
     @Parameter(title: "Reference Transcript", description: "Words spoken in the reference. Transcribed on-device when the mode needs it and this is empty.") var transcript: String?
-    @Parameter(title: "Saved Voice", description: "A voice.pt file from Create Voice Prompt or Tinkerbox.",
+    @Parameter(title: "Saved Voice", description: "A voice.pt file from [TTS] Create Voice Prompt or Tinkerbox.",
                supportedContentTypes: [.data]) var voice: IntentFile?
     @Parameter(title: "Language", description: "Optional language code, when supported by the model.") var language: String?
     @Parameter(title: "Target Duration", description: "Seconds per text, when the model supports a native target duration.") var duration: Double?
@@ -481,9 +481,9 @@ struct GenerateSpeechIntent: AppIntent {
 }
 
 struct CreateVoicePromptIntent: AppIntent {
-    static let title: LocalizedStringResource = "Create Voice Prompt"
+    static let title: LocalizedStringResource = "[TTS] Create Voice Prompt"
     static let description = IntentDescription(
-        "Create a reusable voice file from a recording. Use it with the same model and mode in Generate Speech. The model is saved with this action."
+        "Create a reusable voice file from a recording. Use it with the same model and mode in [TTS] Generate Speech. The model is saved with this action."
     )
     static var supportedModes: IntentModes { .background }
 
@@ -517,20 +517,20 @@ struct CreateVoicePromptIntent: AppIntent {
 struct TinkerboxShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: YesNoDecisionIntent(), phrases: ["Make a decision with \(.applicationName)"],
-                    shortTitle: "Yes/No Decision", systemImageName: "checkmark.circle")
+                    shortTitle: "[Decision] Yes/No Decision", systemImageName: "checkmark.circle")
         AppShortcut(intent: ChooseOptionIntent(), phrases: ["Choose an option with \(.applicationName)"],
-                    shortTitle: "Choose Option", systemImageName: "list.bullet")
+                    shortTitle: "[Decision] Choose Option", systemImageName: "list.bullet")
         AppShortcut(intent: ScoreTextIntent(), phrases: ["Score text with \(.applicationName)"],
-                    shortTitle: "Score Text", systemImageName: "slider.horizontal.3")
+                    shortTitle: "[Decision] Score Text", systemImageName: "slider.horizontal.3")
         AppShortcut(intent: AskQuestionsIntent(), phrases: ["Ask several questions with \(.applicationName)"],
-                    shortTitle: "Ask Several Questions", systemImageName: "questionmark.bubble")
+                    shortTitle: "[Decision] Ask Several Questions", systemImageName: "questionmark.bubble")
         AppShortcut(intent: FilterListIntent(), phrases: ["Filter a list with \(.applicationName)"],
-                    shortTitle: "Filter List", systemImageName: "line.3.horizontal.decrease.circle")
+                    shortTitle: "[Decision] Filter List", systemImageName: "line.3.horizontal.decrease.circle")
         AppShortcut(intent: SortListIntent(), phrases: ["Sort a list with \(.applicationName)"],
-                    shortTitle: "Sort List", systemImageName: "arrow.up.arrow.down")
+                    shortTitle: "[Decision] Sort List", systemImageName: "arrow.up.arrow.down")
         AppShortcut(intent: GenerateSpeechIntent(), phrases: ["Generate speech with \(.applicationName)"],
-                    shortTitle: "Generate Speech", systemImageName: "waveform")
+                    shortTitle: "[TTS] Generate Speech", systemImageName: "waveform")
         AppShortcut(intent: CreateVoicePromptIntent(), phrases: ["Create a voice with \(.applicationName)"],
-                    shortTitle: "Create Voice Prompt", systemImageName: "person.wave.2")
+                    shortTitle: "[TTS] Create Voice Prompt", systemImageName: "person.wave.2")
     }
 }

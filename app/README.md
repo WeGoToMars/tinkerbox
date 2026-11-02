@@ -49,14 +49,14 @@ Search for **Tinkerbox** in the Shortcuts action library. Decision actions use t
 
 | Action | Inputs | Result |
 | --- | --- | --- |
-| **Yes/No Decision** | Input Text, Question, Images, Yes Threshold (default 0.5) | `Yes (93%)`, with **Answer**, **Yes Probability** and **Question** |
-| **Choose Option** | Input Text, Question, Options (at least two), Images, Minimum Confidence | `Refund request (81%)`, with **Chosen Option**, **Most Likely Option** and **Confidence** |
-| **Score Text** | Input Text, Question, Levels (2–10, lowest first), Images | `Friendly (1.8 / 2)`, with **Score**, **Maximum Score** and **Most Likely Level** |
-| **Ask Several Questions** | Input Text, Questions, Images, Yes Threshold | A Yes/No Decision per question, in order; d1-3B answers them in one pass |
-| **Filter List by Question** | List, Question, Yes Threshold | The items answered Yes, in order |
-| **Sort List by Score** | List, Question, Levels, Highest First | The items ranked, each with its score |
-| **Generate Speech** | Text or a list of texts, Model, Mode, Voice Description, Reference Audio and Transcript or Saved Voice, Language, Duration, Speed, Seed, generation settings | WAV files in input order, named like `speech-42-1.wav` (seed 42, first item) |
-| **Create Voice Prompt** | Reference Audio, Model, Reference Transcript, Mode | A `voice.pt` file for **Generate Speech** or the app |
+| **[Decision] Yes/No Decision** | Input Text, Question, Images, Yes Threshold (default 0.5) | `Yes (93%)`, with **Answer**, **Yes Probability** and **Question** |
+| **[Decision] Choose Option** | Input Text, Question, Options (at least two), Images, Minimum Confidence | `Refund request (81%)`, with **Chosen Option**, **Most Likely Option** and **Confidence** |
+| **[Decision] Score Text** | Input Text, Question, Levels (2–10, lowest first), Images | `Friendly (1.8 / 2)`, with **Score**, **Maximum Score** and **Most Likely Level** |
+| **[Decision] Ask Several Questions** | Input Text, Questions, Images, Yes Threshold | A Yes/No Decision per question, in order; d1-3B answers them in one pass |
+| **[Decision] Filter List by Question** | List, Question, Yes Threshold | The items answered Yes, in order |
+| **[Decision] Sort List by Score** | List, Question, Levels, Highest First | The items ranked, each with its score |
+| **[TTS] Generate Speech** | Text or a list of texts, Model, Mode, Voice Description, Reference Audio and Transcript or Saved Voice, Language, Duration, Speed, Seed, generation settings | WAV files in input order, named like `speech-42-1.wav` (seed 42, first item) |
+| **[TTS] Create Voice Prompt** | Reference Audio, Model, Reference Transcript, Mode | A `voice.pt` file for **[TTS] Generate Speech** or the app |
 
 Input Text is optional when you pass images. List actions skip blank lines and run the items as one batch. Leave Mode empty to pick automatic voice, design or cloning from the inputs; after changing Model, choose a Mode again. Controls the model doesn't support return an error rather than being ignored. Actions run in the background and share the app's loaded model; inference runs entirely on this Mac.
 
