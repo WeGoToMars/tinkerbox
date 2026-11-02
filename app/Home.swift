@@ -43,9 +43,9 @@ private struct HomeTaskCard: View {
 
     private var description: String {
         switch task {
-        case .decision: "Classify text and images, compare options, and score results with clear probabilities."
-        case .speech: "Turn text into speech. Design a voice or create one from a recording."
-        case .completion: "Continue a prompt, explore ideas, and watch text stream into your draft."
+        case .decision: "Open weight models based on original TypeSafe AI Jev architecture. Classify text and images, compare options, and score results with calibrated probabilities."
+        case .speech: "Turn text into speech with custom voices and voice clones from a recording."
+        case .completion: "Run GPT-2, a transformer model OpenAI released in 2019, including its 1.5B \"too dangerous to release\" XL variant."
         }
     }
 

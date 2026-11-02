@@ -2,17 +2,25 @@ import Foundation
 
 actor CompletionCapture {
     var text: [String]
+    var tokens: [Int]
     var deliveries = 0
     var firstDelivery = 0
-    init(count: Int) { text = Array(repeating: "", count: count) }
+    init(count: Int) {
+        text = Array(repeating: "", count: count)
+        tokens = Array(repeating: 0, count: count)
+    }
     func receive(_ deltas: [CompletionDelta]) {
-        for delta in deltas { text[delta.index] += delta.text }
+        for delta in deltas {
+            text[delta.index] += delta.text
+            tokens[delta.index] += delta.tokens
+        }
         if deltas.contains(where: { !$0.text.isEmpty }) {
             deliveries += 1
             if deliveries == 1 { firstDelivery = text.reduce(0) { $0 + $1.count } }
         }
     }
     func snapshot() -> ([String], Int) { (text, deliveries) }
+    func tokenCounts() -> [Int] { tokens }
     func firstTextCount() -> Int { firstDelivery }
 }
 
@@ -46,6 +54,8 @@ actor CompletionCapture {
         let streamed = try await runtime.complete(request) { deltas in await capture.receive(deltas) }
         let (text, deliveries) = await capture.snapshot()
         precondition(deliveries > 0 && text == first.choices.map(\.text))
+        let streamedTokens = await capture.tokenCounts()
+        precondition(streamedTokens == first.choices.map(\.metrics.outputTokens))
         precondition(streamed.choices.map(\.tokenIds) == first.choices.map(\.tokenIds))
         precondition(streamed.choices.allSatisfy { $0.metrics.batchSize == 4 })
         var longer = request
@@ -56,6 +66,9 @@ actor CompletionCapture {
         let firstText = await live.firstTextCount()
         precondition(updates > 1 && firstText > 0 && firstText < liveText.reduce(0) { $0 + $1.count })
         precondition(liveText == finished.choices.map(\.text))
+        // A token whose text arrives with a later one, or never, is not counted.
+        let liveTokens = await live.tokenCounts()
+        precondition(zip(liveTokens, finished.choices).allSatisfy { $0 > 0 && $0 <= $1.metrics.outputTokens })
         precondition(finished.choices.allSatisfy { $0.metrics.outputTokens == $0.tokenIds.count })
         let sampled = CompletionRequest(prompt: prompts, maxTokens: 12,
             temperature: 0.8, topK: 40, topP: 0.95, seed: 42)

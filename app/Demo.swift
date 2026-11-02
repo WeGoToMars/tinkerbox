@@ -150,15 +150,14 @@ enum Destination: Hashable {
 }
 
 struct AppView: View {
-    @State private var demo: Demo
+    let demo: Demo
     @State private var decisions: DecisionPlayground
     @State private var completions: CompletionPlayground
     @State private var speech: SpeechPlayground
     @State private var destination: Destination? = .home
 
-    init() {
-        let demo = Demo()
-        _demo = State(initialValue: demo)
+    init(demo: Demo) {
+        self.demo = demo
         _decisions = State(initialValue: DecisionPlayground(demo: demo))
         _completions = State(initialValue: CompletionPlayground(demo: demo))
         _speech = State(initialValue: SpeechPlayground(demo: demo))
@@ -174,7 +173,9 @@ struct AppView: View {
                     }
                 }
                 Section("Library") {
-                    Label("Models", systemImage: "square.stack.3d.up").tag(Destination.models)
+                    Label("Models", systemImage: "square.stack.3d.up")
+                        .symbolEffect(.bounce, value: demo.downloads.completed)
+                        .tag(Destination.models)
                     Label("Storage", systemImage: "internaldrive").tag(Destination.storage)
                 }
             }
@@ -188,7 +189,7 @@ struct AppView: View {
                 case .task(.speech): SpeechView(playground: speech) { destination = .models }
                 case .task(.completion): CompletionView(playground: completions) { destination = .models }
                 case .models: ModelsView(demo: demo)
-                case .storage: StorageView(demo: demo)
+                case .storage: StorageView(demo: demo) { destination = .models }
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { SystemFooter() }
@@ -214,6 +215,35 @@ struct AppView: View {
     }
 }
 
+// The open task page's main action, for the Model menu.
+struct TaskAction {
+    let title: String
+    let enabled: Bool
+    let perform: () -> Void
+}
+
+extension FocusedValues {
+    @Entry var taskAction: TaskAction?
+}
+
+struct ModelCommands: Commands {
+    let demo: Demo
+    @FocusedValue(\.taskAction) private var action
+
+    var body: some Commands {
+        CommandMenu("Model") {
+            Button(action?.title ?? "Run") { action?.perform() }
+                .keyboardShortcut(.return)
+                .disabled(action?.enabled != true)
+            Button(demo.ready ? "Unload Model" : "Load Model") {
+                Task { if demo.ready { await demo.unload() } else { await demo.load() } }
+            }
+            .keyboardShortcut("l")
+            .disabled(demo.busy || demo.loading || demo.compatibilityIssue != nil)
+        }
+    }
+}
+
 // The loaded model's status, and a menu to switch between this task's downloaded models.
 struct ModelToolbar: ToolbarContent {
     let demo: Demo
@@ -230,6 +260,8 @@ struct ModelToolbar: ToolbarContent {
                     if let progress = demo.progress {
                         ProgressView(value: progress).frame(width: 80)
                         Text("\(demo.status) \(Int(progress * 100))%").monospacedDigit()
+                            .contentTransition(.numericText())
+                            .animation(.default, value: Int(progress * 100))
                     } else {
                         ProgressView().controlSize(.small)
                         Text(demo.status)
@@ -271,6 +303,7 @@ struct ModelToolbar: ToolbarContent {
             } label: {
                 Label(demo.current.map { "Model: \($0.name)" } ?? "Select Model", systemImage: "square.stack.3d.up")
                     .labelStyle(.titleAndIcon)
+                    .symbolEffect(.pulse, isActive: demo.loading)
             }
             .disabled(demo.busy)
             .help("Select a model for this task, or open Manage Models to download one.")
@@ -421,6 +454,7 @@ struct TaskTextEditor: View {
                 .padding(10)
                 .background(.background, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+                .overlay { if demo.busy { EditorFollower() } }
                 .frame(height: 260)
                 .onChange(of: selection) { selection.resetTokenTyping(in: text) }
             if let tokenError {
@@ -443,6 +477,56 @@ struct TaskTextEditor: View {
         } catch is CancellationError { }
         catch {
             if input == previewInput, !Task.isCancelled { tokenError = error.localizedDescription }
+        }
+    }
+}
+
+/// Laid over a text editor that is disabled while text streams into it: keeps it scrolled to the end
+/// as the text grows until the user scrolls away, and passes the user's scrolling through. SwiftUI's
+/// TextEditor has no scroll API, and a disabled one ignores scrolling.
+private struct EditorFollower: NSViewRepresentable {
+    func makeNSView(context: Context) -> Follower { Follower() }
+    func updateNSView(_ view: Follower, context: Context) {}
+
+    final class Follower: NSView {
+        private weak var scrollView: NSScrollView?
+        private var following = true
+        private var observers: [NSObjectProtocol] = []
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = []
+            DispatchQueue.main.async { [weak self] in self?.attach() }  // after the editor's layout
+        }
+
+        override func scrollWheel(with event: NSEvent) {
+            scrollView?.scrollWheel(with: event)
+        }
+
+        private func attach() {
+            guard let root = window?.contentView,
+                  let textView = Self.textView(in: root, within: convert(bounds, to: nil)),
+                  let scrollView = textView.enclosingScrollView else { return }
+            self.scrollView = scrollView
+            let clip = scrollView.contentView
+            clip.postsBoundsChangedNotifications = true
+            textView.postsFrameChangedNotifications = true
+            let center = NotificationCenter.default
+            observers = [
+                center.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.following = clip.bounds.maxY >= textView.frame.height - 4 }
+                },
+                center.addObserver(forName: NSView.frameDidChangeNotification, object: textView, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { if self?.following == true { textView.scrollToEndOfDocument(nil) } }
+                },
+            ]
+        }
+
+        private static func textView(in node: NSView, within frame: CGRect) -> NSTextView? {
+            if let text = node as? NSTextView, let scroll = text.enclosingScrollView,
+               frame.contains(scroll.convert(scroll.bounds, to: nil)) { return text }
+            return node.subviews.lazy.compactMap { textView(in: $0, within: frame) }.first
         }
     }
 }
@@ -596,13 +680,63 @@ struct SystemFooter: View {
     }
 }
 
+// The model the worker holds, whichever page or Shortcut loaded it, with a way to free its memory.
+struct RuntimeMenu: View {
+    let demo: Demo
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        let state = demo.runtime.state
+        VStack(alignment: .leading, spacing: 12) {
+            if let reply = state.reply {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(reply.modelName).font(.headline)
+                    Text([Catalog.current(reply.modelId)?.kind?.title, "Unloads after 5 minutes without inference"]
+                        .compactMap { $0 }.joined(separator: " · "))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else if state.loading {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(state.status)
+                    ProgressView(value: state.progress)
+                }
+            } else {
+                Text("No model loaded").foregroundStyle(.secondary)
+            }
+            HStack {
+                Button(demo.unloading ? "Unloading…" : "Unload", systemImage: "eject") { Task { await demo.unload() } }
+                    .disabled(state.reply == nil || demo.busy)
+                Spacer()
+                Button("Open Tinkerbox") {
+                    openWindow(id: "demo")
+                    NSApp.activate()
+                }
+            }
+            Divider()
+            Button("Quit Tinkerbox") { NSApp.terminate(nil) }
+                .buttonStyle(.plain)
+                .keyboardShortcut("q")
+        }
+        .padding(14)
+        .frame(width: 280)
+    }
+}
+
 @main struct TinkerboxDemoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    @State private var demo = Demo()
 
     var body: some Scene {
         Window("Tinkerbox", id: "demo") {
-            AppView()
+            AppView(demo: demo)
         }
         .defaultSize(width: 940, height: 820)
+        .commands { ModelCommands(demo: demo) }
+        MenuBarExtra {
+            RuntimeMenu(demo: demo)
+        } label: {
+            Label { Text("Tinkerbox") } icon: { Image(nsImage: LogoGeometry.menuBarIcon) }
+        }
+        .menuBarExtraStyle(.window)
     }
 }

@@ -77,8 +77,7 @@ struct StorageReport: Decodable, Sendable {
     }
 }
 
-// Where storage goes, in the order the page draws it. Colors are the first six slots of a palette
-// validated for color-vision deficiency in both appearances.
+// Where storage goes, in the order the page draws it, each in its own series color.
 enum StorageKind: CaseIterable, Identifiable {
     case bundles, compiled, outdated, checkpoints, unused, python
 
@@ -106,19 +105,19 @@ enum StorageKind: CaseIterable, Identifiable {
         }
     }
 
-    var color: Color {
-        switch self {
-        case .bundles: Color(light: 0x2a78d6, dark: 0x3987e5)
-        case .compiled: Color(light: 0xeb6834, dark: 0xd95926)
-        case .outdated: Color(light: 0x1baf7a, dark: 0x199e70)
-        case .checkpoints: Color(light: 0xeda100, dark: 0xc98500)
-        case .unused: Color(light: 0xe87ba4, dark: 0xd55181)
-        case .python: Color(light: 0x008300, dark: 0x008300)
-        }
-    }
+    var color: Color { Color.series[Self.allCases.firstIndex(of: self)!] }
 }
 
 extension Color {
+    // A categorical palette validated for color-vision deficiency in both appearances, in the order
+    // series take it; neighbors stay distinguishable.
+    static let series = [
+        Color(light: 0x2a78d6, dark: 0x3987e5), Color(light: 0xeb6834, dark: 0xd95926),
+        Color(light: 0x1baf7a, dark: 0x199e70), Color(light: 0xeda100, dark: 0xc98500),
+        Color(light: 0xe87ba4, dark: 0xd55181), Color(light: 0x008300, dark: 0x008300),
+        Color(light: 0x6250d6, dark: 0x9085e9), Color(light: 0xe34948, dark: 0xe66767),
+    ]
+
     init(light: UInt32, dark: UInt32) {
         self.init(nsColor: NSColor(name: nil) { appearance in
             let hex = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
@@ -135,6 +134,7 @@ func formatBytes(_ bytes: Int64) -> String {
 @MainActor @Observable final class Storage {
     private(set) var report: StorageReport?
     private(set) var removing: Set<String> = []  // model IDs, checkpoint repos, or the keys below
+    private(set) var measuring = true  // until the first report, and while a newer one is on its way
     var error: String?
     private var generation = 0
 
@@ -175,10 +175,12 @@ func formatBytes(_ bytes: Int64) -> String {
     private func update(_ arguments: [String]) async {
         generation += 1
         let current = generation
+        measuring = true
+        defer { if current == generation { measuring = false } }
         do {
             let report = try await Self.run(arguments)
             if current == generation {
-                self.report = report
+                withAnimation { self.report = report }
                 self.error = nil
             }
         } catch {
@@ -241,6 +243,7 @@ struct StorageBar: View {
 
 struct StorageView: View {
     let demo: Demo
+    let showModels: () -> Void
     @State private var highlighted: StorageKind?
     @State private var pending: Removal?
     private var storage: Storage { demo.storage }
@@ -260,18 +263,28 @@ struct StorageView: View {
     }
 
     var body: some View {
-        ScrollView {
+        Group {
             if let report = storage.report {
-                VStack(alignment: .leading, spacing: 20) {
-                    overview(report)
-                    models(report)
-                    if !report.checkpoints.isEmpty { checkpoints(report) }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        overview(report)
+                        models(report)
+                        if !report.checkpoints.isEmpty { checkpoints(report) }
+                    }
+                    .padding(24)
+                    .frame(maxWidth: 780)
+                    .frame(maxWidth: .infinity)
                 }
-                .padding(24)
-                .frame(maxWidth: 780)
-                .frame(maxWidth: .infinity)
+            } else if storage.measuring {
+                ProgressView()
             } else {
-                ProgressView().padding(40).frame(maxWidth: .infinity)
+                ContentUnavailableView {
+                    Label("Storage Unavailable", systemImage: "internaldrive")
+                } description: {
+                    Text("Tinkerbox could not measure its files.")
+                } actions: {
+                    Button("Try Again") { Task { await storage.refresh() } }
+                }
             }
         }
         .frame(minWidth: 560, minHeight: 500)
@@ -301,6 +314,7 @@ struct StorageView: View {
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(formatBytes(report.bytes)).font(.system(size: 48, weight: .semibold))
+                    .contentTransition(.numericText())
                 Text("used by Tinkerbox").foregroundStyle(.secondary)
             }
             StorageBar(parts: kinds.map { ($0, report.bytes($0)) }, highlighted: $highlighted)
@@ -328,7 +342,8 @@ struct StorageView: View {
             case .unused: removeButton(.unused, key: Storage.unused, title: "Clean Up")
             default: EmptyView()
             }
-            Text(formatBytes(bytes)).monospacedDigit().frame(minWidth: 72, alignment: .trailing)
+            Text(formatBytes(bytes)).monospacedDigit().contentTransition(.numericText())
+                .frame(minWidth: 72, alignment: .trailing)
         }
         .contentShape(Rectangle())
         .onHover { highlight(kind, $0) }
@@ -343,6 +358,13 @@ struct StorageView: View {
         let models = report.models.sorted { $0.bytes > $1.bytes }
         let largest = Double(max(1, models.first?.bytes ?? 1))
         return TaskSection("Models") {
+            if models.isEmpty {
+                ContentUnavailableView {
+                    Label("No Models Downloaded", systemImage: "square.stack.3d.up")
+                } actions: {
+                    Button("Browse Models", action: showModels)
+                }
+            }
             ForEach(models) { model in
                 if model.id != models[0].id { Divider() }
                 HStack(spacing: 12) {
@@ -356,7 +378,8 @@ struct StorageView: View {
                         .frame(height: 6)
                     }
                     if storage.removing.contains(model.id) { ProgressView().controlSize(.small) }
-                    Text(formatBytes(model.bytes)).monospacedDigit().frame(minWidth: 72, alignment: .trailing)
+                    Text(formatBytes(model.bytes)).monospacedDigit().contentTransition(.numericText())
+                        .frame(minWidth: 72, alignment: .trailing)
                     Menu("Actions for \(model.name)", systemImage: "ellipsis.circle") { actions(for: model) }
                         .labelStyle(.iconOnly)
                         .menuStyle(.button)

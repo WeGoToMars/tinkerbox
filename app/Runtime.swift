@@ -158,6 +158,7 @@ struct TextCompletion: Decodable, Sendable {
 struct CompletionDelta: Decodable, Sendable {
     let index: Int
     let text: String
+    let tokens: Int  // generated since the previous piece
 }
 
 struct CompletionChunk: Decodable, Sendable {

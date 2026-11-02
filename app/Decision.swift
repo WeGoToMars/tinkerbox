@@ -1,4 +1,5 @@
 import AppKit
+import Charts
 import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
@@ -106,7 +107,7 @@ struct RunTotals {
             var total = TokenCount()
             for request in requests { total = total + (try await demo.runtime.count(request)[0]) }
             guard input == previewInput else { return }  // edited meanwhile; a newer update follows
-            preview = total
+            withAnimation { preview = total }
             layouts = Dictionary(uniqueKeysWithValues: zip(input.item.images, total.images))
             previewError = nil
         } catch {
@@ -214,7 +215,7 @@ struct RunTotals {
                     totals.add(result.results[0], elapsedMs: result.elapsedMs)
                 }
             }
-            lastRun = totals
+            withAnimation { lastRun = totals }
             answersModel = demo.model
         } catch {
             self.error = error.localizedDescription
@@ -432,7 +433,6 @@ struct DecisionView: View {
                           : "Run \(playground.questions.count) questions", systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!playground.canRun)
                 if playground.questions.count > 1 && demo.loaded?.questionTrees == true {
                     Picker("Mode", selection: $playground.mode) {
@@ -451,6 +451,7 @@ struct DecisionView: View {
                     Text(preview.tiles > 0 ? "\(preview.tokens.formatted()) tokens · \(preview.tiles) image tiles"
                          : "\(preview.tokens.formatted()) tokens")
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        .contentTransition(.numericText())
                         .help("Input for the next run; each image tile uses one vision pass")
                 }
                 Spacer()
@@ -500,6 +501,9 @@ struct DecisionView: View {
         .navigationSubtitle(demo.loaded.map { "\($0.modelName) · \($0.cpuModel) · \($0.architecture)" } ?? "")
         .toolbar { ModelToolbar(demo: demo, task: .decision, showingInspector: $showingInspector, showModels: showModels) }
         .inspector(isPresented: $showingInspector) { ModelInspector(demo: demo) }
+        .focusedSceneValue(\.taskAction, TaskAction(
+            title: playground.questions.count == 1 ? "Run Decision" : "Run \(playground.questions.count) Questions",
+            enabled: playground.canRun) { Task { await playground.run() } })
         .fileImporter(isPresented: $importingImages, allowedContentTypes: [.image], allowsMultipleSelection: true) {
             if case .success(let urls) = $0 { playground.add(urls) }
         }
@@ -587,7 +591,7 @@ struct DecisionView: View {
     private func metric(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.title3.monospacedDigit())
+            Text(value).font(.title3.monospacedDigit()).contentTransition(.numericText())
         }
     }
 }
@@ -656,23 +660,44 @@ struct QuestionCard: View {
                             .frame(minWidth: 60, alignment: .trailing)
                     }
                 }
-                ForEach(answer.probabilities.indices, id: \.self) { index in
-                    probabilityRow(answer.probabilities[index])
-                }
+                ProbabilityChart(probabilities: answer.probabilities)
             }
         }
         .padding(14)
         .background(.background, in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
     }
+}
 
-    private func probabilityRow(_ probability: Probability) -> some View {
-        HStack(spacing: 12) {
-            Text(probability.label).frame(width: 180, alignment: .leading)
-            ProgressView(value: probability.value)
-            Text(String(format: "%.1f%%", probability.value * 100))
-                .monospacedDigit().frame(width: 65, alignment: .trailing)
+// One bar per option, in option order; the likeliest stands out.
+struct ProbabilityChart: View {
+    let probabilities: [Probability]
+
+    var body: some View {
+        let top = probabilities.indices.max { probabilities[$0].value < probabilities[$1].value }
+        // Rows by position, so repeated labels keep their own bars.
+        Chart(probabilities.indices, id: \.self) { index in
+            BarMark(x: .value("Probability", probabilities[index].value), y: .value("Option", "\(index)"), height: 14)
+                .foregroundStyle(index == top ? Color.accentColor : Color.secondary.opacity(0.35))
+                .clipShape(Capsule())
+                .annotation(position: .trailing) {
+                    Text(probabilities[index].value.formatted(.percent.precision(.fractionLength(1))))
+                        .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                }
         }
+        .chartXScale(domain: 0...1)
+        .chartXAxis(.hidden)
+        .chartYAxis {
+            AxisMarks(preset: .aligned, position: .leading) { value in
+                AxisValueLabel {
+                    if let index = value.as(String.self).flatMap(Int.init) {
+                        Text(probabilities[index].label).font(.callout).foregroundStyle(.primary)
+                    }
+                }
+            }
+        }
+        .frame(height: CGFloat(probabilities.count) * 28)
+        .animation(.default, value: probabilities.map(\.value))
     }
 }
 

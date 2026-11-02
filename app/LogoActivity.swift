@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // The Tinkerbox logo, drawn from the geometry in Tinkerbox.icon/Assets (a 1085×1015 view box)
@@ -15,6 +16,40 @@ enum LogoGeometry {
         CGPoint(x: 545.42, y: 504.58), CGPoint(x: 1006.25, y: 358.75), CGPoint(x: 189.58, y: 177.92),
         CGPoint(x: 650.42, y: 78.75),
     ].map { CGPoint(x: $0.x + inset, y: $0.y + inset) }
+    // The logo simplified for the menu bar: ring nodes joined by the Short layer's edges, without the long
+    // crossing ones, drawn bold enough to read at 18 points. A template, so the menu bar tints it.
+    static let menuBarIcon: NSImage = {
+        let edge: CGFloat = 75, ring: CGFloat = 125, hole: CGFloat = 42.5
+        let points = nodes.map { CGPoint(x: $0.x - inset, y: $0.y - inset) }
+        let box = points.reduce(CGRect.null) { $0.union(CGRect(x: $1.x - ring, y: $1.y - ring, width: 2 * ring, height: 2 * ring)) }
+        let scale = 18 / box.height
+        let image = NSImage(size: CGSize(width: box.width * scale, height: 18), flipped: true) { _ in
+            func point(_ index: Int) -> CGPoint {
+                CGPoint(x: (points[index].x - box.minX) * scale, y: (points[index].y - box.minY) * scale)
+            }
+            func disc(_ index: Int, _ radius: CGFloat) -> NSBezierPath {
+                let center = point(index), radius = radius * scale
+                return NSBezierPath(ovalIn: CGRect(x: center.x - radius, y: center.y - radius, width: 2 * radius, height: 2 * radius))
+            }
+            NSColor.black.set()
+            for (a, b) in edgeLayers[0].edges {
+                let path = NSBezierPath()
+                path.move(to: point(a))
+                path.line(to: point(b))
+                path.lineWidth = edge * scale
+                path.stroke()
+            }
+            for index in points.indices {
+                disc(index, ring).fill()
+                NSGraphicsContext.current?.compositingOperation = .clear
+                disc(index, hole).fill()
+                NSGraphicsContext.current?.compositingOperation = .sourceOver
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
     static let cyan = Color(red: 0, green: 0.753, blue: 0.910)
     static let teal = Color(red: 0, green: 0.765, blue: 0.816)
     // The icon's three edge layers, back to front (Short, Long 1, Long 2), with their gradients

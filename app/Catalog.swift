@@ -258,6 +258,7 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
 @MainActor @Observable final class Downloads {
     static var processes: [String: Process] = [:]  // by model; stopped when the app quits
     private(set) var progress: [String: Double] = [:]  // by model, once the download size is known
+    private(set) var completed = 0  // downloads that finished since launch
     private var tasks: [String: Task<Void, Error>] = [:]
 
     func contains(_ model: String) -> Bool { tasks[model] != nil }
@@ -271,6 +272,7 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
                 progress[model] = nil
             }
             try await run(model, entry: entry)
+            completed += 1
         }
         tasks[model] = task
         try await task.value

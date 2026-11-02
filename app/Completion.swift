@@ -1,3 +1,4 @@
+import Charts
 import SwiftUI
 
 struct CompletionPrompt: Identifiable {
@@ -22,6 +23,14 @@ struct CompletionPrompt: Identifiable {
     }
 }
 
+// One prompt's output tokens so far, at a moment of a run.
+struct TokenSample: Identifiable {
+    let id = UUID()
+    let prompt: Int
+    let seconds: Double
+    var tokens: Int
+}
+
 // The Text Completion page's prompts, options and latest results; they outlive visits to other pages.
 @MainActor @Observable final class CompletionPlayground {
     let demo: Demo
@@ -35,6 +44,7 @@ struct CompletionPrompt: Identifiable {
     var batchSize = 0  // automatic
     var results: [TextCompletion] { prompts.compactMap(\.completion) }
     var elapsedMs: Double?
+    var timeline: [TokenSample] = []  // of the latest run, in time order
     var counts: [TokenCount] = []
     var error: String?
     var previewError: String?
@@ -67,6 +77,7 @@ struct CompletionPrompt: Identifiable {
         guard demo.current?.kind == .completion, demo.model != resultsModel else { return }
         for index in prompts.indices { prompts[index].completion = nil }
         elapsedMs = nil
+        timeline = []
         counts = []
         error = nil
         previewError = nil
@@ -83,7 +94,7 @@ struct CompletionPrompt: Identifiable {
         do {
             let counts = try await demo.runtime.count(CompletionRequest(prompt: input.prompts, maxTokens: 0))
             guard input == previewInput else { return }
-            self.counts = counts
+            withAnimation { self.counts = counts }
             previewError = counts.firstIndex { $0.tokens >= context }
                 .map { "Prompt \($0 + 1) fills the \(context.formatted())-token context." }
         } catch {
@@ -104,9 +115,12 @@ struct CompletionPrompt: Identifiable {
         let original = prompts.map(\.content)
         for index in prompts.indices { prompts[index].completion = nil }
         elapsedMs = nil
+        // Prompts batched later stay at zero until their batch runs.
+        timeline = ids.indices.map { TokenSample(prompt: $0, seconds: 0, tokens: 0) }
+        let started = ContinuousClock.now
         do {
             let reply = try await demo.runtime.complete(request) { deltas in
-                await self.receive(deltas, ids: ids)
+                await self.receive(deltas, ids: ids, seconds: (ContinuousClock.now - started) / .seconds(1))
             }
             // The complete text replaces what streamed in.
             for (row, result) in reply.choices.enumerated() {
@@ -115,15 +129,21 @@ struct CompletionPrompt: Identifiable {
                     prompts[index].append(result.text)
                     prompts[index].completion = result
                 }
+                // Streamed pieces can undercount; the reply's count is exact.
+                if let last = timeline.lastIndex(where: { $0.prompt == row }) {
+                    timeline[last].tokens = result.metrics.outputTokens
+                }
             }
             elapsedMs = reply.metrics.elapsedMs
             resultsModel = demo.model
         } catch { self.error = error.localizedDescription }
     }
 
-    private func receive(_ deltas: [CompletionDelta], ids: [UUID]) {
+    private func receive(_ deltas: [CompletionDelta], ids: [UUID], seconds: Double) {
         for delta in deltas {
             if let index = prompts.firstIndex(where: { $0.id == ids[delta.index] }) { prompts[index].append(delta.text) }
+            let tokens = timeline.last { $0.prompt == delta.index }?.tokens ?? 0
+            timeline.append(TokenSample(prompt: delta.index, seconds: seconds, tokens: tokens + delta.tokens))
         }
     }
 }
@@ -148,6 +168,7 @@ struct CompletionView: View {
                             if playground.counts.indices.contains(index) {
                                 Text("\(playground.counts[index].tokens) / \(playground.context) tokens")
                                     .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                                    .contentTransition(.numericText())
                             }
                             Spacer()
                             if playground.prompts.count > 1 {
@@ -175,7 +196,6 @@ struct CompletionView: View {
                     Button(playground.results.isEmpty ? "Generate" : "Continue", systemImage: "text.append") {
                         Task { await playground.run() }
                     }
-                    .keyboardShortcut(.return, modifiers: .command)
                     .disabled(!playground.canRun)
                     .help(playground.results.isEmpty ? "" : "Generate more from the full text of each prompt.")
                     if demo.busy {
@@ -190,6 +210,9 @@ struct CompletionView: View {
                 if let message = playground.error ?? playground.previewError ?? demo.error {
                     Text(message).foregroundStyle(.red).textSelection(.enabled)
                 }
+            }
+            if !playground.timeline.isEmpty {
+                TaskSection("Output tokens") { TokenTimeline(samples: playground.timeline) }
             }
         } settings: {
             TaskSection("Generation") {
@@ -234,6 +257,8 @@ struct CompletionView: View {
         .navigationTitle(ModelTask.completion.title)
         .toolbar { ModelToolbar(demo: demo, task: .completion, showingInspector: $showingInspector, showModels: showModels) }
         .inspector(isPresented: $showingInspector) { ModelInspector(demo: demo) }
+        .focusedSceneValue(\.taskAction, TaskAction(title: playground.results.isEmpty ? "Generate" : "Continue",
+                                                    enabled: playground.canRun) { Task { await playground.run() } })
         .task(id: playground.previewInput) {
             try? await Task.sleep(for: .milliseconds(250))  // wait for typing to pause
             if !Task.isCancelled { await playground.preview() }
@@ -241,5 +266,59 @@ struct CompletionView: View {
         .onChange(of: playground.context) {
             playground.maxNewTokens = min(playground.maxNewTokens, max(1, playground.context - 1))
         }
+    }
+}
+
+// Each prompt's output tokens over a run; the slope is its speed, and batches show as lines rising together.
+// Past the palette's colors, prompts fold into one total.
+struct TokenTimeline: View {
+    let samples: [TokenSample]
+    @State private var selected: Double?
+
+    private var series: [(name: String, samples: [TokenSample])] {
+        let prompts = Set(samples.map(\.prompt)).sorted()
+        if prompts.count <= Color.series.count {
+            return prompts.map { prompt in ("Prompt \(prompt + 1)", samples.filter { $0.prompt == prompt }) }
+        }
+        var latest: [Int: Int] = [:]
+        return [("All prompts", samples.map { sample in
+            latest[sample.prompt] = sample.tokens
+            return TokenSample(prompt: 0, seconds: sample.seconds, tokens: latest.values.reduce(0, +))
+        })]
+    }
+
+    var body: some View {
+        let series = series
+        Chart {
+            ForEach(series, id: \.name) { line in
+                ForEach(line.samples) { sample in
+                    LineMark(x: .value("Seconds", sample.seconds), y: .value("Tokens", sample.tokens))
+                        .foregroundStyle(by: .value("Prompt", line.name))
+                        .lineStyle(StrokeStyle(lineWidth: 2))
+                }
+            }
+            if let selected {
+                RuleMark(x: .value("Seconds", selected))
+                    .foregroundStyle(.secondary.opacity(0.5))
+                    .annotation(position: .top, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(selected.formatted(.number.precision(.fractionLength(2)))) s").bold()
+                            ForEach(series, id: \.name) { line in
+                                let tokens = line.samples.last { $0.seconds <= selected }?.tokens ?? 0
+                                Text("\(line.name): \(tokens) tokens")
+                            }
+                        }
+                        .font(.caption.monospacedDigit())
+                        .padding(6)
+                        .background(.background, in: .rect(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                    }
+            }
+        }
+        .chartForegroundStyleScale(domain: series.map(\.name), range: Color.series.prefix(series.count))
+        .chartLegend(series.count > 1 ? .visible : .hidden)
+        .chartXAxisLabel("Seconds")
+        .chartXSelection(value: $selected)
+        .frame(height: 180)
     }
 }

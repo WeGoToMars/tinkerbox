@@ -186,6 +186,23 @@ import UniformTypeIdentifiers
     }
 }
 
+// A generated clip as a WAV file, for dragging and sharing.
+struct SpeechFile: Transferable {
+    static let name = "Speech.wav"
+    let wav: Data
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(exportedContentType: .wav) { file in
+            let folder = URL.temporaryDirectory.appending(path: UUID().uuidString)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let url = folder.appending(path: name)
+            try file.wav.write(to: url)
+            return SentTransferredFile(url)
+        }
+        .suggestedFileName(name)
+    }
+}
+
 struct SpeechView: View {
     @Bindable var playground: SpeechPlayground
     let showModels: () -> Void
@@ -237,11 +254,8 @@ struct SpeechView: View {
                     Toggle("Play while generating", isOn: $playWhileGenerating).disabled(demo.busy)
                 }
                 HStack {
-                    Button(demo.busy ? "Generating…" : "Generate speech", systemImage: "waveform") {
-                        recordFocused = false
-                        referencePlaybackFocused = false
-                        Task { await playground.generate(playWhileGenerating: playWhileGenerating) }
-                    }
+                    Button(demo.busy ? "Generating…" : "Generate speech", systemImage: "waveform", action: generate)
+                    .symbolEffect(.variableColor.iterative, isActive: demo.busy)
                     .buttonStyle(.borderedProminent)
                     .disabled(!playground.canGenerate)
                     if demo.busy { ProgressView().controlSize(.small) }
@@ -250,6 +264,17 @@ struct SpeechView: View {
                             Button("WAV (.wav)…") { save(result.wav, type: .wav) }
                             Button("M4A (.m4a)…") { save(result.wav, type: .mpeg4Audio) }
                         }.menuStyle(.borderlessButton).fixedSize().disabled(demo.busy)
+                        ShareLink(item: SpeechFile(wav: result.wav), preview: SharePreview("Speech")) {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                        }
+                        .labelStyle(.iconOnly).buttonStyle(.borderless).disabled(demo.busy)
+                        Spacer()
+                        Label(SpeechFile.name, systemImage: "waveform")
+                            .font(.callout)
+                            .padding(.horizontal, 10).padding(.vertical, 4)
+                            .background(.quaternary, in: Capsule())
+                            .draggable(SpeechFile(wav: result.wav))
+                            .help("Drag into Finder, Mail or another app")
                     }
                 }
                 if let live = playground.live, !live.finished {
@@ -308,6 +333,7 @@ struct SpeechView: View {
         .navigationTitle(ModelTask.speech.title)
         .toolbar { ModelToolbar(demo: demo, task: .speech, showingInspector: $showingInspector, showModels: showModels) }
         .inspector(isPresented: $showingInspector) { ModelInspector(demo: demo) }
+        .focusedSceneValue(\.taskAction, TaskAction(title: "Generate Speech", enabled: playground.canGenerate, perform: generate))
         .fileImporter(isPresented: Binding { importing != nil } set: { if !$0 { importing = nil } },
                       allowedContentTypes: importing ?? []) { result in
             guard case .success(let url) = result else { return }
@@ -325,6 +351,12 @@ struct SpeechView: View {
             recordFocused = false
             playground.modeChanged()
         }
+    }
+
+    private func generate() {
+        recordFocused = false
+        referencePlaybackFocused = false
+        Task { await playground.generate(playWhileGenerating: playWhileGenerating) }
     }
 
     @ViewBuilder private var referenceControls: some View {
@@ -357,8 +389,11 @@ struct SpeechView: View {
                 }
                 .help("Once armed, hold Space to record and release to finish; recording stops at 20 seconds.")
                 if recorder.active {
-                    Text("Recording · \(recorder.duration.formatted(.number.precision(.fractionLength(1)))) s")
-                        .foregroundStyle(.secondary).monospacedDigit()
+                    HStack(spacing: 6) {
+                        Image(systemName: "record.circle").foregroundStyle(.red).symbolEffect(.breathe)
+                        Text("Recording · \(recorder.duration.formatted(.number.precision(.fractionLength(1)))) s")
+                    }
+                    .foregroundStyle(.secondary).monospacedDigit()
                 } else if recorder.preparing {
                     ProgressView().controlSize(.small)
                 } else if recorder.armed {
