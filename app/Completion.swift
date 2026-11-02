@@ -152,6 +152,7 @@ struct CompletionView: View {
     @Bindable var playground: CompletionPlayground
     let showModels: () -> Void
     @AppStorage("showingInspector") private var showingInspector = false
+    @State private var showingSpeed = false
     private var demo: Demo { playground.demo }
 
     var body: some View {
@@ -212,7 +213,11 @@ struct CompletionView: View {
                 }
             }
             if !playground.timeline.isEmpty {
-                TaskSection("Output tokens") { TokenTimeline(samples: playground.timeline) }
+                TaskSection {
+                    DisclosureGroup("Generation speed", isExpanded: $showingSpeed) {
+                        TokenTimeline(samples: playground.timeline)
+                    }
+                }
             }
         } settings: {
             TaskSection("Generation") {
@@ -300,7 +305,8 @@ struct TokenTimeline: View {
             if let selected {
                 RuleMark(x: .value("Seconds", selected))
                     .foregroundStyle(.secondary.opacity(0.5))
-                    .annotation(position: .top, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+                    .annotation(position: .overlay, alignment: .top,
+                                overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("\(selected.formatted(.number.precision(.fractionLength(2)))) s").bold()
                             ForEach(series, id: \.name) { line in
