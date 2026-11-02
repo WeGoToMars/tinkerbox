@@ -1686,12 +1686,13 @@ wheels = [
 
 [[package]]
 name = "tinkerbox-ane"
-version = "2.2.0"
+version = "2.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },
     { name = "pillow" },
+    { name = "regex" },
     { name = "safetensors" },
     { name = "torch" },
     { name = "torchvision" },
@@ -1719,6 +1720,7 @@ requires-dist = [
     { name = "numpy", specifier = "==2.4.6" },
     { name = "omnivoice", marker = "extra == 'speech'", specifier = "==0.2.1" },
     { name = "pillow", specifier = ">=10.0.0" },
+    { name = "regex", specifier = "==2026.9.29" },
     { name = "safetensors", specifier = "==0.8.0" },
     { name = "torch", specifier = "==2.9.0" },
     { name = "torchaudio", marker = "extra == 'speech'", specifier = "==2.9.0" },

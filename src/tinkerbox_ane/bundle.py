@@ -24,7 +24,7 @@ from tinkerbox_ane.coreai import compile_asset, source_hash, verify_aot
 CACHE = Path.home() / "Library/Caches/tinkerbox-ane/models"
 
 
-def download_bundle(model: str, repo: str, revision: str, progress=None) -> Path:
+def download_bundle(model: str, repo: str, revision: str, progress=None, *, subfolder: str = "") -> Path:
     from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
     from tinkerbox_ane.host import chip_name, device_architecture, validate_architecture
@@ -32,23 +32,28 @@ def download_bundle(model: str, repo: str, revision: str, progress=None) -> Path
     architecture = device_architecture()
     validate_architecture(architecture)
 
-    folder = f"macos27/{architecture}"
+    if subfolder and ("\\" in subfolder or any(p in {"", ".", ".."} for p in subfolder.split("/"))):
+        raise ValueError("subfolder must be a relative repository directory")
+    folder = f"{subfolder}/macos27/{architecture}" if subfolder else f"macos27/{architecture}"
     root = CACHE / model / revision
-    bundle = root / folder
+    bundle = root / "macos27" / architecture
 
     def fetch():
         # The manifest comes last, so a bundle that has one is complete.
         snapshot_download(repo, revision=revision, allow_patterns=["config.json", f"{folder}/*"],
                           ignore_patterns=[f"{folder}/model.json"], local_dir=root)
         hf_hub_download(repo, f"{folder}/model.json", revision=revision, local_dir=root)
+        if subfolder:
+            bundle.parent.mkdir(parents=True, exist_ok=True)
+            replace_directory(root / folder, bundle)
 
     try:
         if progress is None:
             fetch()
         else:
-            files = HfApi().model_info(repo, revision=revision, files_metadata=True).siblings
-            total = sum(f.size or 0 for f in files
-                        if f.rfilename == "config.json" or f.rfilename.startswith(f"{folder}/"))
+            # List this bundle directly: repository-wide metadata can truncate large multi-model repos.
+            files = HfApi().list_repo_tree(repo, path_in_repo=folder, revision=revision, recursive=True)
+            total = sum(getattr(f, "size", 0) or 0 for f in files)
             with ThreadPoolExecutor(1) as pool:
                 done = pool.submit(fetch)
                 # Partial files grow under the local cache folder until they are moved into place.

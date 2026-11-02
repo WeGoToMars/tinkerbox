@@ -1,6 +1,6 @@
 [project]
 name = "tinkerbox-ane"
-version = "2.2.0"
+version = "2.3.0"
 description = "Optimized AI model runtime for practical tasks on Apple Neural Engine."
 readme = "README.md"
 license-files = ["LICENSES/*.txt", "NOTICE"]
@@ -9,6 +9,7 @@ dependencies = [
     "torch==2.9.0",
     "torchvision==0.24.0",
     "transformers==5.19.0",
+    "regex==2026.9.29",
     "huggingface-hub==2.2.0",
     "safetensors==0.8.0",
     "numpy==2.4.6",

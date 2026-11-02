@@ -210,8 +210,14 @@ class TensorHost(_PipeHost):
         self._reply()
 
     def step(self, function: str, inputs: dict, count: int):
-        """Append `count` positions to a cached host's state and return their hidden rows."""
+        """Append `count` positions and return hidden rows. `_padding` optionally
+        supplies leading token counts for independent interleaved sequences."""
         return self._call(b'C' + struct.pack('<I', count) + _string(function), inputs)
+
+    def metrics(self) -> dict:
+        """Cached host's Core AI run wall time and calls since the previous read."""
+        self._send(b'M')
+        return json.loads(self._read(self._u32()))
 
     def full_attention(self, inputs: dict):
         """Logits of a bidirectional host's sequence, in which every position attends every other."""

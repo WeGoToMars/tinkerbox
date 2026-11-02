@@ -38,6 +38,22 @@ def count_flops(module, inputs) -> int:
     return counter.get_total_flops()
 
 
+def compress(program, weights):
+    """Quantize ("int8-per-channel") or palettize ("lut8-group32") a converted program's weights in place."""
+    from coreai_opt.coreai_utils import CompressionGranularity, DType, palettize_weights, quantize_weights
+    if weights == "int8-per-channel":
+        quantize_weights(program, dtype=DType.INT8, granularity=CompressionGranularity.PER_CHANNEL,
+                         weight_num_threshold=2048, in_place=True)
+    elif weights == "lut8-group32":
+        palettize_weights(program, lut_dtype=None, n_bits=8, granularity=CompressionGranularity.PER_GROUPED_CHANNEL,
+                          group_size=32, weight_num_threshold=2048, in_place=True)
+    else:
+        return program
+    with program._module:  # Core AI optimizes the program when its module context exits.
+        pass
+    return program
+
+
 def verify_aot(asset: Path, expected: str) -> None:
     asset = Path(asset)
     if asset.suffix != ".aimodelc" or source_hash(asset) != expected:
