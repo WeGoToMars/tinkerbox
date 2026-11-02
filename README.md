@@ -10,6 +10,7 @@ Run models on Apple's Neural Engine through Core AI. Critical inference always r
 | [vllm-sr/d3-nano](https://huggingface.co/vllm-sr/d3-nano) (`d3-nano`), [vllm-sr/d3-mini](https://huggingface.co/vllm-sr/d3-mini) (`d3-mini`) | Decisions over text and images | M4-M6+ | [docs/models/d3.md](docs/models/d3.md) |
 | [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) (`omnivoice`) | Speech synthesis, voice cloning and voice design | M4-M6+ | [docs/models/omnivoice.md](docs/models/omnivoice.md) |
 | [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) (`voxcpm2`) | Multilingual speech synthesis, voice design, cloning and continuation | M1-M6+ | [docs/models/voxcpm2.md](docs/models/voxcpm2.md) |
+| [openai-community/gpt2](https://huggingface.co/openai-community/gpt2) (`gpt2`, `gpt2-medium`, `gpt2-large`, `gpt2-xl`) | Text completion | M1–M6 | [docs/models/gpt2.md](docs/models/gpt2.md) |
 
 Requires Apple Silicon (M1–M6), macOS 27, and Python 3.12 or 3.13. Bundle availability
 varies by model and chip.
@@ -45,6 +46,8 @@ The [speech API](docs/speech.md) advertises each model's native modes and contro
 The UI uses those capabilities to display supported controls. OmniVoice supplies
 native numeric duration and speed controls; VoxCPM2 supplies descriptive delivery
 conditioning and distinct reference-cloning and continuation modes.
+
+GPT-2 exposes an OpenAI-style `complete(prompt=..., max_tokens=...)` with streaming, sampling and batching. All four sizes have a 1,024-token context and FP16, INT8 or LUT8 weights. Requires Tinkerbox 2.3.0. [Usage and model bundles](docs/models/gpt2.md).
 
 ## Tinkerbox app
 

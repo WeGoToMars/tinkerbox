@@ -115,6 +115,15 @@ uv run python -m tinkerbox_ane.voxcpm2.export \
 `--checkpoint` selects a local upstream checkpoint. See the export command's
 `--help` for weight variants and stage options.
 
+### GPT-2
+
+```sh
+uv run python -m tinkerbox_ane.gpt2.export gpt2 --batch-sizes 1 4 8 --out artifacts/gpt2/source
+uv run python -m tinkerbox_ane.gpt2.compile artifacts/gpt2/source --out artifacts/gpt2/ane
+```
+
+Substitute `gpt2-medium`, `gpt2-large` or `gpt2-xl`. Select `--weights int8-per-channel` or `--weights lut8-group32` for compression. All sizes and formats share the [GPT2-CoreAI-ANE repository](https://huggingface.co/wegotomars/GPT2-CoreAI-ANE), under `<model>/<format>/macos27/<architecture>`, published by hand. See the [GPT-2 API](models/gpt2.md).
+
 ## Model publishing
 
 `tinkerbox_ane.d1.publish` implements this workflow for the d1 model:
