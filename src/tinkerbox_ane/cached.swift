@@ -24,11 +24,11 @@ final class CachedTensorRunner {
   var cache: NDArray?
   var capacity = 0
   var position = 0
-  var functionSeconds: [String: Double] = [:]
 
   init(url: URL, configuration: CachedTensorConfiguration) async throws {
     self.configuration = configuration
-    executable = try await TensorFunctions(url: url)
+    executable = TensorFunctions(url: url)
+    try await executable.load()
   }
 
   func reset() {
@@ -39,11 +39,8 @@ final class CachedTensorRunner {
 
   func ensureCapacity(_ next: Int, function: InferenceFunction) throws {
     if next == capacity { return }
-    var grown = NDArray(descriptor: try descriptor(function.descriptor.inputDescriptor(of: "cache"), "cache"))
-    write4(&grown) { dst, shape, ds in
-      forEachContiguousBlock(shape, ds) { _, offset, count in
-        memset(dst.advanced(by: offset), 0, count * 2)
-      }
+    var grown = try zeroedInput(function, "cache")
+    write4(&grown) { dst, _, ds in
       if let old = cache {
         read4(old) { src, _, ss in
           for channel in 0..<configuration.channels {
@@ -79,7 +76,7 @@ final class CachedTensorRunner {
     try ensureCapacity(spec.capacity, function: function)
     var inputs: [String: NDArray] = [:]
     for (key, value) in values where key != "_padding" { inputs[key] = try inputArray(function, key, value) }
-    var mask = NDArray(descriptor: try descriptor(function.descriptor.inputDescriptor(of: "mask"), "mask"))
+    var mask = try emptyInput(function, "mask")
     write4(&mask) { dst, shape, strides in
       forEachContiguousBlock(shape, strides) { _, offset, count in
         dst.advanced(by: offset).update(repeating: maskMin, count: count)
@@ -98,9 +95,7 @@ final class CachedTensorRunner {
     }
     inputs["mask"] = mask
     inputs["cache"] = cache
-    let before = engineSeconds
     var outputs = try await timed(name, function, inputs)
-    functionSeconds[name, default: 0] += engineSeconds - before
     // Drop the input's reference before updating the cache's new rows.
     inputs["cache"] = nil
     guard let result = outputs.remove(configuration.output)?.ndArray else {
@@ -120,9 +115,7 @@ final class CachedTensorRunner {
         for channel in 0..<configuration.channels {
           let output = src.advanced(by: (hiddenSize + channel) * ss[1])
           let input = dst.advanced(by: channel * ds[1] + position * ds[3])
-          if count == 1 {
-            input.pointee = output.pointee
-          } else if ss[3] == 1 && ds[3] == 1 {
+          if ss[3] == 1 && ds[3] == 1 {
             input.update(from: output, count: count)
           } else {
             for index in 0..<count { input[index * ds[3]] = output[index * ss[3]] }
@@ -147,20 +140,13 @@ func cachedTensorHost(_ asset: URL, configuration: String) async {
   }
   while let operation = readExact(1)?.first {
     if operation == UInt8(ascii: "Q") { return }
-    if operation == UInt8(ascii: "M") {
-      sendJSON(["seconds": engineSeconds, "calls": engineCalls,
-                "function_seconds": runner.functionSeconds])
-      (engineSeconds, engineCalls) = (0, [:])
-      runner.functionSeconds = [:]
-      continue
-    }
     if operation == UInt8(ascii: "R") {
       runner.reset()
       writeAll([0])
       continue
     }
-    guard operation == UInt8(ascii: "C"), let count = readExact(4), let name = readString(),
-          let values = readInputs() else { return }
+    guard operation == UInt8(ascii: "C") else { return sendError("unknown op \(operation)") }
+    guard let count = readExact(4), let name = readString(), let values = readInputs() else { return }
     do {
       let (shape, hidden) = try await runner.run(name, count: u32(count, 0), values: values)
       sendTensor(shape, hidden)

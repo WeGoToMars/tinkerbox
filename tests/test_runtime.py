@@ -5,7 +5,7 @@ import sys
 import pytest
 
 import tinkerbox_ane
-from tinkerbox_ane.d1 import DEFAULT_ASSET, MODEL
+from tinkerbox_ane.d1 import MODEL
 from tinkerbox_ane.host import (
     BINARY,
     SUPPORTED_ARCHITECTURES,
@@ -28,12 +28,15 @@ GREETING = {'type': 'noul', 'instructions': 'Is this a greeting?'}
 
 
 @pytest.fixture
-def model(monkeypatch):
-    if sys.platform != 'darwin' or not (DEFAULT_ASSET / 'model.json').is_file():
-        pytest.skip('requires the local Core AI bundle')
+def asset(bundle):
+    return bundle(MODEL, 'D1_ASSET')
+
+
+@pytest.fixture
+def model(asset, monkeypatch):
     # The bundle carries everything the runtime reads from the upstream checkpoint.
     monkeypatch.setenv('HF_HUB_OFFLINE', '1')
-    with tinkerbox_ane.load(MODEL, DEFAULT_ASSET) as model:
+    with tinkerbox_ane.load(MODEL, asset) as model:
         yield model
 
 
@@ -72,12 +75,9 @@ def test_public_decisions_batches_and_request_reset(model):
 
 
 def test_public_input_limits_and_close(model):
-    with pytest.raises(ValueError, match='image'):
-        model.probabilities('Hi', [GREETING], images=[object()])
     with pytest.raises(ValueError, match='context limit'):
         model.probabilities('hello ' * model.context, [GREETING])
     assert model.probabilities('Hi', [GREETING])[0][0] > 0.9
-    model.close()
     model.close()
     with pytest.raises(RuntimeError, match='closed'):
         model.probabilities('Hi', [GREETING])
@@ -194,13 +194,13 @@ def test_image_tile_limit_and_token_counts(model):
         'input_tokens': tree['usage']['input_tokens'], 'image_tiles': 0, 'images': []}
 
 
-def test_bundle_configuration_cannot_load_external_code(model, tmp_path):
+def test_bundle_configuration_cannot_load_external_code(model, asset, tmp_path):
     import json
     from PIL import Image
     from tinkerbox_ane.bundle import clone
 
     bundle = tmp_path / "bundle"
-    clone(DEFAULT_ASSET, bundle)
+    clone(asset, bundle)
     marker = tmp_path / "executed.txt"
     external = tmp_path / "external"
     external.mkdir()

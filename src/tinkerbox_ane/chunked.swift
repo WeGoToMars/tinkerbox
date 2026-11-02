@@ -57,11 +57,7 @@ final class ChunkedRunner: Runner {
     malloc_zone_pressure_relief(nil, 0)
     let total = next + width
     if activeModel == nil {
-      let model = try await loadAsset(root.appendingPathComponent(manifest.asset))
-      guard Set(model.functionNames) == Set(manifest.tiers.map { "c\($0)" }) else {
-        throw HostError("fused asset function set does not match manifest")
-      }
-      activeModel = model
+      activeModel = try await loadAsset(root.appendingPathComponent(manifest.asset))
     }
     let model = activeModel!
     let name = "c\(total)"
@@ -112,10 +108,7 @@ final class ChunkedRunner: Runner {
     }
     visible = count
   }
-  func setRope(cos: [Float16], sin: [Float16], positions: Int) throws {
-    guard positions >= context, cos.count == sin.count, cos.count == positions * headDim else {
-      throw HostError("invalid RoPE")
-    }
+  func setRope(cos: [Float16], sin: [Float16], positions: Int) {
     (self.cos, self.sin, self.positions) = (cos, sin, positions)
   }
   func prepareChain() {
@@ -192,11 +185,8 @@ final class ChunkedRunner: Runner {
     guard positions > 0, tokens >= 1, tokens <= context
     else { throw HostError("invalid request") }
     let leaves = answers ?? [tokens - 1]
-    guard !leaves.isEmpty, leaves == leaves.sorted(), Set(leaves).count == leaves.count,
-          leaves.allSatisfy({ $0 >= 0 && $0 < tokens }) else {
-      throw HostError("invalid answer slots")
-    }
     let answerChunk = (tokens - 1) / width
+    // Size the first tier for the whole prompt, up to 4K tokens, so most requests never regrow the cache.
     let initialNeeded = min(answerChunk * width, 4096 - width)
     try await ensureTier(initialNeeded, keep: 0)
     if answers == nil { prepareChain() }

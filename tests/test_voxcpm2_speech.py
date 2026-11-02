@@ -2,20 +2,15 @@
 
 import base64
 import io
-import os
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 
 @pytest.fixture(scope='module')
-def speech():
-    asset = os.environ.get('TINKERBOX_VOXCPM2_TEST_ASSET')
-    if not asset or not (Path(asset)/'model.json').is_file():
-        pytest.skip('requires a compiled VoxCPM2 bundle')
+def speech(bundle):
     from tinkerbox_ane.voxcpm2.runtime import Speech
-    with Speech(asset) as model:
+    with Speech(bundle('voxcpm2', 'TINKERBOX_VOXCPM2_TEST_ASSET')) as model:
         yield model
 
 

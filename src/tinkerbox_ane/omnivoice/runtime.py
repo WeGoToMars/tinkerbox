@@ -17,6 +17,7 @@ from tinkerbox_ane.bundle import bundled_checkpoint, read_bundle
 from tinkerbox_ane.audio import read_audio
 from tinkerbox_ane.host import TensorHost, check_architecture
 from tinkerbox_ane.transcription import transcribe
+from tinkerbox_ane.tokenization import token_spans
 from . import KIND, REVISION
 
 _GENERATION_LOCK = threading.Lock()  # torch's CPU RNG is shared across model instances.
@@ -302,10 +303,7 @@ class Speech:
 
     def token_spans(self, text):
         """Visible raw-input tokens, before speech conditioning or audio tokens."""
-        from tinkerbox_ane.tokenization import token_spans
-
-        with self._lock:
-            return token_spans(self.engine.text_tokenizer, text)
+        return token_spans(self.engine.text_tokenizer, text)
 
     def transcribe(self, audio, *, locale=None):
         with self._lock:

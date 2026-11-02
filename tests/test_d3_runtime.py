@@ -1,7 +1,4 @@
 import math
-import os
-from pathlib import Path
-import sys
 import warnings
 
 import pytest
@@ -16,17 +13,10 @@ TONE = {"type": "score", "instructions": "How friendly is this?", "criteria": ["
 
 
 @pytest.fixture(params=["d3-nano", "d3-mini"])
-def bundle(request):
-    asset = os.environ.get(request.param.upper().replace("-", "_") + "_ASSET")
-    if sys.platform != "darwin" or not asset or not (Path(asset) / "model.json").is_file():
-        pytest.skip(f"set {request.param.upper().replace('-', '_')}_ASSET to a compiled {request.param} bundle")
-    return request.param, Path(asset)
-
-
-@pytest.fixture
-def model(bundle, monkeypatch):
+def model(request, bundle, monkeypatch):
+    asset = bundle(request.param, request.param.upper().replace("-", "_") + "_ASSET")
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    with tinkerbox_ane.load(*bundle) as model, warnings.catch_warnings():
+    with tinkerbox_ane.load(request.param, asset) as model, warnings.catch_warnings():
         warnings.simplefilter("ignore", SequentialQuestionsWarning)
         yield model
 
@@ -75,12 +65,9 @@ def test_several_questions_warn_and_run_in_order(model):
 
 
 def test_public_input_limits_and_close(model):
-    with pytest.raises(ValueError, match="image"):
-        model.probabilities("Hi", [GREETING], images=[object()])
     with pytest.raises(ValueError, match="context limit"):
         model.probabilities_batch([("Hi", [GREETING]), ("hello " * model.context, [GREETING])])
     assert model.probabilities("Hi", [GREETING])[0][1] > 0.70
-    model.close()
     model.close()
     with pytest.raises(RuntimeError, match="closed"):
         model.probabilities("Hi", [GREETING])

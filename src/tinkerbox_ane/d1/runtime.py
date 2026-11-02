@@ -8,11 +8,12 @@ import torch
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
-from tinkerbox_ane.bundle import bundled_checkpoint, checkpoint_modules, read_bundle
+from tinkerbox_ane.bundle import bundled_checkpoint, checkpoint_modules
 from tinkerbox_ane.d1 import CHUNK, CODE, KIND, MAX_IMAGE_TILES, RESIDUAL_SCALE
 from tinkerbox_ane.d1.vision import IMAGE_TOKEN_ID, VisionPipeline, as_rgb
 from tinkerbox_ane.host import Host
 from tinkerbox_ane.d1.tree import TreePlan, groups, shared_prefix
+from tinkerbox_ane.tokenization import token_spans
 
 
 class Embeddings:
@@ -57,7 +58,7 @@ def load(asset):
             self._render_args = (self._tokenizer.bos_token or "", prompt.default_lead(config["model_type"]),
                                  prompt.DEFAULT_STATE_STYLE, prompt.DEFAULT_SYSTEM, "desc")
             self._host = Host(asset, KIND)
-            spec = read_bundle(asset, KIND)
+            spec = self._host.spec
             self._flops = {**spec["flops"], **spec.get("vision_flops", {})}
             self.context, self.chunk_width = self._host.context, self._host.width
             try:
@@ -214,12 +215,7 @@ def load(asset):
 
         def token_spans(self, text):
             """Visible raw-input tokens, excluding task templates and image tokens."""
-            from tinkerbox_ane.tokenization import token_spans
-
-            with self._lock:
-                if self._closed:
-                    raise RuntimeError("the model is closed")
-                return token_spans(self._tokenizer, text)
+            return token_spans(self._tokenizer, text)
 
         def count_tokens(self, state, questions, images=None) -> dict:
             """Input tokens and vision tiles `system_one` would use, without running the model, and how

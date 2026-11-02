@@ -53,7 +53,6 @@ final class StagedRunner: Runner {
     self.root = root
     manifest = try JSONDecoder().decode(
       StageManifest.self, from: Data(contentsOf: root.appendingPathComponent("model.json")))
-    guard manifest.assets.count == manifest.stages.count else { throw HostError("one asset per stage") }
     width = manifest.width
     context = manifest.context
     hiddenSize = manifest.hidden
@@ -74,32 +73,15 @@ final class StagedRunner: Runner {
     return function
   }
 
-  func inputArray(_ function: InferenceFunction, _ name: String, zeroed: Bool = true) throws -> NDArray {
-    var array = NDArray(descriptor: try descriptor(function.descriptor.inputDescriptor(of: name), name))
-    guard zeroed else { return array }
-    write4(&array) { p, shape, s in
-      for b in 0..<shape[0] { for c in 0..<shape[1] {
-        for h in 0..<shape[2] { for w in 0..<shape[3] {
-          p[b * s[0] + c * s[1] + h * s[2] + w * s[3]] = 0
-        } }
-      } }
-    }
-    return array
-  }
-
   func attention(_ attend: InferenceFunction, capacity: Int) throws -> PromptCache {
     if let cache = caches[capacity] { return cache }
-    let cache = PromptCache(keys: try inputArray(attend, "key"), values: try inputArray(attend, "value"),
-                            mask: try inputArray(attend, "mask"))
+    let cache = PromptCache(keys: try zeroedInput(attend, "key"), values: try zeroedInput(attend, "value"),
+                            mask: try zeroedInput(attend, "mask"))
     caches[capacity] = cache
     return cache
   }
 
-  func setRope(cos: [Float16], sin: [Float16], positions: Int) throws {
-    guard positions >= context, cos.count == sin.count,
-          cos.count == positions * (manifest.rotary_dim / 2) else {
-      throw HostError("invalid RoPE")
-    }
+  func setRope(cos: [Float16], sin: [Float16], positions: Int) {
     (self.cos, self.sin, self.positions) = (cos, sin, positions)
     ropeChunks = []
     ropePrompts = [:]
@@ -107,22 +89,22 @@ final class StagedRunner: Runner {
 
   // Copy RoPE columns [offset, offset + width) into a [1, 1, rotary/2, width] input pair.
   func ropeInputs(_ function: InferenceFunction, offset: Int) throws -> (NDArray, NDArray) {
-    var c = try inputArray(function, "cos", zeroed: false), s = try inputArray(function, "sin", zeroed: false)
-    for (table, array) in [(cos, 0), (sin, 1)] {
-      let fill = { (p: UnsafeMutablePointer<Float16>, shape: [Int], strides: [Int]) in
+    func fill(_ name: String, _ table: [Float16]) throws -> NDArray {
+      var array = try emptyInput(function, name)
+      write4(&array) { p, shape, strides in
         for i in 0..<shape[2] { for t in 0..<shape[3] {
-          p[i * strides[2] + t * strides[3]] = table[i * self.positions + offset + t]
+          p[i * strides[2] + t * strides[3]] = table[i * positions + offset + t]
         } }
       }
-      if array == 0 { write4(&c, fill) } else { write4(&s, fill) }
+      return array
     }
-    return (c, s)
+    return (try fill("cos", cos), try fill("sin", sin))
   }
 
   // A short prompt: each stage runs once over the whole padded prompt.
   func prompt(tokens: Int, width promptWidth: Int, chunks: [[Float16]]) async throws -> [Float16] {
     let first = try await function("prompt0c\(promptWidth)", stage: 0)
-    var x = try inputArray(first, input, zeroed: false)
+    var x = try emptyInput(first, input)
     write4(&x) { p, shape, s in
       for c in 0..<shape[1] { for t in 0..<shape[3] {
         let chunk = t / self.width
@@ -131,7 +113,7 @@ final class StagedRunner: Runner {
     }
     if ropePrompts[promptWidth] == nil { ropePrompts[promptWidth] = try ropeInputs(first, offset: 0) }
     let (c, s) = ropePrompts[promptWidth]!
-    var mask = try inputArray(first, "mask", zeroed: false)
+    var mask = try emptyInput(first, "mask")
     write4(&mask) { p, shape, strides in
       for t in 0..<shape[3] { p[t * strides[3]] = t < tokens ? 0 : maskMin }
     }
@@ -168,7 +150,7 @@ final class StagedRunner: Runner {
     var chunks: [[String: NDArray]] = []
     for values in embeddings {
       // fillInput writes every element.
-      var x = try inputArray(first, input, zeroed: false)
+      var x = try emptyInput(first, input)
       fillInput(&x, values)
       chunks.append([output: x])
     }
@@ -185,7 +167,7 @@ final class StagedRunner: Runner {
     for stage in manifest.stages.indices {
       let scan = try await function("scan\(stage)", stage: stage)
       let attend = try await function("attend\(stage)c\(capacity)", stage: stage)
-      if emptyStates[stage] == nil { emptyStates[stage] = try inputArray(scan, "packed_state") }
+      if emptyStates[stage] == nil { emptyStates[stage] = try zeroedInput(scan, "packed_state") }
       var state = emptyStates[stage]!
       // Finish the causal scans and collect every key before running any full attention.
       for chunk in 0..<count {

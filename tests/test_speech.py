@@ -9,13 +9,14 @@ import pytest
 
 
 @pytest.fixture(scope='module')
-def speech():
-    asset = os.environ.get('TINKERBOX_SPEECH_TEST_ASSET')
-    weights = os.environ.get('TINKERBOX_OMNIVOICE_CHECKPOINT')
-    if not asset or not weights or not (Path(asset) / 'model.json').is_file():
-        pytest.skip('requires a compiled OmniVoice bundle and pinned checkpoint')
+def asset(bundle):
+    return bundle('omnivoice', 'TINKERBOX_SPEECH_TEST_ASSET')
+
+
+@pytest.fixture(scope='module')
+def speech(asset):
     from tinkerbox_ane.omnivoice.runtime import Speech
-    with Speech(asset, weights=weights) as model:
+    with Speech(asset) as model:
         yield model
 
 
@@ -110,20 +111,23 @@ def test_short_speech_is_intelligible_and_can_be_transcribed_for_cloning(speech)
     assert len(explicit) == speech.sampling_rate
 
 
-def test_installed_speech_runs_without_an_upstream_checkpoint(speech, tmp_path, monkeypatch):
+def test_installed_speech_runs_without_an_upstream_checkpoint(speech, asset, tmp_path, monkeypatch):
     """A locally installed bundle carries the CPU lookup tables and nested audio codec."""
     import json
     import tinkerbox_ane
     from tinkerbox_ane import bundle, models
     from tinkerbox_ane.omnivoice import KIND
 
-    source = Path(os.environ['TINKERBOX_SPEECH_TEST_ASSET'])
+    weights = os.environ.get('TINKERBOX_OMNIVOICE_CHECKPOINT')
+    if not weights:
+        pytest.skip('set TINKERBOX_OMNIVOICE_CHECKPOINT to the pinned upstream checkpoint')
+    source = asset
     portable = tmp_path / 'portable'
     portable.mkdir()
     spec = bundle.read_bundle(source, KIND)
     for name in bundle.asset_names(spec):
         bundle.clone(source / name, portable / name)
-    cpu = bundle.write_checkpoint(Path(os.environ['TINKERBOX_OMNIVOICE_CHECKPOINT']), portable,
+    cpu = bundle.write_checkpoint(Path(weights), portable,
                                   ['llm.embed_tokens.weight', 'audio_embeddings.weight'])
     spec['checkpoint_hash'] = bundle.checkpoint_digest(cpu)
     (portable / 'model.json').write_text(json.dumps(spec))

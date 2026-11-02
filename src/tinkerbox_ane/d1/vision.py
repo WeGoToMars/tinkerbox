@@ -24,8 +24,6 @@ IMAGE_TOKEN_ID = 124907
 
 def as_rgb(image):
     """A Pillow picture in RGB; the processor resizes and tiles it."""
-    if not hasattr(image, "convert"):
-        raise ValueError(f"invalid image input: {image!r}")
     return image.convert("RGB")
 
 

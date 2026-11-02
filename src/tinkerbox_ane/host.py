@@ -66,37 +66,6 @@ def _string(value: str) -> bytes:
     return struct.pack("<I", len(encoded)) + encoded
 
 
-def check_layout(spec: dict) -> None:
-    """The cache tiers, dimensions, and convolution/attention layers the chunked runner allocates state for."""
-    width, context, tiers = spec["width"], spec["context"], spec["tiers"]
-    if (width <= 0 or context <= width or context % width or not tiers
-            or tiers != sorted(set(tiers)) or tiers[-1] != context
-            or any(t <= width or t > context or t % width for t in tiers)):
-        raise ValueError("invalid fused attention capacities")
-    for name in ("hidden", "heads", "kv_heads", "head_dim", "conv_taps"):
-        if not isinstance(spec[name], int) or spec[name] <= 0:
-            raise ValueError(f"invalid {name}")
-    if spec["heads"] % spec["kv_heads"] or spec["conv_taps"] < 2:
-        raise ValueError("inconsistent model dimensions")
-    for name in ("conv_layers", "attention_layers"):
-        layers = spec[name]
-        if not layers or layers != sorted(set(layers)) or any(i < 0 for i in layers):
-            raise ValueError(f"invalid {name}")
-    if set(spec["conv_layers"]) & set(spec["attention_layers"]):
-        raise ValueError("overlapping convolution and attention layers")
-    counted = [(spec.get("flops"), [f"c{tier}" for tier in tiers])]
-    if "vision_asset" in spec:
-        counted.append((spec.get("vision_flops"), ["main"]))
-    check_flops(counted)
-
-
-def check_flops(counted) -> None:
-    """Each asset's manifest counts the FLOPs of exactly its functions: `counted` pairs them."""
-    if any(not isinstance(flops, dict) or set(flops) != set(functions)
-           or any(type(n) is not int or n <= 0 for n in flops.values()) for flops, functions in counted):
-        raise ValueError("bundle lacks FLOP counts for its functions; re-export the model")
-
-
 class _PipeHost:
     _timeout = 300.0
 
@@ -112,6 +81,7 @@ class _PipeHost:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([self._process.stdout], [], [], remaining)[0]:
                 self._process.kill()
+                self._process.wait()
                 raise RuntimeError(f'Core AI host did not respond within {self._timeout:g} seconds')
             count = os.readv(self._process.stdout.fileno(), [view[done:]])
             if not count:
@@ -178,8 +148,6 @@ class TensorHost(_PipeHost):
 
     def __init__(self, asset: Path, timeout: float = 300, *, output: str = 'logits', cached=None, bidirectional=None):
         asset = Path(asset).resolve()
-        if asset.suffix != '.aimodelc':
-            raise ValueError('TensorHost requires an AOT asset')
         self._timeout = timeout
         self._directory = tempfile.TemporaryDirectory(prefix='.host-', dir=asset.parent)
         clones = Path(self._directory.name) / 'clones'
@@ -214,27 +182,18 @@ class TensorHost(_PipeHost):
         supplies leading token counts for independent interleaved sequences."""
         return self._call(b'C' + struct.pack('<I', count) + _string(function), inputs)
 
-    def metrics(self) -> dict:
-        """Cached host's Core AI run wall time and calls since the previous read."""
-        self._send(b'M')
-        return json.loads(self._read(self._u32()))
-
     def full_attention(self, inputs: dict):
         """Logits of a bidirectional host's sequence, in which every position attends every other."""
         return self._call(b'B', inputs)
 
 
 class Host(_PipeHost):
-    def __init__(self, asset: str | Path, kind: str, check=check_layout):
-        """`check` validates the manifest fields the bundle's runner allocates state for."""
-        from tinkerbox_ane.bundle import compiled, read_bundle
+    def __init__(self, asset: str | Path, kind: str):
+        from tinkerbox_ane.bundle import read_bundle
 
         asset = Path(asset).resolve()
-        spec = read_bundle(asset, kind)
-        check(spec)
-        if not compiled(spec):
-            raise ValueError("load requires a compiled AOT bundle; compile the exported model first")
-        check_architecture(spec)
+        self.spec = read_bundle(asset, kind)
+        check_architecture(self.spec)
         # Stage on the asset volume: APFS clones must stay on the same filesystem.
         self._directory = tempfile.TemporaryDirectory(prefix=".host-", dir=asset.parent)
         clones = Path(self._directory.name) / "clones"
@@ -249,8 +208,6 @@ class Host(_PipeHost):
                 raise RuntimeError(f"the Core AI host could not load {asset}: {ready['error']}")
             self.hidden_size = ready["hidden"]
             self.width, self.context = ready["width"], ready["context"]
-            if ready.get("version") != 2:
-                raise RuntimeError("the native host does not support this bundle; rebuild or reinstall tinkerbox-ane")
             self.conv_taps = ready["conv_taps"]
         except BaseException:
             self.close()
@@ -269,8 +226,6 @@ class Host(_PipeHost):
     def set_rope(self, cos, sin) -> None:
         import numpy as np
         cos, sin = (np.ascontiguousarray(t, dtype=np.float16) for t in (cos, sin))
-        if cos.shape != sin.shape or cos.ndim != 2:
-            raise ValueError("cos and sin must be matching (head_dim, positions) tables")
         self._send(b"R" + struct.pack("<II", *cos.shape), memoryview(cos).cast("B"), memoryview(sin).cast("B"))
         self._reply()
 
@@ -278,9 +233,6 @@ class Host(_PipeHost):
         import numpy as np
         if not 0 < tokens <= self.context:
             raise ValueError(f"prompt needs {tokens} tokens; context limit is {self.context}")
-        if plan is not None and (len(plan.ids) != tokens or plan.width != self.width
-                                 or plan.taps != self.conv_taps or plan.context != self.context):
-            raise ValueError("tree plan does not match the request or bundle")
         length = -(-tokens // self.width) * self.width
         producer = iter(chunks)
         try:
@@ -292,8 +244,6 @@ class Host(_PipeHost):
             for offset in range(0, length, self.width):
                 self._reply()
                 chunk = np.ascontiguousarray(next(producer), dtype=np.float16)
-                if chunk.shape != (self.hidden_size, self.width):
-                    raise ValueError(f"embedding chunk must be ({self.hidden_size}, {self.width})")
                 if plan is not None:
                     self._send(plan.metadata(offset), memoryview(chunk).cast("B"))
                 else:

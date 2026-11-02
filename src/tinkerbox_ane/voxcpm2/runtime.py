@@ -20,6 +20,7 @@ from tinkerbox_ane.bundle import bundled_checkpoint, read_bundle
 from tinkerbox_ane.host import TensorHost, check_architecture
 from tinkerbox_ane.speech import speech_controls
 from tinkerbox_ane.transcription import transcribe
+from tinkerbox_ane.tokenization import token_spans
 from . import KIND, REPO, REVISION, UPSTREAM_REVISION
 from .codec import AudioVAE, AudioVAEConfig, fold_weight_norm, trim_reference
 from .parameters import CAPABILITIES, PARAMETERS, validate
@@ -415,10 +416,7 @@ class Speech:
 
     def token_spans(self, text):
         """Visible raw-input tokens, before speech conditioning or audio tokens."""
-        from tinkerbox_ane.tokenization import token_spans
-
-        with self._lock:
-            return token_spans(self.tokenizer, text)
+        return token_spans(self.tokenizer, text)
 
     def transcribe(self, audio, *, locale=None):
         return transcribe(audio, locale=locale)

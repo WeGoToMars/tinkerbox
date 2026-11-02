@@ -13,43 +13,16 @@ import torch
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
-from tinkerbox_ane.bundle import bundled_checkpoint, checkpoint_modules, read_bundle
+from tinkerbox_ane.bundle import bundled_checkpoint, checkpoint_modules
 from tinkerbox_ane.d3 import CHUNK, CODE, KIND, MAX_IMAGE_TOKENS, RESIDUAL_SCALE
 from tinkerbox_ane.d3.model import CheckpointReader, Config
 from tinkerbox_ane.d3.vision import IMAGE_TOKEN_ID, VisionPipeline
-from tinkerbox_ane.host import Host, check_flops
+from tinkerbox_ane.host import Host
+from tinkerbox_ane.tokenization import token_spans
 
 
 class SequentialQuestionsWarning(UserWarning):
     """Several questions in one call run one after another, each reading its whole prompt."""
-
-
-def check_layout(spec: dict) -> None:
-    """The capacities, dimensions and stages the staged host allocates state for."""
-    width, context, tiers = spec["width"], spec["context"], spec["tiers"]
-    if (width <= 0 or context < width or context % width or not tiers
-            or tiers != sorted(set(tiers)) or tiers[-1] != context
-            or any(t < width or t > context or t % width for t in tiers)):
-        raise ValueError("invalid attention capacities")
-    prompts = spec.get("prompts", [])
-    if prompts != sorted(set(prompts)) or any(type(w) is not int or w <= 0 or w % 32 or w > context
-                                              for w in prompts):
-        raise ValueError("invalid prompt widths")
-    for name in ("hidden", "heads", "kv_heads", "head_dim", "conv_taps"):
-        if not isinstance(spec[name], int) or spec[name] <= 0:
-            raise ValueError(f"invalid {name}")
-    if spec["heads"] % spec["kv_heads"] or spec["conv_taps"] < 2:
-        raise ValueError("inconsistent model dimensions")
-    if (not spec["stages"] or any(type(n) is not int or n <= 0 for n in spec["stages"])
-            or len(spec["assets"]) != len(spec["stages"])
-            or spec.get("attention_mode") != "noncausal_full_attention"
-            or type(spec.get("rotary_dim")) is not int or not 0 < spec["rotary_dim"] <= spec["head_dim"]
-            or spec["rotary_dim"] % 2):
-        raise ValueError("invalid Qwen3.5 stages or attention configuration")
-    counted = [(asset.get("flops"), asset["functions"]) for asset in spec["assets"]]
-    if "vision_asset" in spec:
-        counted.append((spec.get("vision_flops"), spec["vision_functions"]))
-    check_flops(counted)
 
 
 class Embeddings:
@@ -95,8 +68,6 @@ def rope_positions(ids: list[int], grids, merge: int) -> torch.Tensor:
 
 
 def load(asset: Path):
-    spec = read_bundle(asset, KIND)
-    source = spec["source"]
     path = bundled_checkpoint(asset, CODE)
     package = f"d3_remote_{hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16]}"
     fmt, rt = checkpoint_modules(path, package, "d3_format", "d3_runtime")
@@ -118,7 +89,8 @@ def load(asset: Path):
             self._vision = None
             self._max_image_tokens = MAX_IMAGE_TOKENS
             self._rope_custom = False
-            self._host = Host(asset, KIND, check_layout)
+            self._host = Host(asset, KIND)
+            spec = self._host.spec
             self._flops = {name: count for entry in spec["assets"] for name, count in entry["flops"].items()}
             self._flops.update(spec.get("vision_flops", {}))
             self.context, self.chunk_width = self._host.context, self._host.width
@@ -129,6 +101,7 @@ def load(asset: Path):
                 raise
 
         def _get_vision(self) -> VisionPipeline:
+            spec = self._host.spec
             if not spec.get("vision_asset"):
                 raise ValueError("this bundle has no vision tower; image inputs are unavailable")
             if self._vision is None:
@@ -222,7 +195,7 @@ def load(asset: Path):
                 plans = [self._plan(*request) for request in requests]
                 passes = sum(len(rows) for rows, _, _ in plans)
                 if passes > 1:
-                    warnings.warn(f"{source['repo']} answers one question per pass; {passes} questions run "
+                    warnings.warn(f"{self._host.spec['source']['repo']} answers one question per pass; {passes} questions run "
                                   "sequentially, each reading its whole prompt", SequentialQuestionsWarning,
                                   stacklevel=3)
                 done = []
@@ -264,12 +237,7 @@ def load(asset: Path):
 
         def token_spans(self, text):
             """Visible raw-input tokens, excluding task templates and image tokens."""
-            from tinkerbox_ane.tokenization import token_spans
-
-            with self._lock:
-                if self._closed:
-                    raise RuntimeError("the model is closed")
-                return token_spans(self._tokenizer, text)
+            return token_spans(self._tokenizer, text)
 
         def count_tokens(self, state, questions, images=None) -> dict:
             """Input tokens and vision passes `system_one` would use, without running the model, and how

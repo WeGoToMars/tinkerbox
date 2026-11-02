@@ -21,17 +21,10 @@ final class BidirectionalTensorRunner {
 
   init(url: URL, config: BidirectionalConfiguration) async throws {
     self.config = config
-    executable = try await TensorFunctions(url: url)
+    executable = TensorFunctions(url: url)
+    try await executable.load()
   }
 
-  func array(_ function: InferenceFunction, _ name: String) throws -> NDArray {
-    NDArray(descriptor: try descriptor(function.descriptor.inputDescriptor(of: name), name))
-  }
-  func zero(_ array: inout NDArray) {
-    write4(&array) { dst, shape, strides in
-      forEachContiguousBlock(shape, strides) { _, offset, count in memset(dst.advanced(by: offset), 0, count * 2) }
-    }
-  }
   func hiddenChunk(_ hidden: NDArray, at offset: Int, count: Int, into chunk: inout NDArray) {
     zero(&chunk)
     read4(hidden) { src, _, ss in
@@ -54,7 +47,10 @@ final class BidirectionalTensorRunner {
   }
 
   func run(values: [String: [Float16]]) async throws -> ([Int], [Float16]) {
-    let count = (values["hidden"]?.count ?? 0) / config.hidden
+    guard let source = values["hidden"], let cos = values["cos"], let sin = values["sin"] else {
+      throw HostError("bidirectional requests need hidden, cos and sin")
+    }
+    let count = source.count / config.hidden
     guard let tier = config.attention.first(where: { $0.capacity >= count }) else {
       throw HostError("bidirectional context limit exceeded")
     }
@@ -63,34 +59,42 @@ final class BidirectionalTensorRunner {
     var next = NDArray(shape: [1, config.hidden, 1, count], scalarType: .float16)
     write4(&hidden) { dst, _, ds in
       for channel in 0..<config.hidden {
-        for index in 0..<count { dst[channel * ds[1] + index * ds[3]] = values["hidden"]![channel * count + index] }
+        for index in 0..<count { dst[channel * ds[1] + index * ds[3]] = source[channel * count + index] }
       }
     }
     var queries = NDArray(shape: [1, config.heads, tier.capacity, config.headDim], scalarType: .float16)
-    var keys = try array(attend, "key"), vectors = try array(attend, "value")
+    var keys = try emptyInput(attend, "key"), vectors = try emptyInput(attend, "value")
     zero(&queries); zero(&keys); zero(&vectors)
-    var mask = try array(attend, "mask")
+    var mask = try emptyInput(attend, "mask")
     write4(&mask) { dst, shape, strides in
-      forEachContiguousBlock(shape, strides) { _, offset, size in dst.advanced(by: offset).update(repeating: Float16(-30000), count: size) }
+      forEachContiguousBlock(shape, strides) { _, offset, size in dst.advanced(by: offset).update(repeating: maskMin, count: size) }
       for index in 0..<count { dst[index * strides[3]] = 0 }
+    }
+    // Every layer's projection reads the same rotary chunks.
+    let first = try await executable.get(config.projections[0])
+    var rotary: [[String: NDArray]] = []
+    for offset in stride(from: 0, to: count, by: config.width) {
+      let size = min(config.width, count - offset)
+      var chunk: [String: NDArray] = [:]
+      for (name, table) in [("cos", cos), ("sin", sin)] {
+        var tensor = try emptyInput(first, name)
+        zero(&tensor)
+        write4(&tensor) { dst, _, ds in
+          for dim in 0..<config.headDim {
+            for index in 0..<size { dst[dim * ds[2] + index * ds[3]] = table[dim * count + offset + index] }
+          }
+        }
+        chunk[name] = tensor
+      }
+      rotary.append(chunk)
     }
     for layer in config.projections.indices {
       let project = try await executable.get(config.projections[layer])
-      for offset in stride(from: 0, to: count, by: config.width) {
+      for (chunk, offset) in stride(from: 0, to: count, by: config.width).enumerated() {
         let size = min(config.width, count - offset)
-        var input = try array(project, "hidden")
+        var input = try emptyInput(project, "hidden")
         hiddenChunk(hidden, at: offset, count: size, into: &input)
-        var inputs = ["hidden": input]
-        for name in ["cos", "sin"] {
-          var tensor = try array(project, name)
-          zero(&tensor)
-          write4(&tensor) { dst, _, ds in
-            for dim in 0..<config.headDim {
-              for index in 0..<size { dst[dim * ds[2] + index * ds[3]] = values[name]![dim * count + offset + index] }
-            }
-          }
-          inputs[name] = tensor
-        }
+        let inputs = rotary[chunk].merging(["hidden": input]) { $1 }
         var outputs = try await project.run(inputs: inputs)
         guard let qkv = outputs.remove("features")?.ndArray else { throw HostError("missing projected features") }
         let qChannels = config.heads * config.headDim, kvChannels = config.kvHeads * config.headDim
@@ -101,7 +105,7 @@ final class BidirectionalTensorRunner {
       let finish = try await executable.get(config.finishes[layer])
       for offset in stride(from: 0, to: count, by: config.width) {
         let size = min(config.width, count - offset)
-        var query = try array(attend, "query")
+        var query = try emptyInput(attend, "query")
         zero(&query)
         read4(queries) { src, _, ss in
           write4(&query) { dst, _, ds in
@@ -112,7 +116,7 @@ final class BidirectionalTensorRunner {
         }
         var attention = try await attend.run(inputs: ["query": query, "key": keys, "value": vectors, "mask": mask])
         guard let attended = attention.remove("features")?.ndArray else { throw HostError("missing attended features") }
-        var input = try array(finish, "hidden")
+        var input = try emptyInput(finish, "hidden")
         hiddenChunk(hidden, at: offset, count: size, into: &input)
         var outputs = try await finish.run(inputs: ["hidden": input, "attended": attended])
         guard let output = outputs.remove("features")?.ndArray else { throw HostError("missing finished features") }
@@ -130,7 +134,7 @@ final class BidirectionalTensorRunner {
     var logits = [Float16](repeating: 0, count: config.logits * count)
     for offset in stride(from: 0, to: count, by: config.width) {
       let size = min(config.width, count - offset)
-      var input = try array(head, "hidden")
+      var input = try emptyInput(head, "hidden")
       hiddenChunk(hidden, at: offset, count: size, into: &input)
       var outputs = try await head.run(inputs: ["hidden": input])
       guard let result = outputs.remove("logits")?.ndArray else { throw HostError("missing output logits") }
@@ -153,7 +157,8 @@ func bidirectionalTensorHost(_ asset: URL, configuration: String) async {
   } catch { sendJSON(["error": "\(error)"]); return }
   while let operation = readExact(1)?.first {
     if operation == UInt8(ascii: "Q") { return }
-    guard operation == UInt8(ascii: "B"), let values = readInputs() else { return }
+    guard operation == UInt8(ascii: "B") else { return sendError("unknown op \(operation)") }
+    guard let values = readInputs() else { return }
     do {
       let (shape, logits) = try await runner.run(values: values)
       sendTensor(shape, logits)
