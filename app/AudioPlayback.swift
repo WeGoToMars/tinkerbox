@@ -175,7 +175,8 @@ struct AudioPlayback: View {
     var duration: Double { sampleRate > 0 ? Double(frames) / sampleRate : 0 }
     var finished: Bool { stopped || (complete && unplayed == 0) }
     var position: Double {
-        guard let now = node.lastRenderTime, let time = node.playerTime(forNodeTime: now), sampleRate > 0 else {
+        // The node joins the engine with the first piece; asking it the time before then raises.
+        guard sampleRate > 0, let now = node.lastRenderTime, let time = node.playerTime(forNodeTime: now) else {
             return 0
         }
         return min(duration, max(0, Double(time.sampleTime) / sampleRate))
