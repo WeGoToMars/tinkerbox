@@ -13,7 +13,7 @@ def test_watchdog_aborts_and_terminates_process_on_failure_log(tmp_path):
     if sys.platform != "darwin":
         pytest.skip("guard uses macOS ioreg and ANE process accounting")
 
-    report_path = tmp_path / "compile"
+    report_path = tmp_path / "release-2.3"  # the dot is part of the name
     # Command prints the abort token and sleeps to simulate a hung or rogue compiler
     command = [
         sys.executable,
@@ -25,9 +25,9 @@ def test_watchdog_aborts_and_terminates_process_on_failure_log(tmp_path):
 
     assert report["passed"] is False
     assert report["abort"] == "required ANE compilation failed; refusing GPU fallback"
-    assert report_path.with_suffix(".json").is_file()
-    assert report_path.with_suffix(".log").is_file()
+    assert (tmp_path / "release-2.3.json").is_file()
+    assert (tmp_path / "release-2.3.log").is_file()
 
-    saved = json.loads(report_path.with_suffix(".json").read_text())
+    saved = json.loads((tmp_path / "release-2.3.json").read_text())
     assert saved["passed"] is False
     assert saved["abort"] == report["abort"]

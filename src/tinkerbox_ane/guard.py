@@ -60,7 +60,9 @@ def stop(process, initial, privileged):
 def run(command, output, timeout=1500):
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    if output.with_suffix(".json").exists():
+    # Names such as release-2.3 keep their dots.
+    log, summary = output.with_name(f"{output.name}.log"), output.with_name(f"{output.name}.json")
+    if summary.exists():
         raise RuntimeError(f"refusing to overwrite {output}")
     initial = workers()
     if any("/ANELargeModelCompilerService.xpc/" in line for line in initial.values()):
@@ -77,8 +79,8 @@ def run(command, output, timeout=1500):
     written, refresh_at, progress_at, exited_at = 0, 30, 30, None
     tail = ""
     with (
-        output.with_suffix(".log").open("w") as sink,
-        output.with_suffix(".log").open("r", errors="replace") as diagnostics,
+        log.open("w") as sink,
+        log.open("r", errors="replace") as diagnostics,
     ):
         process = subprocess.Popen(command, stdout=sink, stderr=subprocess.STDOUT, start_new_session=True)
         try:
@@ -133,7 +135,7 @@ def run(command, output, timeout=1500):
                 system_written_bytes=written,
                 passed=report["abort"] is None and process.returncode == 0,
             )
-            output.with_suffix(".json").write_text(json.dumps(report, indent=2) + "\n")
+            summary.write_text(json.dumps(report, indent=2) + "\n")
     return report
 
 
