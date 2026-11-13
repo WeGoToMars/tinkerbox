@@ -44,6 +44,16 @@ INFO = [
 ]
 
 
+# The release LICENSE when neither the staging nor the --metadata directory has one.
+LICENSE_FILE = "LICENSES/Apache-2.0.txt"
+
+
+def upstream(model: str) -> dict:
+    """The upstream checkpoint an export of `model` records; publishing checks it."""
+    repo, revision, _ = VARIANTS[model]
+    return {"repo": repo, "revision": revision}
+
+
 def checkpoint(repo: str, revision: str) -> Path:
     from huggingface_hub import snapshot_download
 

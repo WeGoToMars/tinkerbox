@@ -57,14 +57,14 @@ uv run python -m tinkerbox_ane.install MODEL BUNDLE
 
 ## Publish
 
-Each family except GPT-2 has a release command that compiles every catalog architecture, stages the bundles with their license, and uploads them as a tagged Hugging Face release:
+`tinkerbox_ane.publish` compiles an export for every catalog architecture, stages the bundles with their license, and uploads them as a tagged Hugging Face release. It works for every model except GPT-2:
 
 ```sh
-uv run python -m tinkerbox_ane.d1.publish --no-upload       # compile and stage only
-uv run python -m tinkerbox_ane.d1.publish --upload-only     # publish the staged bundles
+uv run python -m tinkerbox_ane.publish d1-3b --source EXPORT --no-upload   # compile and stage only
+uv run python -m tinkerbox_ane.publish d1-3b --upload-only                 # publish the staged bundles
 ```
 
-The others are `tinkerbox_ane.d3.publish MODEL --source EXPORT`, `tinkerbox_ane.omnivoice.publish` and `tinkerbox_ane.voxcpm2.publish`. `--arch`, `--staging`, `--repo`, `--tag` and `--metadata` override the catalog defaults; `--continue-on-error` keeps going past a failed architecture. Update `revision` in `models.json` after publishing.
+It refuses an export whose upstream checkpoint differs from the model's. `--arch`, `--staging`, `--repo`, `--tag` and `--metadata` override the catalog defaults; `--continue-on-error` keeps going past a failed architecture. Update `revision` in `models.json` after publishing. A family supports publishing by defining `upstream(model)`, the checkpoint its exports record, and `LICENSE_FILE`.
 
 GPT-2 is published by hand: every size and format shares [wegotomars/GPT2-CoreAI-ANE](https://huggingface.co/wegotomars/GPT2-CoreAI-ANE), with bundles under `<model>/<format>/macos27/<architecture>` (the catalog's `subfolder`). Compile each export with `tinkerbox_ane.publish.build_architectures`, then upload the tree with `upload_to_hub(repo, staging, tag, allow_patterns=..., delete_patterns=...)`.
 

@@ -17,6 +17,15 @@ INFO = [
 ]
 
 
+# OmniVoice's CC BY-NC 4.0 LICENSE must already be in the staging or --metadata directory.
+LICENSE_FILE = 'LICENSE'
+
+
+def upstream(model):
+    """The upstream checkpoint an export of `model` records; publishing checks it."""
+    return dict(repo=REPO, revision=REVISION)
+
+
 def checkpoint():
     import os
     from huggingface_hub import snapshot_download

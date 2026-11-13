@@ -154,23 +154,25 @@ def upload_release(
     return upload_to_hub(repo, staging, tag, allow_patterns=patterns, delete_patterns=["macos27/**"], token=token)
 
 
-def release_main(model: str, kind: str, source: Path | None, expected_source: dict, license_file: str,
-                 argv=None) -> int:
-    """Command line that compiles, stages and publishes a model's bundles; returns 1 if any target failed."""
+def main(argv=None) -> int:
+    """`python -m tinkerbox_ane.publish MODEL`: compile, stage and publish a catalog model's bundles to Hugging Face
+    Hub; returns 1 if any target failed."""
     import argparse
+    import importlib
 
     from tinkerbox_ane.bundle import read_bundle
     from tinkerbox_ane.host import SUPPORTED_ARCHITECTURES
-    from tinkerbox_ane.models import entry
+    from tinkerbox_ane.models import CATALOG, entry
 
-    item = entry(model)
-    parser = argparse.ArgumentParser(description=f"Compile, stage and publish {item['name']} bundles to Hugging Face Hub.")
-    parser.add_argument('--source', type=Path, default=source, required=source is None)
-    parser.add_argument('--staging', type=Path,
-                        default=Path('artifacts/huggingface') / item['repo'].split('/')[-1])
-    parser.add_argument('--repo', default=item['repo'])
-    parser.add_argument('--tag', default=item['revision'])
-    parser.add_argument('--arch', nargs='+', choices=list(SUPPORTED_ARCHITECTURES), default=item['architectures'])
+    parser = argparse.ArgumentParser(description="Compile, stage and publish a model's bundles to Hugging Face Hub.")
+    # Models that share a repository in subfolders, such as GPT-2, are published by hand.
+    parser.add_argument('model', choices=[item['id'] for item in CATALOG if 'subfolder' not in item])
+    parser.add_argument('--source', type=Path, help='The export to compile; not needed with --upload-only')
+    parser.add_argument('--staging', type=Path, help='Defaults to artifacts/huggingface/<repository name>')
+    parser.add_argument('--repo', help="Defaults to the catalog's repository")
+    parser.add_argument('--tag', help="Defaults to the catalog's revision")
+    parser.add_argument('--arch', nargs='+', choices=list(SUPPORTED_ARCHITECTURES),
+                        help="Defaults to the catalog's architectures")
     parser.add_argument('--force', action='store_true')
     parser.add_argument('--continue-on-error', action='store_true')
     parser.add_argument('--metadata', type=Path, help='Directory with release README.md, LICENSE and NOTICE')
@@ -178,18 +180,29 @@ def release_main(model: str, kind: str, source: Path | None, expected_source: di
     modes.add_argument('--no-upload', action='store_true', help='Compile and stage without uploading')
     modes.add_argument('--upload-only', action='store_true', help='Publish staged bundles')
     args = parser.parse_args(argv)
-    architectures = args.arch
+    if args.source is None and not args.upload_only:
+        parser.error('--source is required unless --upload-only')
+    item = entry(args.model)
+    package = importlib.import_module(item['module'])
+    kind, expected_source = package.KIND, package.upstream(args.model)
+    staging = args.staging or Path('artifacts/huggingface') / item['repo'].split('/')[-1]
+    targets = args.arch or item['architectures']
+    architectures = targets
     if not args.upload_only:
         if read_bundle(args.source, kind)['source'] != expected_source:
             raise ValueError(f"export source does not match {item['name']}")
-        architectures = list(build_architectures(kind, args.source, args.staging / 'macos27', args.arch,
+        architectures = list(build_architectures(kind, args.source, staging / 'macos27', targets,
                                                  force=args.force, continue_on_error=args.continue_on_error))
-    metadata = dict(license_file=license_file, expected_source=expected_source, architectures=architectures,
+    metadata = dict(license_file=package.LICENSE_FILE, expected_source=expected_source, architectures=architectures,
                     metadata_dir=args.metadata)
     if args.no_upload:
-        prepare_release(args.staging, kind, **metadata)
-        print(f'Release staged in {args.staging}')
+        prepare_release(staging, kind, **metadata)
+        print(f'Release staged in {staging}')
     else:
-        commit = upload_release(args.repo, args.staging, kind, args.tag, **metadata)
-        print(f'Published {args.repo} at {commit}')
-    return int(set(architectures) != set(args.arch))
+        commit = upload_release(args.repo or item['repo'], staging, kind, args.tag or item['revision'], **metadata)
+        print(f'Published {args.repo or item["repo"]} at {commit}')
+    return int(set(architectures) != set(targets))
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

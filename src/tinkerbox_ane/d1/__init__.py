@@ -37,6 +37,15 @@ INFO = [
 ]
 
 
+# The release LICENSE when neither the staging nor the --metadata directory has one.
+LICENSE_FILE = "LICENSES/LFM-Open-License-v1.0.txt"
+
+
+def upstream(model: str) -> dict:
+    """The upstream checkpoint an export of `model` records; publishing checks it."""
+    return {"repo": REPO, "revision": REVISION}
+
+
 def checkpoint() -> Path:
     from huggingface_hub import snapshot_download
 

@@ -16,6 +16,14 @@ INFO = [dict(label='Synthesis', value='ANE · MiniCPM + local diffusion'),
         dict(label='Audio', value='48 kHz · CPU AudioVAE V2')]
 
 
+LICENSE_FILE = 'LICENSES/VoxCPM-Apache-2.0.txt'
+
+
+def upstream(model):
+    """The upstream checkpoint an export of `model` records; publishing checks it."""
+    return dict(repo=REPO, revision=REVISION, code_revision=UPSTREAM_REVISION)
+
+
 def checkpoint():
     if local := os.environ.get('TINKERBOX_VOXCPM2_CHECKPOINT'):
         return Path(local)

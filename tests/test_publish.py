@@ -226,7 +226,7 @@ def test_publish_rejects_different_vision_exports(release):
 
 def test_publish_rejects_the_wrong_d3_variant(source):
     from tinkerbox_ane.d3 import KIND as D3_KIND, VARIANTS
-    from tinkerbox_ane.d3.publish import main
+    from tinkerbox_ane.publish import main
 
     spec = json.loads((source / "model.json").read_text())
     repo, revision, _ = VARIANTS["d3-nano"]
