@@ -85,7 +85,7 @@ Run tests under the watchdog, with a new report path each time:
 uv run python -m tinkerbox_ane.guard artifacts/validation/run-1 -- uv run pytest -q -rs
 ```
 
-Model tests use this Mac's installed catalog bundle, or a bundle from `D1_ASSET`, `D3_NANO_ASSET`, `D3_MINI_ASSET`, `GPT2_ASSET` (`GPT2_XL_LUT8_ASSET` and so on), `TINKERBOX_SPEECH_TEST_ASSET` or `TINKERBOX_VOXCPM2_TEST_ASSET`. Without one they skip; `scripts/release.py` fails on any skip. The OmniVoice portability test also needs `TINKERBOX_OMNIVOICE_CHECKPOINT`. App behavior is covered by the [Swift smokes](../app/README.md#development).
+Model tests use this Mac's installed catalog bundle, or a bundle from `D1_ASSET`, `D3_NANO_ASSET`, `D3_MINI_ASSET`, `GPT2_ASSET` (`GPT2_XL_LUT8_ASSET` and so on), `TINKERBOX_SPEECH_TEST_ASSET` or `TINKERBOX_VOXCPM2_TEST_ASSET`. Without one they skip; `scripts/release.py` fails on any skip. App behavior is covered by the [Swift smokes](../app/README.md#development).
 
 Numerical checks compare against upstream references. Report the device, the bundle, and whether a check ran on-device or was cross-compiled.
 

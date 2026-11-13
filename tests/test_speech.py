@@ -2,7 +2,6 @@
 
 import io
 import os
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -162,29 +161,11 @@ def test_short_speech_is_intelligible_and_can_be_transcribed_for_cloning(speech)
     assert len(explicit) == speech.sampling_rate
 
 
-def test_installed_speech_runs_without_an_upstream_checkpoint(speech, asset, tmp_path, monkeypatch):
-    """A locally installed bundle carries the CPU lookup tables and nested audio codec."""
-    import json
-    import tinkerbox_ane
-    from tinkerbox_ane import bundle, models
-    from tinkerbox_ane.omnivoice import KIND
+def test_installed_speech_runs_offline_without_upstream_files(speech, asset, tmp_path):
+    """A catalog bundle carries its CPU tables and audio codec, so speech needs no network or upstream checkpoint."""
+    import subprocess
+    import sys
 
-    weights = os.environ.get("TINKERBOX_OMNIVOICE_CHECKPOINT")
-    if not weights:
-        pytest.skip("set TINKERBOX_OMNIVOICE_CHECKPOINT to the pinned upstream checkpoint")
-    source = asset
-    portable = tmp_path / "portable"
-    portable.mkdir()
-    spec = bundle.read_bundle(source, KIND)
-    for name in bundle.asset_names(spec):
-        bundle.clone(source / name, portable / name)
-    cpu = bundle.write_checkpoint(Path(weights), portable, ["llm.embed_tokens.weight", "audio_embeddings.weight"])
-    spec["checkpoint_hash"] = bundle.checkpoint_digest(cpu)
-    (portable / "model.json").write_text(json.dumps(spec))
-    monkeypatch.setattr(bundle, "CACHE", tmp_path / "cache")
-    installed = models.install("omnivoice", portable)
-    monkeypatch.delenv("TINKERBOX_OMNIVOICE_CHECKPOINT")
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     options = dict(
         duration=1,
         num_step=4,
@@ -196,7 +177,17 @@ def test_installed_speech_runs_without_an_upstream_checkpoint(speech, asset, tmp
         seed=42,
     )
     expected = speech.generate("Hello.", **options)[0]
-    with tinkerbox_ane.load("omnivoice", installed) as model:
-        actual = model.generate("Hello.", **options)[0]
-        assert model.sampling_rate == 24000
-        assert len(actual) == 24000 and np.array_equal(actual, expected)
+    output = tmp_path / "speech.npy"
+    script = (
+        "import sys, numpy, tinkerbox_ane\n"
+        "with tinkerbox_ane.load('omnivoice', sys.argv[1]) as model:\n"
+        f"    audio = model.generate('Hello.', **{options!r})[0]\n"
+        "    assert model.sampling_rate == 24000\n"
+        "numpy.save(sys.argv[2], audio)\n"
+    )
+    # An empty Hugging Face cache with downloads disabled leaves only the bundle to load from.
+    environment = {key: value for key, value in os.environ.items() if key != "TINKERBOX_OMNIVOICE_CHECKPOINT"}
+    environment.update(HF_HOME=str(tmp_path / "huggingface"), HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
+    subprocess.run([sys.executable, "-c", script, str(asset), str(output)], env=environment, check=True)
+    actual = np.load(output)
+    assert len(actual) == 24000 and np.array_equal(actual, expected)
