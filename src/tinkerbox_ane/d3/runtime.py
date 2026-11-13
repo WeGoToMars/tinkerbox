@@ -36,12 +36,12 @@ class Embeddings:
         features = torch.cat(image_features) if image_features else None
         used = 0
         for start in range(0, len(ids), CHUNK):
-            part = ids[start:start + CHUNK]
+            part = ids[start : start + CHUNK]
             rows = torch.zeros(CHUNK, self.table.shape[1])
-            rows[:len(part)] = self.table[part].float() * RESIDUAL_SCALE
+            rows[: len(part)] = self.table[part].float() * RESIDUAL_SCALE
             if features is not None:
                 slots = (torch.tensor(part) == IMAGE_TOKEN_ID).nonzero().flatten()
-                rows[slots] = features[used:used + len(slots)]
+                rows[slots] = features[used : used + len(slots)]
                 used += len(slots)
             yield rows.T.half().numpy()
 
@@ -58,11 +58,11 @@ def rope_positions(ids: list[int], grids, merge: int) -> torch.Tensor:
             continue
         _, rows, cols = (int(n) // f for n, f in zip(next(grids), (1, merge, merge)))
         count = rows * cols
-        if ids[i:i + count] != [IMAGE_TOKEN_ID] * count:
+        if ids[i : i + count] != [IMAGE_TOKEN_ID] * count:
             raise ValueError("image tokens do not match the image grid")
-        positions[0, i:i + count] = offset
-        positions[1, i:i + count] = torch.arange(rows).repeat_interleave(cols) + offset
-        positions[2, i:i + count] = torch.arange(cols).repeat(rows) + offset
+        positions[0, i : i + count] = offset
+        positions[1, i : i + count] = torch.arange(rows).repeat_interleave(cols) + offset
+        positions[2, i : i + count] = torch.arange(cols).repeat(rows) + offset
         offset, i = offset + max(rows, cols), i + count
     return positions
 
@@ -153,7 +153,10 @@ def load(asset: Path):
                 for question in questions:
                     text = vision.processor.apply_chat_template(
                         rt.image_messages("d3", state, question.rendered, self._codes, len(pictures)),
-                        tokenize=False, add_generation_prompt=True, enable_thinking=False)
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
                     if text.count("<|image_pad|>") != len(pictures) or "<|video_pad|>" in text:
                         raise ValueError("the state or question contains a literal image or video placeholder token")
                     encoded = vision.processor(text=[text], images=pictures, return_tensors="pt")
@@ -195,9 +198,12 @@ def load(asset: Path):
                 plans = [self._plan(*request) for request in requests]
                 passes = sum(len(rows) for rows, _, _ in plans)
                 if passes > 1:
-                    warnings.warn(f"{self._host.spec['source']['repo']} answers one question per pass; {passes} questions run "
-                                  "sequentially, each reading its whole prompt", SequentialQuestionsWarning,
-                                  stacklevel=3)
+                    warnings.warn(
+                        f"{self._host.spec['source']['repo']} answers one question per pass; {passes} questions run "
+                        "sequentially, each reading its whole prompt",
+                        SequentialQuestionsWarning,
+                        stacklevel=3,
+                    )
                 done = []
                 self._host.metrics()  # Start each request's Neural Engine count from zero.
                 for rows, _, media in plans:
@@ -206,10 +212,13 @@ def load(asset: Path):
                         features = self._vision.encode(media["pixel_values"], media["image_grid_thw"])
                     probabilities = [self._probabilities(ids, question, media, features) for ids, question in rows]
                     engine = self._host.metrics()
-                    compute = {"neural_engine_ms": 1000 * engine["seconds"],
-                               "flops": sum(self._flops[name] * calls for name, calls in engine["calls"].items())}
-                    done.append(([question for _, question in rows], probabilities,
-                                 sum(len(ids) for ids, _ in rows), compute))
+                    compute = {
+                        "neural_engine_ms": 1000 * engine["seconds"],
+                        "flops": sum(self._flops[name] * calls for name, calls in engine["calls"].items()),
+                    }
+                    done.append(
+                        ([question for _, question in rows], probabilities, sum(len(ids) for ids, _ in rows), compute)
+                    )
                 return done
 
         def probabilities(self, state, questions, images=None) -> list[list[float]]:
@@ -230,10 +239,16 @@ def load(asset: Path):
             """Many (state, questions[, images]) requests, answered in order."""
             requests = [(r[0], dict(r[1]), r[2] if len(r) > 2 else None) for r in requests]
             done = self._run([(state, list(named.values()), images) for state, named, images in requests])
-            return [{"answers": {name: rt.product_answer(question, probabilities)
-                                 for name, question, probabilities in zip(named, questions, probs)},
-                     "usage": {"input_tokens": read, "output_tokens": 0, **compute}}
-                    for (_, named, _), (questions, probs, read, compute) in zip(requests, done)]
+            return [
+                {
+                    "answers": {
+                        name: rt.product_answer(question, probabilities)
+                        for name, question, probabilities in zip(named, questions, probs)
+                    },
+                    "usage": {"input_tokens": read, "output_tokens": 0, **compute},
+                }
+                for (_, named, _), (questions, probs, read, compute) in zip(requests, done)
+            ]
 
         def token_spans(self, text):
             """Visible raw-input tokens, excluding task templates and image tokens."""
@@ -247,8 +262,11 @@ def load(asset: Path):
                     raise RuntimeError("the model is closed")
                 rows, pictures, _ = self._plan(state, list(questions.values()), images)
                 layouts = [self._get_vision().layout(picture) for picture in pictures]
-                return {"input_tokens": sum(len(ids) for ids, _ in rows),
-                        "image_tiles": len(pictures) if rows else 0, "images": layouts}
+                return {
+                    "input_tokens": sum(len(ids) for ids, _ in rows),
+                    "image_tiles": len(pictures) if rows else 0,
+                    "images": layouts,
+                }
 
         def close(self):
             with self._lock:

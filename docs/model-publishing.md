@@ -68,6 +68,15 @@ It refuses an export whose upstream checkpoint differs from the model's. `--arch
 
 GPT-2 is published by hand: every size and format shares [wegotomars/GPT2-CoreAI-ANE](https://huggingface.co/wegotomars/GPT2-CoreAI-ANE), with bundles under `<model>/<format>/macos27/<architecture>` (the catalog's `subfolder`). Compile each export with `tinkerbox_ane.publish.build_architectures`, then upload the tree with `upload_to_hub(repo, staging, tag, allow_patterns=..., delete_patterns=...)`.
 
+## Style
+
+`pyproject.toml` configures Ruff and `.swift-format` configures Swift (layout only). Format before committing:
+
+```sh
+uvx ruff format && uvx ruff check
+swift format --in-place --recursive app src tests
+```
+
 ## Tests
 
 Run tests under the watchdog, with a new report path each time:

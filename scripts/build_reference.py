@@ -21,8 +21,9 @@ LETTERS = "ABCDEFGH"
 def rows(dataset: str, config: str, split: str, total: int) -> list[tuple[int, dict]]:
     result = []
     for offset in (k * (total // 8) for k in range(8)):
-        query = urllib.parse.urlencode({"dataset": dataset, "config": config, "split": split,
-                                        "offset": offset, "length": 12})
+        query = urllib.parse.urlencode(
+            {"dataset": dataset, "config": config, "split": split, "offset": offset, "length": 12}
+        )
         url = f"https://datasets-server.huggingface.co/rows?{query}"
         for attempt in range(3):
             try:
@@ -44,30 +45,62 @@ def rows(dataset: str, config: str, split: str, total: int) -> list[tuple[int, d
 
 def arc(row):
     labels, texts = row["choices"]["label"], row["choices"]["text"]
-    return row["question"], {"type": "choice", "instructions": "Which option answers the question correctly?",
-                             "criteria": dict(zip(labels, texts))}, labels.index(row["answerKey"])
+    return (
+        row["question"],
+        {
+            "type": "choice",
+            "instructions": "Which option answers the question correctly?",
+            "criteria": dict(zip(labels, texts)),
+        },
+        labels.index(row["answerKey"]),
+    )
 
 
 def mmlu(row):
-    return row["question"], {"type": "choice", "instructions": "Which option answers the question correctly?",
-                             "criteria": dict(zip(LETTERS, row["choices"]))}, row["answer"]
+    return (
+        row["question"],
+        {
+            "type": "choice",
+            "instructions": "Which option answers the question correctly?",
+            "criteria": dict(zip(LETTERS, row["choices"])),
+        },
+        row["answer"],
+    )
 
 
 def boolq(row):
     question = row["question"].strip().rstrip("?") + "?"
-    return row["passage"], {"type": "noul", "instructions": question[0].upper() + question[1:]}, 0 if row["answer"] else 1
+    return (
+        row["passage"],
+        {"type": "noul", "instructions": question[0].upper() + question[1:]},
+        0 if row["answer"] else 1,
+    )
 
 
 def ag_news(row):
-    topics = {"world": "World news and politics", "sports": "Sports", "business": "Business and economy",
-              "sci_tech": "Science and technology"}
-    return row["text"], {"type": "choice", "instructions": "What is the topic of this news article?",
-                         "criteria": topics}, row["label"]
+    topics = {
+        "world": "World news and politics",
+        "sports": "Sports",
+        "business": "Business and economy",
+        "sci_tech": "Science and technology",
+    }
+    return (
+        row["text"],
+        {"type": "choice", "instructions": "What is the topic of this news article?", "criteria": topics},
+        row["label"],
+    )
 
 
 def yelp(row):
-    return row["text"], {"type": "score", "instructions": "How many stars did the reviewer give?",
-                         "criteria": ["1 star", "2 stars", "3 stars", "4 stars", "5 stars"]}, row["label"]
+    return (
+        row["text"],
+        {
+            "type": "score",
+            "instructions": "How many stars did the reviewer give?",
+            "criteria": ["1 star", "2 stars", "3 stars", "4 stars", "5 stars"],
+        },
+        row["label"],
+    )
 
 
 SOURCES = [
@@ -87,13 +120,19 @@ def long_prompt(engine, api, bucket: int, question_type: str, position: str, var
     elif question_type == "choice":
         label = variant % 3
         teams = ("Billing", "Technical support", "Shipping")
-        question = {"type": "choice", "instructions": "Which team is assigned to the TARGET ticket?",
-                    "criteria": {"billing": "Billing", "technical": "Technical support", "shipping": "Shipping"}}
+        question = {
+            "type": "choice",
+            "instructions": "Which team is assigned to the TARGET ticket?",
+            "criteria": {"billing": "Billing", "technical": "Technical support", "shipping": "Shipping"},
+        }
         evidence = f"TARGET ticket: The assigned team is {teams[label]}."
     elif question_type == "score":
         label = variant % 5
-        question = {"type": "score", "instructions": "What priority level is explicitly assigned to the TARGET ticket?",
-                    "criteria": ["Priority 1", "Priority 2", "Priority 3", "Priority 4", "Priority 5"]}
+        question = {
+            "type": "score",
+            "instructions": "What priority level is explicitly assigned to the TARGET ticket?",
+            "criteria": ["Priority 1", "Priority 2", "Priority 3", "Priority 4", "Priority 5"],
+        }
         evidence = f"TARGET ticket: The assigned priority level is {label + 1} out of 5."
     else:
         raise ValueError(f"unknown question type: {question_type}")
@@ -124,8 +163,14 @@ def long_prompt(engine, api, bucket: int, question_type: str, position: str, var
     state, ids = candidate(low)
     if not bucket - 8 <= len(ids) <= bucket:
         raise ValueError(f"could not fill bucket {bucket}: got {len(ids)} tokens")
-    return {"source": f"long_{bucket}", "evidence_position": position, "state": state, "question": question,
-            "label": label, "ids": ids}
+    return {
+        "source": f"long_{bucket}",
+        "evidence_position": position,
+        "state": state,
+        "question": question,
+        "label": label,
+        "ids": ids,
+    }
 
 
 def main():
@@ -135,8 +180,7 @@ def main():
     from transformers import AutoModel
 
     torch.set_grad_enabled(False)
-    model = AutoModel.from_pretrained(REPO, revision=REVISION, trust_remote_code=True,
-                                      dtype=torch.float32).eval().cpu()
+    model = AutoModel.from_pretrained(REPO, revision=REVISION, trust_remote_code=True, dtype=torch.float32).eval().cpu()
     engine = model.engine
     api = sys.modules[type(engine).__mro__[1].__module__]
 
@@ -167,8 +211,9 @@ def main():
     for bucket_index, length in enumerate((1024, 2048, 3072, 4096)):
         for type_index, kind in enumerate(QUESTION_TYPES):
             for position_index, position in enumerate(EVIDENCE_POSITIONS):
-                items.append(score(long_prompt(engine, api, length, kind, position,
-                                               bucket_index + type_index + position_index)))
+                items.append(
+                    score(long_prompt(engine, api, length, kind, position, bucket_index + type_index + position_index))
+                )
     for length in (6144, 16384, 32768, 10000, 18000, 22000, 26000):
         items.append(score(long_prompt(engine, api, length, "noul", "middle", 0)))
     document = {"reference": reference_metadata(), "items": items}

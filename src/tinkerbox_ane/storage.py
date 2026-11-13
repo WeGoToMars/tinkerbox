@@ -90,8 +90,11 @@ class Meter:
 
 def revisions(model: str) -> list[Path]:
     folder = CACHE / model
-    return sorted(p for p in folder.iterdir() if p.is_dir() and not p.is_symlink()
-                  and not p.name.startswith(".")) if folder.is_dir() and not folder.is_symlink() else []
+    return (
+        sorted(p for p in folder.iterdir() if p.is_dir() and not p.is_symlink() and not p.name.startswith("."))
+        if folder.is_dir() and not folder.is_symlink()
+        else []
+    )
 
 
 def keys(revision: Path) -> set[str]:
@@ -138,9 +141,11 @@ def files(paths: list[Path], size: Meter) -> dict:
 def model_ids() -> list[str]:
     """Catalog models, then leftovers of earlier versions that are no longer in it."""
     catalog = [entry["id"] for entry in CATALOG]
-    found = sorted(p.name for p in CACHE.iterdir() if p.is_dir() and not p.is_symlink()
-                   and not p.name.startswith(".")) \
-        if CACHE.is_dir() else []
+    found = (
+        sorted(p.name for p in CACHE.iterdir() if p.is_dir() and not p.is_symlink() and not p.name.startswith("."))
+        if CACHE.is_dir()
+        else []
+    )
     return catalog + [model for model in found if model not in catalog]
 
 
@@ -159,12 +164,24 @@ def usage() -> dict:
         for revision in sorted(revisions(model), key=lambda r: r.name != entry.get("revision")):
             compiled = sorted(current[key] for key in keys(revision) if key in current)
             used |= {p.name for p in compiled}
-            bundles.append({"revision": revision.name, "path": str(revision), "bytes": size(revision),
-                            "current": revision.name == entry.get("revision"), "compiled": files(compiled, size)})
+            bundles.append(
+                {
+                    "revision": revision.name,
+                    "path": str(revision),
+                    "bytes": size(revision),
+                    "current": revision.name == entry.get("revision"),
+                    "compiled": files(compiled, size),
+                }
+            )
         if bundles:
-            models.append({"id": model, "name": entry.get("name", model),
-                           "bundles": sorted(bundles, key=lambda b: b["revision"]),
-                           "bytes": sum(b["bytes"] + b["compiled"]["bytes"] for b in bundles)})
+            models.append(
+                {
+                    "id": model,
+                    "name": entry.get("name", model),
+                    "bundles": sorted(bundles, key=lambda b: b["revision"]),
+                    "bytes": sum(b["bytes"] + b["compiled"]["bytes"] for b in bundles),
+                }
+            )
     # One checkpoint can serve several variants; it is listed once, with the models that have files.
     stored, upstream = {m["id"] for m in models}, []
     for name in dict.fromkeys(entry.get("original_model") for entry in CATALOG):
@@ -174,13 +191,21 @@ def usage() -> dict:
     unused = files([p for key, p in current.items() if key not in used] + earlier, size)
     # uv links the packages from its cache, shared with other uv projects, into the environment.
     python = Path(sys.base_prefix)
-    sites = {Path(p): size(Path(p)) for p in sys.path
-             if p.endswith("site-packages") and Path(p).is_dir() and not Path(p).is_relative_to(python)}
+    sites = {
+        Path(p): size(Path(p))
+        for p in sys.path
+        if p.endswith("site-packages") and Path(p).is_dir() and not Path(p).is_relative_to(python)
+    }
     packages = {"path": str(max(sites, key=sites.get).parents[2]) if sites else "", "bytes": sum(sites.values())}
     shared = {"unused_compiled": unused, "python": {"path": str(python), "bytes": size(python)}, "packages": packages}
-    return {"models": models, "checkpoints": upstream, **shared,
-            "bytes": sum(m["bytes"] for m in models) + sum(c["bytes"] for c in upstream)
-            + sum(item["bytes"] for item in shared.values())}
+    return {
+        "models": models,
+        "checkpoints": upstream,
+        **shared,
+        "bytes": sum(m["bytes"] for m in models)
+        + sum(c["bytes"] for c in upstream)
+        + sum(item["bytes"] for item in shared.values()),
+    }
 
 
 def remove(model: str, outdated: bool = False) -> None:
@@ -204,8 +229,11 @@ def remove(model: str, outdated: bool = False) -> None:
         return
     shutil.rmtree(CACHE / model, ignore_errors=True)  # also interrupted installs and downloads
     repo = checkpoints().get(entry.get("original_model"))
-    shared = any(e.get("original_model") == entry.get("original_model") and revisions(e["id"])
-                 for e in CATALOG if e["id"] != model)
+    shared = any(
+        e.get("original_model") == entry.get("original_model") and revisions(e["id"])
+        for e in CATALOG
+        if e["id"] != model
+    )
     if repo is not None and not shared:
         from huggingface_hub import scan_cache_dir
 
@@ -234,10 +262,14 @@ def main(argv: list[str] | None = None) -> None:
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--remove", metavar="MODEL", help="delete a model's files first")
     action.add_argument("--remove-checkpoint", nargs="+", metavar="REPO", help="delete upstream checkpoints first")
-    action.add_argument("--remove-unused", action="store_true",
-                        help="delete compiled copies that no downloaded bundle uses first")
-    parser.add_argument("--outdated", action="store_true",
-                        help="delete revisions the catalog no longer uses: of --remove's model, else of every model")
+    action.add_argument(
+        "--remove-unused", action="store_true", help="delete compiled copies that no downloaded bundle uses first"
+    )
+    parser.add_argument(
+        "--outdated",
+        action="store_true",
+        help="delete revisions the catalog no longer uses: of --remove's model, else of every model",
+    )
     args = parser.parse_args(argv)
     if args.outdated and (args.remove_checkpoint or args.remove_unused):
         parser.error("--outdated combines only with --remove")

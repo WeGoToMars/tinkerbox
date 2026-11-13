@@ -36,51 +36,85 @@ def export(model: str, out: Path, include_vision: bool = True) -> Path:
         for i, (start, end) in enumerate(stage_ranges(cfg)):
             converter = TorchConverter()
             scan = ScanStage(backbone, start, end).eval()
-            inputs = (zeros(1, cfg.hidden, 1, CHUNK), zeros(1, 1, cfg.rotary_dim // 2, CHUNK),
-                      zeros(1, 1, cfg.rotary_dim // 2, CHUNK), zeros(1, scan.channels, 1, CHUNK))
+            inputs = (
+                zeros(1, cfg.hidden, 1, CHUNK),
+                zeros(1, 1, cfg.rotary_dim // 2, CHUNK),
+                zeros(1, 1, cfg.rotary_dim // 2, CHUNK),
+                zeros(1, scan.channels, 1, CHUNK),
+            )
             # Matmul, convolution and attention FLOPs of each function, for the runtime's compute rate.
             flops = {f"scan{i}": count_flops(scan, inputs)}
             program = torch.export.export(scan, inputs).run_decompositions(get_decomp_table())
             # Keep entrypoint names distinct across assets: avoid specialization cache collisions.
             converter.add_exported_program(
-                program, input_names=[INPUT, "cos", "sin", "packed_state"],
+                program,
+                input_names=[INPUT, "cos", "sin", "packed_state"],
                 output_names=[OUTPUT, "query", "gate", "key", "value", "packed_state_out"],
                 entrypoint_name=f"scan{i}",
             )
             for capacity in tiers:
                 attend = AttendStage(backbone, end, capacity).eval()
-                inputs = (zeros(1, cfg.hidden, 1, CHUNK), zeros(1, cfg.heads, CHUNK, cfg.head_dim),
-                          zeros(1, cfg.heads, CHUNK, cfg.head_dim), zeros(1, cfg.kv_heads, capacity, cfg.head_dim),
-                          zeros(1, cfg.kv_heads, capacity, cfg.head_dim), zeros(1, 1, 1, capacity))
+                inputs = (
+                    zeros(1, cfg.hidden, 1, CHUNK),
+                    zeros(1, cfg.heads, CHUNK, cfg.head_dim),
+                    zeros(1, cfg.heads, CHUNK, cfg.head_dim),
+                    zeros(1, cfg.kv_heads, capacity, cfg.head_dim),
+                    zeros(1, cfg.kv_heads, capacity, cfg.head_dim),
+                    zeros(1, 1, 1, capacity),
+                )
                 flops[f"attend{i}c{capacity}"] = count_flops(attend, inputs)
                 program = torch.export.export(attend, inputs).run_decompositions(get_decomp_table())
                 converter.add_exported_program(
-                    program, input_names=[INPUT, "query", "gate", "key", "value", "mask"],
-                    output_names=[OUTPUT], entrypoint_name=f"attend{i}c{capacity}",
+                    program,
+                    input_names=[INPUT, "query", "gate", "key", "value", "mask"],
+                    output_names=[OUTPUT],
+                    entrypoint_name=f"attend{i}c{capacity}",
                 )
             for width in PROMPT_WIDTHS:
                 prompt = PromptStage(backbone, start, end, width).eval()
-                inputs = (zeros(1, cfg.hidden, 1, width), zeros(1, 1, cfg.rotary_dim // 2, width),
-                          zeros(1, 1, cfg.rotary_dim // 2, width), zeros(1, 1, 1, width))
+                inputs = (
+                    zeros(1, cfg.hidden, 1, width),
+                    zeros(1, 1, cfg.rotary_dim // 2, width),
+                    zeros(1, 1, cfg.rotary_dim // 2, width),
+                    zeros(1, 1, 1, width),
+                )
                 flops[f"prompt{i}c{width}"] = count_flops(prompt, inputs)
                 program = torch.export.export(prompt, inputs).run_decompositions(get_decomp_table())
                 converter.add_exported_program(
-                    program, input_names=[INPUT, "cos", "sin", "mask"], output_names=[OUTPUT],
+                    program,
+                    input_names=[INPUT, "cos", "sin", "mask"],
+                    output_names=[OUTPUT],
                     entrypoint_name=f"prompt{i}c{width}",
                 )
             asset = out / f"stage{i}.aimodel"
             converter.to_coreai().save_asset(asset, metadata=asset_metadata(model))
-            assets.append({"asset": asset.name, "source_hash": source_hash(asset),
-                           "functions": [f"scan{i}"] + [f"attend{i}c{capacity}" for capacity in tiers]
-                           + [f"prompt{i}c{width}" for width in PROMPT_WIDTHS], "flops": flops})
+            assets.append(
+                {
+                    "asset": asset.name,
+                    "source_hash": source_hash(asset),
+                    "functions": [f"scan{i}"]
+                    + [f"attend{i}c{capacity}" for capacity in tiers]
+                    + [f"prompt{i}c{width}" for width in PROMPT_WIDTHS],
+                    "flops": flops,
+                }
+            )
             print(f"exported layers {start}..{end} ({time.monotonic() - started:.1f}s)", flush=True)
     manifest = {
-        "kind": KIND, "version": 2, "width": CHUNK, "context": tiers[-1], "tiers": list(tiers),
+        "kind": KIND,
+        "version": 2,
+        "width": CHUNK,
+        "context": tiers[-1],
+        "tiers": list(tiers),
         "prompts": list(PROMPT_WIDTHS),
-        "hidden": cfg.hidden, "heads": cfg.heads, "kv_heads": cfg.kv_heads, "head_dim": cfg.head_dim,
-        "conv_taps": cfg.conv_taps, "rotary_dim": cfg.rotary_dim,
+        "hidden": cfg.hidden,
+        "heads": cfg.heads,
+        "kv_heads": cfg.kv_heads,
+        "head_dim": cfg.head_dim,
+        "conv_taps": cfg.conv_taps,
+        "rotary_dim": cfg.rotary_dim,
         "stages": [end - start for start, end in stage_ranges(cfg)],
-        "attention_mode": decision["attention_mode"], "assets": assets,
+        "attention_mode": decision["attention_mode"],
+        "assets": assets,
         "parameter_bytes": sum(p.numel() * p.element_size() for p in backbone.parameters()),
         "source": {"repo": repo, "revision": revision},
     }

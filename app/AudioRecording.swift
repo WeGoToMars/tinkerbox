@@ -25,7 +25,8 @@ import SwiftUI
             preparing = false
             armed = allowed
             if !allowed {
-                error = "Allow microphone access in System Settings → Privacy & Security → Microphone to record a sample."
+                error =
+                    "Allow microphone access in System Settings → Privacy & Security → Microphone to record a sample."
             }
         }
     }
@@ -45,11 +46,13 @@ import SwiftUI
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             take += 1
             let url = folder.appending(path: "Voice sample \(take).wav")
-            let recorder = try AVAudioRecorder(url: url, settings: [
-                AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 24_000,
-                AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false
-            ])
+            let recorder = try AVAudioRecorder(
+                url: url,
+                settings: [
+                    AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 24_000,
+                    AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16,
+                    AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
+                ])
             recorder.isMeteringEnabled = true
             guard recorder.record(forDuration: 20) else {
                 error = "Could not start recording from the microphone."

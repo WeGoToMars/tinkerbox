@@ -45,7 +45,7 @@ class LayerNorm(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(norm.weight.data.view(1, -1, 1, 1))
         self.bias = nn.Parameter(norm.bias.data.view(1, -1, 1, 1))
-        self.root_eps = norm.eps ** 0.5
+        self.root_eps = norm.eps**0.5
 
     def forward(self, x):
         centered = x - x.mean(1, keepdim=True)
@@ -88,10 +88,10 @@ class ANEVisionBlock(nn.Module):
             parts = []
             for first in range(0, self.num_heads, group):
                 heads = slice(first, first + group)
-                scores = queries[:, heads, start:start + rows] @ k[:, heads] + mask
+                scores = queries[:, heads, start : start + rows] @ k[:, heads] + mask
                 weights = torch.exp(scores - scores.amax(-1, keepdim=True))
                 total = values[:, heads] @ weights.transpose(-1, -2)
-                parts.append(total[:, :, :self.head_dim] / total[:, :, self.head_dim:])
+                parts.append(total[:, :, : self.head_dim] / total[:, :, self.head_dim :])
             blocks.append(torch.cat(parts, dim=1))
         x = x + self.proj(torch.cat(blocks, dim=-1).reshape(1, self.num_heads * self.head_dim, 1, s))
         return x + self.fc2(nn.functional.gelu(self.fc1(self.norm2(x)), approximate="tanh"))
@@ -111,7 +111,7 @@ class VisionTower(nn.Module):
         self.patch_proj.weight.data = visual.patch_embed.proj.weight.reshape(hidden, -1, 1, 1)
         self.patch_proj.bias.data = visual.patch_embed.proj.bias.data
         self.blocks = nn.ModuleList([ANEVisionBlock(block) for block in visual.blocks])
-        self.merge = visual.config.spatial_merge_size ** 2
+        self.merge = visual.config.spatial_merge_size**2
         merger = visual.merger
         self.merger_norm = LayerNorm(merger.norm)
         self.merger_fc1 = conv(merger.linear_fc1)
@@ -134,8 +134,9 @@ def load_visual(checkpoint_dir: Path) -> nn.Module:
     with torch.device("meta"):
         visual = Qwen3_5VisionModel(config)
     reader = CheckpointReader(checkpoint_dir)
-    visual.load_state_dict({name: reader.get_tensor(f"visual.{name}") for name in visual.state_dict()},
-                           assign=True, strict=True)
+    visual.load_state_dict(
+        {name: reader.get_tensor(f"visual.{name}") for name in visual.state_dict()}, assign=True, strict=True
+    )
     visual.rotary_pos_emb = Qwen3_5VisionRotaryEmbedding(config)
     return visual.eval().requires_grad_(False)
 
@@ -153,19 +154,30 @@ def export_vision_asset(checkpoint_dir: Path, out_path: Path, model: str) -> dic
     flops = {}
     with torch.no_grad():
         for patches in PATCH_TIERS:
-            inputs = (zeros(1, tower.patch_proj.in_channels, 1, patches), zeros(1, config.hidden_size, 1, patches),
-                      zeros(1, 1, half, patches), zeros(1, 1, half, patches), zeros(1, 1, 1, patches))
+            inputs = (
+                zeros(1, tower.patch_proj.in_channels, 1, patches),
+                zeros(1, config.hidden_size, 1, patches),
+                zeros(1, 1, half, patches),
+                zeros(1, 1, half, patches),
+                zeros(1, 1, 1, patches),
+            )
             flops[f"p{patches}"] = count_flops(tower, inputs)
             program = torch.export.export(tower, inputs).run_decompositions(get_decomp_table())
             converter.add_exported_program(
-                program, input_names=["pixel_values", "pos_embeds", "cos", "sin", "attn_mask"],
-                output_names=["features"], entrypoint_name=f"p{patches}")
+                program,
+                input_names=["pixel_values", "pos_embeds", "cos", "sin", "attn_mask"],
+                output_names=["features"],
+                entrypoint_name=f"p{patches}",
+            )
     out_path = Path(out_path)
     converter.to_coreai().save_asset(out_path, metadata=asset_metadata(model))
-    return {"vision_asset": out_path.name, "vision_source_hash": source_hash(out_path),
-            "vision_functions": [f"p{patches}" for patches in PATCH_TIERS],
-            "vision_flops": flops,
-            "vision_parameter_bytes": sum(p.numel() * p.element_size() for p in tower.parameters())}
+    return {
+        "vision_asset": out_path.name,
+        "vision_source_hash": source_hash(out_path),
+        "vision_functions": [f"p{patches}" for patches in PATCH_TIERS],
+        "vision_flops": flops,
+        "vision_parameter_bytes": sum(p.numel() * p.element_size() for p in tower.parameters()),
+    }
 
 
 class VisionPipeline:
@@ -189,11 +201,19 @@ class VisionPipeline:
 
     def layout(self, image) -> dict:
         """How one picture reaches the model: resized, never split or cropped, in one vision pass."""
-        _, rows, cols = (int(n) for n in self.processor.image_processor(
-            images=[image], return_tensors="pt")["image_grid_thw"][0])
+        _, rows, cols = (
+            int(n) for n in self.processor.image_processor(images=[image], return_tensors="pt")["image_grid_thw"][0]
+        )
         patch = self.config.patch_size
-        return {"source": list(image.size), "cols": 1, "rows": 1, "size": [cols * patch, rows * patch],
-                "overview": None, "passes": 1, "tokens": rows * cols // self.merge**2}
+        return {
+            "source": list(image.size),
+            "cols": 1,
+            "rows": 1,
+            "size": [cols * patch, rows * patch],
+            "overview": None,
+            "passes": 1,
+            "tokens": rows * cols // self.merge**2,
+        }
 
     @torch.inference_mode()
     def encode(self, pixel_values: torch.Tensor, grids: torch.Tensor) -> list[torch.Tensor]:
@@ -205,8 +225,12 @@ class VisionPipeline:
             capacity = next(p for p in self.capacities if p >= count)
             thw = grid[None]
             indices, weights = get_vision_interpolation_indices_and_weights(
-                thw, num_grid_per_side=int(self.config.num_position_embeddings ** 0.5), mode="bilinear",
-                align_corners=True, spatial_merge_size=self.merge)
+                thw,
+                num_grid_per_side=int(self.config.num_position_embeddings**0.5),
+                mode="bilinear",
+                align_corners=True,
+                spatial_merge_size=self.merge,
+            )
             pos = (self.pos_weight[indices] * weights[:, :, None]).sum(1)
             cos, sin = self.rotary(pos, get_vision_position_ids(thw, self.merge))
             half = cos.shape[1] // 2
@@ -218,13 +242,16 @@ class VisionPipeline:
 
             mask = torch.full((1, 1, 1, capacity), MASK_MIN, dtype=torch.float16)
             mask[..., :count] = 0
-            out = self.host.vision({
-                "pixel_values": padded(pixel_values[start:start + count]),
-                "pos_embeds": padded(pos),
-                "cos": padded(cos[:, :half]).transpose(1, 2),
-                "sin": padded(sin[:, :half]).transpose(1, 2),
-                "attn_mask": mask,
-            }, f"p{capacity}")
-            features.append(torch.from_numpy(out[0, :, 0, :count // self.merge**2]).T.float() * RESIDUAL_SCALE)
+            out = self.host.vision(
+                {
+                    "pixel_values": padded(pixel_values[start : start + count]),
+                    "pos_embeds": padded(pos),
+                    "cos": padded(cos[:, :half]).transpose(1, 2),
+                    "sin": padded(sin[:, :half]).transpose(1, 2),
+                    "attn_mask": mask,
+                },
+                f"p{capacity}",
+            )
+            features.append(torch.from_numpy(out[0, :, 0, : count // self.merge**2]).T.float() * RESIDUAL_SCALE)
             start += count
         return features

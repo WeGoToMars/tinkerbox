@@ -198,9 +198,13 @@ enum SpeechValue: Codable, Sendable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
-        if let value = try? container.decode(Bool.self) { self = .boolean(value) }
-        else if let value = try? container.decode(String.self) { self = .text(value) }
-        else { self = .number(try container.decode(Double.self)) }
+        if let value = try? container.decode(Bool.self) {
+            self = .boolean(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .text(value)
+        } else {
+            self = .number(try container.decode(Double.self))
+        }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -432,7 +436,8 @@ actor Runtime {
     private func prepare(model: String) async throws -> ReadyReply {
         if let readyReply, readyReply.modelId == model, isConnected { return readyReply }
         if let selected = Catalog.current(model),
-           let issue = Catalog.availabilityIssue(for: selected, asset: Catalog.overrideAsset) {
+            let issue = Catalog.availabilityIssue(for: selected, asset: Catalog.overrideAsset)
+        {
             throw TinkerboxError(issue)
         }
         // The previous worker releases its Neural Engine memory before the next one loads.
@@ -459,7 +464,8 @@ actor Runtime {
         if process.environment!["TINKERBOX_ASSET"] == nil, let asset = Catalog.localAsset(for: model) {
             process.environment!["TINKERBOX_ASSET"] = asset
         }
-        try FileManager.default.createDirectory(at: Self.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: Self.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: Self.logURL.path, contents: nil)
         let log = try FileHandle(forWritingTo: Self.logURL)
         defer { log.closeFile() }
@@ -507,11 +513,12 @@ actor Runtime {
     // Runs Python with these arguments in the app's environment: its pinned tinkerbox-ane and dependencies.
     nonisolated static func configure(_ process: Process, python arguments: [String]) {
         process.executableURL = Bundle.main.executableURL!.deletingLastPathComponent().appending(path: "uv")
-        process.arguments = [
-            "run", "--no-project", "--no-config", "--isolated", "--managed-python",
-            "--python", "3.12", "--no-build", "--with-requirements",
-            Bundle.main.url(forResource: "requirements", withExtension: "txt")!.path, "python",
-        ] + arguments
+        process.arguments =
+            [
+                "run", "--no-project", "--no-config", "--isolated", "--managed-python",
+                "--python", "3.12", "--no-build", "--with-requirements",
+                Bundle.main.url(forResource: "requirements", withExtension: "txt")!.path, "python",
+            ] + arguments
         var environment = ProcessInfo.processInfo.environment
         for name in ["PYTHONPATH", "PYTHONHOME", "UV_INTERNAL__PARENT_INTERPRETER"] {
             environment.removeValue(forKey: name)
@@ -553,8 +560,10 @@ actor Runtime {
     }
 
     // With `onText`, each prompt's new text arrives while it is generated, then the complete reply.
-    func complete(_ request: CompletionRequest,
-                  onText: (@Sendable ([CompletionDelta]) async -> Void)? = nil) async throws -> TextCompletions {
+    func complete(
+        _ request: CompletionRequest,
+        onText: (@Sendable ([CompletionDelta]) async -> Void)? = nil
+    ) async throws -> TextCompletions {
         var request = request
         request.stream = onText != nil
         return try await exchange(request, model: Self.selectedModel(for: .completion)) { envelope in
@@ -563,8 +572,10 @@ actor Runtime {
     }
 
     // With `onAudio`, one text's pieces arrive in order while it is generated, then the complete reply.
-    func speak(_ request: SpeechRequest, model: String? = nil,
-               onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil) async throws -> SpeechReply {
+    func speak(
+        _ request: SpeechRequest, model: String? = nil,
+        onAudio: (@Sendable (SpeechChunk) async -> Void)? = nil
+    ) async throws -> SpeechReply {
         var request = request
         request.stream = onAudio == nil ? nil : true
         return try await exchange(request, model: model ?? Self.selectedModel(for: .speech)) { envelope in
@@ -591,8 +602,10 @@ actor Runtime {
 
     // One request and its reply. Previews (`load: false`) never load a model or extend its idle timeout.
     // Streamed pieces go to `onPiece` until the reply; the exchange drains them even if no one listens.
-    private func exchange<T: Decodable>(_ request: some Encodable & Sendable, model: String, load: Bool = true,
-                                        onPiece: ((Envelope) async -> Void)? = nil) async throws -> T {
+    private func exchange<T: Decodable>(
+        _ request: some Encodable & Sendable, model: String, load: Bool = true,
+        onPiece: ((Envelope) async -> Void)? = nil
+    ) async throws -> T {
         await acquire()
         defer { release(activity: load) }
         try Task.checkCancellation()
@@ -657,6 +670,7 @@ actor Runtime {
 
     private static func stopped() -> TinkerboxError {
         let lines = ((try? String(contentsOf: logURL, encoding: .utf8)) ?? "").split(separator: "\n").suffix(10)
-        return TinkerboxError("The model process quit unexpectedly. From \(logURL.path):\n\(lines.joined(separator: "\n"))")
+        return TinkerboxError(
+            "The model process quit unexpectedly. From \(logURL.path):\n\(lines.joined(separator: "\n"))")
     }
 }

@@ -28,12 +28,12 @@ class Embeddings:
         features = torch.cat(image_features).float() if image_features else None
         used = 0
         for start in range(0, len(ids), CHUNK):
-            part = ids[start:start + CHUNK]
+            part = ids[start : start + CHUNK]
             rows = torch.zeros(CHUNK, self.table.shape[1])
-            rows[:len(part)] = self.table[part].float() * RESIDUAL_SCALE
+            rows[: len(part)] = self.table[part].float() * RESIDUAL_SCALE
             if features is not None:
                 slots = (torch.tensor(part) == IMAGE_TOKEN_ID).nonzero().flatten()
-                rows[slots] = features[used:used + len(slots)]
+                rows[slots] = features[used : used + len(slots)]
                 used += len(slots)
             yield rows.T.half().numpy()
 
@@ -55,8 +55,13 @@ def load(asset):
             self._vision = None
             self._max_image_tiles = MAX_IMAGE_TILES
             config = json.loads((path / "config.json").read_text())
-            self._render_args = (self._tokenizer.bos_token or "", prompt.default_lead(config["model_type"]),
-                                 prompt.DEFAULT_STATE_STYLE, prompt.DEFAULT_SYSTEM, "desc")
+            self._render_args = (
+                self._tokenizer.bos_token or "",
+                prompt.default_lead(config["model_type"]),
+                prompt.DEFAULT_STATE_STYLE,
+                prompt.DEFAULT_SYSTEM,
+                "desc",
+            )
             self._host = Host(asset, KIND)
             spec = self._host.spec
             self._flops = {**spec["flops"], **spec.get("vision_flops", {})}
@@ -114,8 +119,9 @@ def load(asset):
                     i = indices[0]
                     result.append(self._probabilities(trunk + branches[i], questions[i], image_features=image_features))
                     continue
-                plan = TreePlan(trunk, [branches[i] for i in indices], self.chunk_width,
-                                self._host.conv_taps, self.context)
+                plan = TreePlan(
+                    trunk, [branches[i] for i in indices], self.chunk_width, self._host.conv_taps, self.context
+                )
                 chunks = self._embeddings.chunks(plan.ids, image_features)
                 hidden = self._host.hidden_chunks(chunks, len(plan.ids), plan=plan)
                 for i, h in zip(indices, hidden):
@@ -138,10 +144,13 @@ def load(asset):
             if len(questions) == 1:
                 if pics:
                     vision = self._get_vision()
-                    prefix = prompt.prefix_text(self._tokenizer, state, bos, style, system,
-                                                images=vision.image_markup(len(pics)))
+                    prefix = prompt.prefix_text(
+                        self._tokenizer, state, bos, style, system, images=vision.image_markup(len(pics))
+                    )
                     suffix = prompt.suffix_text(self._tokenizer, questions[0], lead, option_style)
-                    inputs = vision.processor(text=[prefix + suffix], images=[list(pics)], return_tensors="pt", add_special_tokens=False)
+                    inputs = vision.processor(
+                        text=[prefix + suffix], images=[list(pics)], return_tensors="pt", add_special_tokens=False
+                    )
                     ids, tiles = inputs["input_ids"][0].tolist(), len(inputs["pixel_values"])
                 else:
                     ids = self.tokens(state, questions[0])
@@ -150,15 +159,23 @@ def load(asset):
                 return ids, [], questions, pics, tiles
             if pics:
                 vision = self._get_vision()
-                prefix = prompt.prefix_text(self._tokenizer, state, bos, style, system,
-                                            images=vision.image_markup(len(pics)))
-                inputs = vision.processor(text=[prefix], images=[list(pics)], return_tensors="pt", add_special_tokens=False)
+                prefix = prompt.prefix_text(
+                    self._tokenizer, state, bos, style, system, images=vision.image_markup(len(pics))
+                )
+                inputs = vision.processor(
+                    text=[prefix], images=[list(pics)], return_tensors="pt", add_special_tokens=False
+                )
                 trunk, tiles = inputs["input_ids"][0].tolist(), len(inputs["pixel_values"])
             else:
-                trunk = self._tokenizer.encode(prompt.prefix_text(self._tokenizer, state, bos, style, system),
-                                               add_special_tokens=False)
-            branches = [self._tokenizer.encode(prompt.suffix_text(self._tokenizer, q, lead, option_style),
-                                               add_special_tokens=False) for q in questions]
+                trunk = self._tokenizer.encode(
+                    prompt.prefix_text(self._tokenizer, state, bos, style, system), add_special_tokens=False
+                )
+            branches = [
+                self._tokenizer.encode(
+                    prompt.suffix_text(self._tokenizer, q, lead, option_style), add_special_tokens=False
+                )
+                for q in questions
+            ]
             list(groups(trunk, branches, self.context))  # raises when a group exceeds the context
             return trunk, branches, questions, pics, tiles
 
@@ -168,8 +185,10 @@ def load(asset):
 
         def _split(self, engine, share):
             """`share` of the Neural Engine time and FLOPs in a host metrics reading."""
-            return {"neural_engine_ms": 1000 * engine["seconds"] * share,
-                    "flops": round(share * sum(self._flops[name] * calls for name, calls in engine["calls"].items()))}
+            return {
+                "neural_engine_ms": 1000 * engine["seconds"] * share,
+                "flops": round(share * sum(self._flops[name] * calls for name, calls in engine["calls"].items())),
+            }
 
         def _run_trees(self, requests):
             """Each request's (probabilities, input tokens, Neural Engine time and FLOPs). Requests packed
@@ -224,8 +243,11 @@ def load(asset):
                 if self._closed:
                     raise RuntimeError("the model is closed")
                 ids, branches, _, pics, tiles = self._plan(state, list(questions.values()), images)
-                return {"input_tokens": len(ids) + sum(map(len, branches)), "image_tiles": tiles,
-                        "images": [self._get_vision().layout(pic) for pic in pics]}
+                return {
+                    "input_tokens": len(ids) + sum(map(len, branches)),
+                    "image_tiles": tiles,
+                    "images": [self._get_vision().layout(pic) for pic in pics],
+                }
 
         def _run(self, requests):
             with self._lock:
@@ -239,12 +261,18 @@ def load(asset):
         def system_one_batch(self, requests) -> list[dict]:
             """Many `(state, questions[, images])` requests, as upstream. `usage` adds each request's
             Neural Engine time and the FLOPs of the functions it ran, counted at export."""
-            named = [(r[0], {n: prompt.as_question(q) for n, q in r[1].items()}, (r[2] if len(r) > 2 else None) or ())
-                     for r in requests]
+            named = [
+                (r[0], {n: prompt.as_question(q) for n, q in r[1].items()}, (r[2] if len(r) > 2 else None) or ())
+                for r in requests
+            ]
             done = self._run([(state, list(qs.values()), images) for state, qs, images in named])
-            return [{"answers": {n: api.answer(q, p) for (n, q), p in zip(qs.items(), probs)},
-                     "usage": {"input_tokens": read, "output_tokens": 0, **compute}}
-                    for (_, qs, _), (probs, read, compute) in zip(named, done)]
+            return [
+                {
+                    "answers": {n: api.answer(q, p) for (n, q), p in zip(qs.items(), probs)},
+                    "usage": {"input_tokens": read, "output_tokens": 0, **compute},
+                }
+                for (_, qs, _), (probs, read, compute) in zip(named, done)
+            ]
 
         def close(self):
             with self._lock:

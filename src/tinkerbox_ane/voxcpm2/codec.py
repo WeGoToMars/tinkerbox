@@ -26,7 +26,7 @@ def conv1d(module, x):
     weight = module.weight.reshape(1, channels, taps)
     y = x[..., :length] * weight[..., :1]
     for tap in range(1, taps):
-        y = y + x[..., tap * dilation: tap * dilation + length] * weight[..., tap:tap + 1]
+        y = y + x[..., tap * dilation : tap * dilation + length] * weight[..., tap : tap + 1]
     return y if module.bias is None else y + module.bias.reshape(1, channels, 1)
 
 
@@ -45,7 +45,7 @@ class CausalTransposeConv1d(nn.ConvTranspose1d):
         self.causal_trim = padding * 2 - output_padding
 
     def forward(self, x):
-        return super().forward(x)[..., :-self.causal_trim]
+        return super().forward(x)[..., : -self.causal_trim]
 
 
 def WNCausalConv1d(*args, **kwargs):
@@ -59,7 +59,7 @@ def WNCausalTransposeConv1d(*args, **kwargs):
 def fold_weight_norm(codec):
     """Replace each weight-normalized layer's weight with its computed value, once."""
     for module in codec.modules():
-        if hasattr(module, 'weight_g'):
+        if hasattr(module, "weight_g"):
             torch.nn.utils.remove_weight_norm(module)
     return codec
 
@@ -108,8 +108,14 @@ class CausalEncoderBlock(nn.Module):
         self.block = nn.Sequential(
             *residual_units(input_dim, input_dim),
             Snake1d(input_dim),
-            WNCausalConv1d(input_dim, output_dim, kernel_size=2 * stride, stride=stride,
-                           padding=math.ceil(stride / 2), output_padding=stride % 2),
+            WNCausalConv1d(
+                input_dim,
+                output_dim,
+                kernel_size=2 * stride,
+                stride=stride,
+                padding=math.ceil(stride / 2),
+                output_padding=stride % 2,
+            ),
         )
 
     def forward(self, x):
@@ -139,8 +145,14 @@ class CausalDecoderBlock(nn.Module):
         super().__init__()
         self.block = nn.Sequential(
             Snake1d(input_dim),
-            WNCausalTransposeConv1d(input_dim, output_dim, kernel_size=2 * stride, stride=stride,
-                                    padding=math.ceil(stride / 2), output_padding=stride % 2),
+            WNCausalTransposeConv1d(
+                input_dim,
+                output_dim,
+                kernel_size=2 * stride,
+                stride=stride,
+                padding=math.ceil(stride / 2),
+                output_padding=stride % 2,
+            ),
             *residual_units(output_dim, output_dim),
         )
         self.input_channels = input_dim
@@ -173,10 +185,13 @@ class CausalDecoder(nn.Module):
         output_dim = channels // 2 ** len(rates)
         layers += [Snake1d(output_dim), WNCausalConv1d(output_dim, 1, kernel_size=7, padding=3), nn.Tanh()]
         self.model = nn.ModuleList(layers)
-        self.register_buffer('sr_bin_boundaries', torch.tensor(sr_bin_boundaries, dtype=torch.int32))
+        self.register_buffer("sr_bin_boundaries", torch.tensor(sr_bin_boundaries, dtype=torch.int32))
         self.sr_cond_model = nn.ModuleList(
             SampleRateConditionLayer(layer.input_channels, len(sr_bin_boundaries) + 1)
-            if isinstance(layer, CausalDecoderBlock) else None for layer in layers)
+            if isinstance(layer, CausalDecoderBlock)
+            else None
+            for layer in layers
+        )
 
     def forward(self, x, sample_rate):
         bucket = torch.bucketize(sample_rate, self.sr_bin_boundaries)
@@ -203,8 +218,9 @@ class AudioVAE(nn.Module):
     def __init__(self, config: AudioVAEConfig):
         super().__init__()
         self.encoder = CausalEncoder(config.encoder_dim, config.latent_dim, config.encoder_rates)
-        self.decoder = CausalDecoder(config.latent_dim, config.decoder_dim, config.decoder_rates,
-                                     config.sr_bin_boundaries)
+        self.decoder = CausalDecoder(
+            config.latent_dim, config.decoder_dim, config.decoder_rates, config.sr_bin_boundaries
+        )
         self.sample_rate = config.sample_rate
         self.out_sample_rate = config.out_sample_rate
         self.chunk_size = math.prod(config.encoder_rates)

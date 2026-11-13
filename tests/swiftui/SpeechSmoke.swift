@@ -18,12 +18,16 @@ import AVFoundation
         let parameters: [String: SpeechValue] = [
             "num_step": .number(4), "position_temperature": .number(0),
             "class_temperature": .number(0), "postprocess_output": .boolean(false),
-            "pad_duration": .number(0), "fade_duration": .number(0)
+            "pad_duration": .number(0), "fade_duration": .number(0),
         ]
-        let request = SpeechRequest(items: [SpeechItem(text: "Hello.", mode: "auto", controls: ["duration": .number(1)]),
-                                             SpeechItem(text: "Welcome.", instruct: "female, low pitch", mode: "design",
-                                                        controls: ["duration": .number(1.4)])],
-                                    parameters: parameters, seed: 42)
+        let request = SpeechRequest(
+            items: [
+                SpeechItem(text: "Hello.", mode: "auto", controls: ["duration": .number(1)]),
+                SpeechItem(
+                    text: "Welcome.", instruct: "female, low pitch", mode: "design",
+                    controls: ["duration": .number(1.4)]),
+            ],
+            parameters: parameters, seed: 42)
         let first = try await runtime.speak(request)
         precondition(first.cloneMs == 0 && first.audioMs > 0)
         precondition(first.audio.count == 2)
@@ -31,8 +35,9 @@ import AVFoundation
         precondition(first.audio[1].duration == 1.4)
         var randomParameters = parameters
         randomParameters["position_temperature"] = .number(5)
-        var randomRequest = SpeechRequest(items: [SpeechItem(text: "Hello.", duration: 1)],
-                                          parameters: randomParameters)
+        var randomRequest = SpeechRequest(
+            items: [SpeechItem(text: "Hello.", duration: 1)],
+            parameters: randomParameters)
         let random = try await runtime.speak(randomRequest)
         randomRequest.seed = random.seed
         let replay = try await runtime.speak(randomRequest)
@@ -42,8 +47,12 @@ import AVFoundation
         defer { try? FileManager.default.removeItem(at: folder) }
         let wav = folder.appending(path: "reference.wav")
         let reference = folder.appending(path: "reference.m4a")
-        let spoken = try await runtime.speak(SpeechRequest(items: [SpeechItem(
-            text: "A familiar voice can tell a new story.", language: "en")], seed: 42))
+        let spoken = try await runtime.speak(
+            SpeechRequest(
+                items: [
+                    SpeechItem(
+                        text: "A familiar voice can tell a new story.", language: "en")
+                ], seed: 42))
         try exportAudio(spoken.audio[0].wav, to: wav)
         let exported = try Data(contentsOf: wav)
         precondition(exported == spoken.audio[0].wav)
@@ -55,31 +64,40 @@ import AVFoundation
             precondition(player.prepareToPlay() && abs(player.duration - spoken.audio[0].duration) < 0.1)
         }
         let transcript = try await ReferenceTranscription.transcribe(reference, locale: Locale(identifier: "en-US"))
-        precondition(transcript.lowercased().contains("familiar voice") && transcript.lowercased().contains("new story"), transcript)
+        precondition(
+            transcript.lowercased().contains("familiar voice") && transcript.lowercased().contains("new story"),
+            transcript)
         // Blank transcripts use Apple's transcriber before reaching the Python worker.
         await runtime.unload()
-        let prompt = try await runtime.createVoice(SpeechVoiceRequest(
-            refAudio: reference.path, refText: nil, preprocessPrompt: false))
+        let prompt = try await runtime.createVoice(
+            SpeechVoiceRequest(
+                refAudio: reference.path, refText: nil, preprocessPrompt: false))
         let voice = folder.appending(path: "voice.pt")
         try prompt.write(to: voice)
         await runtime.unload()
-        let cloned = try await runtime.speak(SpeechRequest(
-            items: [SpeechItem(text: "Welcome.", voiceClonePrompt: voice.path, duration: 1)],
-            parameters: parameters, seed: 42))
+        let cloned = try await runtime.speak(
+            SpeechRequest(
+                items: [SpeechItem(text: "Welcome.", voiceClonePrompt: voice.path, duration: 1)],
+                parameters: parameters, seed: 42))
         precondition(cloned.audio.first?.duration == 1)
-        let directClone = try await runtime.speak(SpeechRequest(
-            items: [SpeechItem(text: "Welcome.", refAudio: reference.path, duration: 1)],
-            parameters: parameters, seed: 42))
+        let directClone = try await runtime.speak(
+            SpeechRequest(
+                items: [SpeechItem(text: "Welcome.", refAudio: reference.path, duration: 1)],
+                parameters: parameters, seed: 42))
         precondition(directClone.audio.first?.duration == 1)
         precondition(directClone.cloneMs > 0 && directClone.audioMs > 0)
         do {
             _ = try await runtime.speak(SpeechRequest(items: [SpeechItem(text: "Hello.", speed: 0)]))
             preconditionFailure("invalid speed was accepted")
-        } catch { }
+        } catch {}
         do {
-            _ = try await runtime.speak(SpeechRequest(items: [SpeechItem(
-                text: String(repeating: "Hello ", count: 50_000), duration: 1)],
-                                                      parameters: parameters, seed: 42))
+            _ = try await runtime.speak(
+                SpeechRequest(
+                    items: [
+                        SpeechItem(
+                            text: String(repeating: "Hello ", count: 50_000), duration: 1)
+                    ],
+                    parameters: parameters, seed: 42))
             preconditionFailure("oversized speech context was accepted")
         } catch {
             precondition(error.localizedDescription.contains("bundle limit"))
@@ -94,6 +112,8 @@ import AVFoundation
             let restarted = try await runtime.speak(request)
             precondition(restarted.audio[0].wav == first.audio[0].wav)
         }
-        print("PASS: speech worker, native transcription, M4A cloning after unload, automatic/saved cloning, ordered batch, design, seed replay, restart, context limit, errors and concurrent request isolation")
+        print(
+            "PASS: speech worker, native transcription, M4A cloning after unload, automatic/saved cloning, ordered batch, design, seed replay, restart, context limit, errors and concurrent request isolation"
+        )
     }
 }

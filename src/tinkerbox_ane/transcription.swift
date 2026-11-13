@@ -10,16 +10,19 @@ private struct TranscriptionError: LocalizedError {
     static var locales: [Locale] {
         get async {
             await SpeechTranscriber.supportedLocales.sorted {
-                Locale.current.localizedString(forIdentifier: $0.identifier) ?? $0.identifier <
-                Locale.current.localizedString(forIdentifier: $1.identifier) ?? $1.identifier
+                Locale.current.localizedString(forIdentifier: $0.identifier) ?? $0.identifier < Locale.current
+                    .localizedString(forIdentifier: $1.identifier) ?? $1.identifier
             }
         }
     }
 
-    static func transcribe(_ url: URL, locale: Locale = .current,
-                           status: @MainActor (String) -> Void = { _ in }) async throws -> String {
+    static func transcribe(
+        _ url: URL, locale: Locale = .current,
+        status: @MainActor (String) -> Void = { _ in }
+    ) async throws -> String {
         guard SpeechTranscriber.isAvailable else {
-            throw TranscriptionError("Speech transcription is unavailable on this Mac. Enter the reference transcript manually.")
+            throw TranscriptionError(
+                "Speech transcription is unavailable on this Mac. Enter the reference transcript manually.")
         }
         guard let supported = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
             throw TranscriptionError("Choose a supported reference language or enter the transcript manually.")
@@ -27,7 +30,9 @@ private struct TranscriptionError: LocalizedError {
         let transcriber = SpeechTranscriber(locale: supported, preset: .transcription)
         try Task.checkCancellation()
         if let installation = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-            status("Downloading speech recognition for \(Locale.current.localizedString(forIdentifier: supported.identifier) ?? supported.identifier)…")
+            status(
+                "Downloading speech recognition for \(Locale.current.localizedString(forIdentifier: supported.identifier) ?? supported.identifier)…"
+            )
             try await installation.downloadAndInstall()
         }
         try Task.checkCancellation()
@@ -44,7 +49,8 @@ private struct TranscriptionError: LocalizedError {
                 let text = try await results.value
                 try Task.checkCancellation()
                 guard !text.isEmpty else {
-                    throw TranscriptionError("No speech was recognized. Try another recording or enter the transcript manually.")
+                    throw TranscriptionError(
+                        "No speech was recognized. Try another recording or enter the transcript manually.")
                 }
                 return text
             } catch {

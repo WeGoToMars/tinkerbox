@@ -44,7 +44,8 @@ import UniformTypeIdentifiers
 
     var canGenerate: Bool {
         guard !demo.busy, !demo.loading, demo.compatibilityIssue == nil, demo.current?.kind == .speech,
-              !recorder.active, !isBlank(text) else { return false }
+            !recorder.active, !isBlank(text)
+        else { return false }
         if activeMode?.instructionRequired == true && isBlank(instruction) { return false }
         guard usesReference, prompt == nil else { return true }
         return reference != nil && (!needsTranscript || (transcriptionStatus == nil && !isBlank(transcript)))
@@ -109,7 +110,9 @@ import UniformTypeIdentifiers
     func transcribe(replacing: Bool = true) {
         cancelTranscription()
         transcriptionError = nil
-        guard usesReference, needsTranscript, let reference, prompt == nil, replacing || isBlank(transcript) else { return }
+        guard usesReference, needsTranscript, let reference, prompt == nil, replacing || isBlank(transcript) else {
+            return
+        }
         transcript = ""
         transcriptionStatus = "Preparing speech recognition…"
         let locale = referenceLocale.isEmpty ? Locale.current : Locale(identifier: referenceLocale)
@@ -145,16 +148,20 @@ import UniformTypeIdentifiers
         live = audio
         if audio != nil { result = nil }
         defer { audio?.finish() }
-        let item = SpeechItem(text: text, language: activeMode?.language != false && !isBlank(language) ? language : nil,
-                              instruct: activeMode?.instructionTitle != nil && !isBlank(instruction) ? instruction : nil,
-                              refAudio: usesReference && prompt == nil ? reference?.path : nil,
-                              refText: usesReference && prompt == nil && !isBlank(transcript) ? transcript : nil,
-                              voiceClonePrompt: usesReference ? prompt?.path : nil,
-                              mode: activeMode?.id, controls: controls.isEmpty ? nil : controls)
-        let onAudio: (@Sendable (SpeechChunk) async -> Void)? = audio.map { audio in { @Sendable chunk in await audio.append(chunk) } }
+        let item = SpeechItem(
+            text: text, language: activeMode?.language != false && !isBlank(language) ? language : nil,
+            instruct: activeMode?.instructionTitle != nil && !isBlank(instruction) ? instruction : nil,
+            refAudio: usesReference && prompt == nil ? reference?.path : nil,
+            refText: usesReference && prompt == nil && !isBlank(transcript) ? transcript : nil,
+            voiceClonePrompt: usesReference ? prompt?.path : nil,
+            mode: activeMode?.id, controls: controls.isEmpty ? nil : controls)
+        let onAudio: (@Sendable (SpeechChunk) async -> Void)? = audio.map { audio in
+            { @Sendable chunk in await audio.append(chunk) }
+        }
         do {
-            let reply = try await demo.runtime.speak(SpeechRequest(items: [item], parameters: values, seed: seed),
-                                                     onAudio: onAudio)
+            let reply = try await demo.runtime.speak(
+                SpeechRequest(items: [item], parameters: values, seed: seed),
+                onAudio: onAudio)
             self.reply = reply
             result = reply.audio.first
         } catch { self.error = error.localizedDescription }
@@ -165,9 +172,10 @@ import UniformTypeIdentifiers
         demo.busy = true
         defer { demo.busy = false }
         do {
-            let data = try await demo.runtime.createVoice(SpeechVoiceRequest(
-                refAudio: reference.path, refText: isBlank(transcript) ? nil : transcript,
-                preprocessPrompt: values["preprocess_prompt"].map { $0 == .boolean(true) }, mode: activeMode?.id))
+            let data = try await demo.runtime.createVoice(
+                SpeechVoiceRequest(
+                    refAudio: reference.path, refText: isBlank(transcript) ? nil : transcript,
+                    preprocessPrompt: values["preprocess_prompt"].map { $0 == .boolean(true) }, mode: activeMode?.id))
             try data.write(to: url)
             useSavedVoice(url)
         } catch { self.error = error.localizedDescription }
@@ -182,7 +190,8 @@ import UniformTypeIdentifiers
         guard let first = ranges.first else { return }
         let cursor = content.characters.distance(from: content.startIndex, to: first.lowerBound) + tag.count
         for range in ranges.reversed() { content.replaceSubrange(range, with: AttributedString(tag)) }
-        selection = AttributedTextSelection(insertionPoint: content.characters.index(content.startIndex, offsetBy: cursor))
+        selection = AttributedTextSelection(
+            insertionPoint: content.characters.index(content.startIndex, offsetBy: cursor))
     }
 }
 
@@ -223,8 +232,10 @@ struct SpeechView: View {
                 TaskSection { ModelAvailability(demo: demo, showModels: showModels) }
             }
             TaskSection("Text") {
-                TaskTextEditor(text: $playground.content, selection: $playground.selection, demo: demo, focus: $textFocused)
-                    .accessibilityLabel("Text to speak")
+                TaskTextEditor(
+                    text: $playground.content, selection: $playground.selection, demo: demo, focus: $textFocused
+                )
+                .accessibilityLabel("Text to speak")
                 if playground.activeMode?.language != false {
                     LabeledContent("Language") {
                         TextField("Language", text: $playground.language, prompt: Text("Automatic")).labelsHidden()
@@ -232,8 +243,10 @@ struct SpeechView: View {
                 }
                 if let tags = demo.current?.nonVerbalTags, !tags.isEmpty {
                     DisclosureGroup("Non-verbal tags") {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), alignment: .leading)],
-                                  alignment: .leading, spacing: 8) {
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 210), alignment: .leading)],
+                            alignment: .leading, spacing: 8
+                        ) {
                             ForEach(tags, id: \.self) { tag in
                                 Button {
                                     playground.insertTag(tag)
@@ -255,9 +268,9 @@ struct SpeechView: View {
                 }
                 HStack {
                     Button(demo.busy ? "Generating…" : "Generate speech", systemImage: "waveform", action: generate)
-                    .symbolEffect(.variableColor.iterative, isActive: demo.busy)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!playground.canGenerate)
+                        .symbolEffect(.variableColor.iterative, isActive: demo.busy)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!playground.canGenerate)
                     if demo.busy { ProgressView().controlSize(.small) }
                     if let result = playground.result {
                         Menu("Save audio…", systemImage: "square.and.arrow.down") {
@@ -280,13 +293,15 @@ struct SpeechView: View {
                 if let live = playground.live, !live.finished {
                     StreamingPlayback(audio: live).padding(.vertical, 8)
                 } else if let result = playground.result {
-                    AudioPlayback(data: result.wav, spacebarEnabled: !recordFocused && !referencePlaybackFocused,
-                                  suspended: recorder.active || demo.busy || referencePlaybackFocused) {
+                    AudioPlayback(
+                        data: result.wav, spacebarEnabled: !recordFocused && !referencePlaybackFocused,
+                        suspended: recorder.active || demo.busy || referencePlaybackFocused
+                    ) {
                         recordFocused = false
                         referencePlaybackFocused = false
                     }
-                        .disabled(recorder.active || demo.busy)
-                        .padding(.vertical, 8)
+                    .disabled(recorder.active || demo.busy)
+                    .padding(.vertical, 8)
                 }
                 if let result = playground.result, let reply = playground.reply {
                     Text(summary(result, reply)).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
@@ -305,9 +320,11 @@ struct SpeechView: View {
                 if let title = playground.activeMode?.instructionTitle {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(title)
-                        TextField(title, text: $playground.instruction,
-                                  prompt: Text(playground.activeMode?.instructionHint ?? ""), axis: .vertical)
-                            .labelsHidden()
+                        TextField(
+                            title, text: $playground.instruction,
+                            prompt: Text(playground.activeMode?.instructionHint ?? ""), axis: .vertical
+                        )
+                        .labelsHidden()
                     }
                 }
                 ForEach(playground.nativeControls) { parameter in control(parameter, values: $playground.controls) }
@@ -331,11 +348,21 @@ struct SpeechView: View {
             .disabled(demo.busy)
         }
         .navigationTitle(ModelTask.speech.title)
-        .toolbar { ModelToolbar(demo: demo, task: .speech, showingInspector: $showingInspector, showModels: showModels) }
+        .toolbar {
+            ModelToolbar(demo: demo, task: .speech, showingInspector: $showingInspector, showModels: showModels)
+        }
         .inspector(isPresented: $showingInspector) { ModelInspector(demo: demo) }
-        .focusedSceneValue(\.taskAction, TaskAction(title: "Generate Speech", enabled: playground.canGenerate, perform: generate))
-        .fileImporter(isPresented: Binding { importing != nil } set: { if !$0 { importing = nil } },
-                      allowedContentTypes: importing ?? []) { result in
+        .focusedSceneValue(
+            \.taskAction, TaskAction(title: "Generate Speech", enabled: playground.canGenerate, perform: generate)
+        )
+        .fileImporter(
+            isPresented: Binding {
+                importing != nil
+            } set: {
+                if !$0 { importing = nil }
+            },
+            allowedContentTypes: importing ?? []
+        ) { result in
             guard case .success(let url) = result else { return }
             if importing == [.audio] { playground.setReference(url) } else { playground.useSavedVoice(url) }
         }
@@ -345,7 +372,9 @@ struct SpeechView: View {
         .onChange(of: recordFocused) { if !recordFocused { recorder.disarm() } }
         .onChange(of: recorder.active) { if recorder.active { playground.live?.stop() } }
         .onChange(of: scenePhase) { if scenePhase != .active { recorder.stop() } }
-        .onDisappear { recorder.disarm(discard: true); playground.live?.stop() }
+        .onDisappear {
+            recorder.disarm(discard: true); playground.live?.stop()
+        }
         .onChange(of: demo.model, initial: true) { playground.modelChanged() }
         .onChange(of: playground.mode) {
             recordFocused = false
@@ -369,8 +398,10 @@ struct SpeechView: View {
         .help("A clear 3–10 second recording of the voice")
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Button(recorder.preparing ? "Cancel setup" : recorder.armed ? "Disarm microphone" : "Arm microphone",
-                       systemImage: recorder.armed ? "mic.badge.xmark" : "mic.fill") {
+                Button(
+                    recorder.preparing ? "Cancel setup" : recorder.armed ? "Disarm microphone" : "Arm microphone",
+                    systemImage: recorder.armed ? "mic.badge.xmark" : "mic.fill"
+                ) {
                     if recorder.armed || recorder.preparing {
                         recorder.disarm()
                         recordFocused = false
@@ -407,13 +438,15 @@ struct SpeechView: View {
             if let error = recorder.error { Text(error).font(.caption).foregroundStyle(.red) }
         }
         if !recorder.active, let data = playground.referenceData, let reference = playground.reference {
-            AudioPlayback(data: data, spacebarEnabled: !recordFocused && (referencePlaybackFocused || playground.result == nil),
-                          fileExtension: reference.pathExtension,
-                          suspended: demo.busy || (!referencePlaybackFocused && playground.result != nil)) {
+            AudioPlayback(
+                data: data, spacebarEnabled: !recordFocused && (referencePlaybackFocused || playground.result == nil),
+                fileExtension: reference.pathExtension,
+                suspended: demo.busy || (!referencePlaybackFocused && playground.result != nil)
+            ) {
                 recordFocused = false
                 referencePlaybackFocused = true
             }
-                .padding(.vertical, 8)
+            .padding(.vertical, 8)
         }
         if playground.prompt == nil && playground.needsTranscript {
             Picker("Reference language", selection: $playground.referenceLocale) {
@@ -424,10 +457,14 @@ struct SpeechView: View {
                 }
             }.disabled(recorder.active)
             HStack {
-                TextField("Reference transcript", text: $playground.transcript,
-                          prompt: Text(playground.reference == nil ? "Words spoken in the reference"
-                                       : "Review the recognized words, or type them"), axis: .vertical)
-                    .disabled(playground.transcriptionStatus != nil)
+                TextField(
+                    "Reference transcript", text: $playground.transcript,
+                    prompt: Text(
+                        playground.reference == nil
+                            ? "Words spoken in the reference"
+                            : "Review the recognized words, or type them"), axis: .vertical
+                )
+                .disabled(playground.transcriptionStatus != nil)
                 Button("Transcribe") { playground.transcribe() }
                     .disabled(playground.reference == nil || playground.transcriptionStatus != nil)
             }.disabled(recorder.active)
@@ -455,7 +492,9 @@ struct SpeechView: View {
 
     // Audio length, generation time against real time, first audio and the seed for replay.
     private func summary(_ result: SpeechAudio, _ reply: SpeechReply) -> String {
-        let seconds = { (milliseconds: Double) in (milliseconds / 1000).formatted(.number.precision(.fractionLength(2))) + " s" }
+        let seconds = { (milliseconds: Double) in
+            (milliseconds / 1000).formatted(.number.precision(.fractionLength(2))) + " s"
+        }
         let speed = (result.duration * 1000 / max(reply.audioMs, 1)).formatted(.number.precision(.fractionLength(1)))
         return [
             "\(result.duration.formatted(.number.precision(.fractionLength(2)))) s audio",
@@ -466,14 +505,20 @@ struct SpeechView: View {
         ].compactMap { $0 }.joined(separator: " · ")
     }
 
-    @ViewBuilder private func control(_ parameter: SpeechParameter, values: Binding<[String: SpeechValue]>) -> some View {
-        let initial = parameter.defaultValue ?? (parameter.type == .bool ? .boolean(false) :
-                      parameter.type == .text || parameter.type == .enum ? .text("") : .number(parameter.min ?? 1))
+    @ViewBuilder private func control(_ parameter: SpeechParameter, values: Binding<[String: SpeechValue]>) -> some View
+    {
+        let initial =
+            parameter.defaultValue
+            ?? (parameter.type == .bool
+                ? .boolean(false)
+                : parameter.type == .text || parameter.type == .enum ? .text("") : .number(parameter.min ?? 1))
         Group {
             if parameter.optional == true {
-                Toggle(parameter.title, isOn: Binding(
-                    get: { values.wrappedValue[parameter.key] != nil },
-                    set: { values.wrappedValue[parameter.key] = $0 ? initial : nil }))
+                Toggle(
+                    parameter.title,
+                    isOn: Binding(
+                        get: { values.wrappedValue[parameter.key] != nil },
+                        set: { values.wrappedValue[parameter.key] = $0 ? initial : nil }))
             }
             if parameter.optional != true || values.wrappedValue[parameter.key] != nil {
                 controlField(parameter, value: values.wrappedValue[parameter.key] ?? initial, values: values)
@@ -482,27 +527,42 @@ struct SpeechView: View {
         .help(parameter.help ?? "")
     }
 
-    @ViewBuilder private func controlField(_ parameter: SpeechParameter, value: SpeechValue,
-                                          values: Binding<[String: SpeechValue]>) -> some View {
+    @ViewBuilder private func controlField(
+        _ parameter: SpeechParameter, value: SpeechValue,
+        values: Binding<[String: SpeechValue]>
+    ) -> some View {
         switch value {
         case .boolean(let enabled):
-            Toggle(parameter.title, isOn: Binding(get: { enabled }, set: { values.wrappedValue[parameter.key] = .boolean($0) }))
+            Toggle(
+                parameter.title,
+                isOn: Binding(get: { enabled }, set: { values.wrappedValue[parameter.key] = .boolean($0) }))
         case .text(let text):
             if let choices = parameter.choices {
-                Picker(parameter.title, selection: Binding(get: { text }, set: { values.wrappedValue[parameter.key] = .text($0) })) {
+                Picker(
+                    parameter.title,
+                    selection: Binding(get: { text }, set: { values.wrappedValue[parameter.key] = .text($0) })
+                ) {
                     ForEach(choices) { choice in Text(choice.title).tag(choice.value) }
                 }
             } else {
                 LabeledContent(parameter.title) {
-                    TextField(parameter.title, text: Binding(get: { text }, set: { values.wrappedValue[parameter.key] = .text($0) }))
-                        .labelsHidden()
+                    TextField(
+                        parameter.title,
+                        text: Binding(get: { text }, set: { values.wrappedValue[parameter.key] = .text($0) })
+                    )
+                    .labelsHidden()
                 }
             }
         case .number(let number):
             LabeledContent(parameter.title) {
-                TextField(parameter.title, value: Binding(get: { number }, set: {
-                    values.wrappedValue[parameter.key] = .number(parameter.type == .int ? $0.rounded() : $0)
-                }), format: .number).labelsHidden().frame(width: 90).multilineTextAlignment(.trailing)
+                TextField(
+                    parameter.title,
+                    value: Binding(
+                        get: { number },
+                        set: {
+                            values.wrappedValue[parameter.key] = .number(parameter.type == .int ? $0.rounded() : $0)
+                        }), format: .number
+                ).labelsHidden().frame(width: 90).multilineTextAlignment(.trailing)
             }
         }
     }
@@ -513,8 +573,9 @@ struct SpeechView: View {
         panel.nameFieldStringValue = type == .wav ? "speech.wav" : "speech.m4a"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task {
-            do { try await Task.detached { try exportAudio(data, to: url) }.value }
-            catch { playground.error = error.localizedDescription }
+            do { try await Task.detached { try exportAudio(data, to: url) }.value } catch {
+                playground.error = error.localizedDescription
+            }
         }
     }
 

@@ -40,8 +40,7 @@ def download(model: str, progress=None) -> Path:
     # The manifest is written last, so a bundle that has one is complete.
     if (bundle / "model.json").is_file():
         return bundle
-    return download_bundle(item["id"], item["repo"], item["revision"], progress,
-                           subfolder=item.get("subfolder", ""))
+    return download_bundle(item["id"], item["repo"], item["revision"], progress, subfolder=item.get("subfolder", ""))
 
 
 def install(model: str, bundle: Path) -> Path:

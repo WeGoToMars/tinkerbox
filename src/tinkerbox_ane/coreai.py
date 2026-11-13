@@ -29,8 +29,13 @@ def count_flops(module, inputs) -> int:
     from torch.utils.flop_counter import FlopCounterMode, sdpa_flop_count
 
     # Masked attention runs as the CPU flash kernel, which PyTorch's counter does not know.
-    attention = {torch.ops.aten._scaled_dot_product_flash_attention_for_cpu:
-                 lambda query, key, value, *_args, **_kwargs: sdpa_flop_count(query, key, value)}
+    attention = {
+        torch.ops.aten._scaled_dot_product_flash_attention_for_cpu: lambda query,
+        key,
+        value,
+        *_args,
+        **_kwargs: sdpa_flop_count(query, key, value)
+    }
     with torch.no_grad(), FakeTensorMode(allow_non_fake_inputs=True) as mode:
         fake = [mode.from_tensor(x) for x in inputs]
         with FlopCounterMode(display=False, custom_mapping=attention) as counter:
@@ -61,12 +66,25 @@ def asset_metadata(model: str, weights: str = "float16"):
 def compress(program, weights):
     """Quantize ("int8-per-channel") or palettize ("lut8-group32") a converted program's weights in place."""
     from coreai_opt.coreai_utils import CompressionGranularity, DType, palettize_weights, quantize_weights
+
     if weights == "int8-per-channel":
-        quantize_weights(program, dtype=DType.INT8, granularity=CompressionGranularity.PER_CHANNEL,
-                         weight_num_threshold=2048, in_place=True)
+        quantize_weights(
+            program,
+            dtype=DType.INT8,
+            granularity=CompressionGranularity.PER_CHANNEL,
+            weight_num_threshold=2048,
+            in_place=True,
+        )
     elif weights == "lut8-group32":
-        palettize_weights(program, lut_dtype=None, n_bits=8, granularity=CompressionGranularity.PER_GROUPED_CHANNEL,
-                          group_size=32, weight_num_threshold=2048, in_place=True)
+        palettize_weights(
+            program,
+            lut_dtype=None,
+            n_bits=8,
+            granularity=CompressionGranularity.PER_GROUPED_CHANNEL,
+            group_size=32,
+            weight_num_threshold=2048,
+            in_place=True,
+        )
     else:
         return program
     with program._module:  # Core AI optimizes the program when its module context exits.
@@ -87,8 +105,10 @@ def verify_aot(asset: Path, expected: str) -> None:
         raise ValueError(f"{asset}: missing compiled modules")
     for module in modules.values():
         entries = module.get("Entry Function Attributes")
-        if not isinstance(entries, dict) or not entries or not all(
-            "mps.fullyPlacedOnANE" in attributes for attributes in entries.values()
+        if (
+            not isinstance(entries, dict)
+            or not entries
+            or not all("mps.fullyPlacedOnANE" in attributes for attributes in entries.values())
         ):
             raise ValueError(f"{asset}: compiled entries are not fully placed on ANE")
 
@@ -129,14 +149,21 @@ def compile_asset(
 
     def inspect_target(asset: Path) -> None:
         verify_aot(asset, identity)
-        inspected = subprocess.run(["xcrun", "coreai-build", "inspect", str(asset), "--json"],
-                                   capture_output=True, text=True, check=True, timeout=60)
+        inspected = subprocess.run(
+            ["xcrun", "coreai-build", "inspect", str(asset), "--json"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
         info = json.loads(inspected.stdout)
         if info.get("supportedArchitectures") != [architecture]:
             raise ValueError(f"{asset}: compiled architecture differs; use force=True to rebuild")
         deployments = (entry.rsplit(" ", 1) for entry in info.get("minSupportedOSVersions", []))
-        if not any(name == platform and version_parts(version) == version_parts(min_deployment_version)
-                   for name, version in deployments):
+        if not any(
+            name == platform and version_parts(version) == version_parts(min_deployment_version)
+            for name, version in deployments
+        ):
             raise ValueError(f"{asset}: compiled deployment target differs; use force=True to rebuild")
         functions = {function["name"] for function in info["summary"]["functions"]}
         if expected is not None and functions != expected:
@@ -149,9 +176,22 @@ def compile_asset(
     if needs_compile:
         with tempfile.TemporaryDirectory(prefix=".compile-", dir=target.parent) as temporary:
             produced = Path(temporary) / target.name
-            command = ["xcrun", "coreai-build", "compile", str(source), "--architecture", architecture,
-                       "--platform", platform, "--min-deployment-version", min_deployment_version,
-                       "--preferred-compute", "neural-engine", "--output", str(produced)]
+            command = [
+                "xcrun",
+                "coreai-build",
+                "compile",
+                str(source),
+                "--architecture",
+                architecture,
+                "--platform",
+                platform,
+                "--min-deployment-version",
+                min_deployment_version,
+                "--preferred-compute",
+                "neural-engine",
+                "--output",
+                str(produced),
+            ]
             watchdog = Path(temporary) / report
             print(f"    Compiler log: {watchdog.with_suffix('.log')}", flush=True)
             try:

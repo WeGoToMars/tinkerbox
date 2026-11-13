@@ -15,20 +15,19 @@ BINARY = Path(__file__).with_name("tinkerbox-ane-host")
 
 def native_command(*arguments, timeout=300):
     """Run a native host command and read its framed JSON reply."""
-    result = subprocess.run([str(BINARY), *arguments], stdin=subprocess.DEVNULL,
-                            capture_output=True, timeout=timeout)
+    result = subprocess.run([str(BINARY), *arguments], stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
     if len(result.stdout) < 4:
-        raise RuntimeError(result.stderr.decode(errors='replace').strip() or 'Native audio command failed.')
-    size = struct.unpack('<I', result.stdout[:4])[0]
-    reply = json.loads(result.stdout[4:4 + size])
-    if result.returncode or 'error' in reply:
-        raise RuntimeError(reply.get('error', 'Native audio command failed.'))
+        raise RuntimeError(result.stderr.decode(errors="replace").strip() or "Native audio command failed.")
+    size = struct.unpack("<I", result.stdout[:4])[0]
+    reply = json.loads(result.stdout[4 : 4 + size])
+    if result.returncode or "error" in reply:
+        raise RuntimeError(reply.get("error", "Native audio command failed."))
     return reply
 
 
-SUPPORTED_ARCHITECTURES: dict[str, str] = json.loads(
-    Path(__file__).with_name("models.json").read_text()
-)["architectures"]
+SUPPORTED_ARCHITECTURES: dict[str, str] = json.loads(Path(__file__).with_name("models.json").read_text())[
+    "architectures"
+]
 
 
 def chip_name(architecture: str) -> str:
@@ -74,7 +73,7 @@ class _PipeHost:
         import select
         import time
 
-        view = memoryview(buffer).cast('B')
+        view = memoryview(buffer).cast("B")
         deadline = time.monotonic() + self._timeout
         done = 0
         while done < len(view):
@@ -82,10 +81,10 @@ class _PipeHost:
             if remaining <= 0 or not select.select([self._process.stdout], [], [], remaining)[0]:
                 self._process.kill()
                 self._process.wait()
-                raise RuntimeError(f'Core AI host did not respond within {self._timeout:g} seconds')
+                raise RuntimeError(f"Core AI host did not respond within {self._timeout:g} seconds")
             count = os.readv(self._process.stdout.fileno(), [view[done:]])
             if not count:
-                raise RuntimeError(f'the Core AI host exited (status {self._process.poll()})')
+                raise RuntimeError(f"the Core AI host exited (status {self._process.poll()})")
             done += count
 
     def _read(self, count: int) -> bytes:
@@ -146,45 +145,46 @@ class _PipeHost:
 class TensorHost(_PipeHost):
     """Named FP16 calls, optionally with native transformer state."""
 
-    def __init__(self, asset: Path, timeout: float = 300, *, output: str = 'logits', cached=None, bidirectional=None):
+    def __init__(self, asset: Path, timeout: float = 300, *, output: str = "logits", cached=None, bidirectional=None):
         asset = Path(asset).resolve()
         self._timeout = timeout
-        self._directory = tempfile.TemporaryDirectory(prefix='.host-', dir=asset.parent)
-        clones = Path(self._directory.name) / 'clones'
+        self._directory = tempfile.TemporaryDirectory(prefix=".host-", dir=asset.parent)
+        clones = Path(self._directory.name) / "clones"
         clones.mkdir()
         environment = dict(os.environ, COW_CLIENT_DEST=str(clones), COW_ASSET_PREFIX=str(asset))
         if bidirectional is not None:
-            arguments = ['--bidirectional-tensor', str(asset), json.dumps(bidirectional)]
+            arguments = ["--bidirectional-tensor", str(asset), json.dumps(bidirectional)]
         elif cached is not None:
-            arguments = ['--cached-tensor', str(asset), json.dumps(dict(cached, output=output))]
+            arguments = ["--cached-tensor", str(asset), json.dumps(dict(cached, output=output))]
         else:
-            arguments = ['--tensor', str(asset), output]
+            arguments = ["--tensor", str(asset), output]
         try:
-            self._process = subprocess.Popen([str(BINARY), *arguments],
-                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment)
+            self._process = subprocess.Popen(
+                [str(BINARY), *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment
+            )
             ready = json.loads(self._read(self._u32()))
-            if not ready.get('ready'):
-                raise RuntimeError(ready.get('error', 'native tensor host failed to load'))
+            if not ready.get("ready"):
+                raise RuntimeError(ready.get("error", "native tensor host failed to load"))
         except BaseException:
             self.close()
             raise
 
     def run(self, function: str, inputs: dict):
-        return self._call(b'F' + _string(function), inputs)
+        return self._call(b"F" + _string(function), inputs)
 
     def reset(self):
         """Clear a cached host's transformer state."""
-        self._send(b'R')
+        self._send(b"R")
         self._reply()
 
     def step(self, function: str, inputs: dict, count: int):
         """Append `count` positions and return hidden rows. `_padding` optionally
         supplies leading token counts for independent interleaved sequences."""
-        return self._call(b'C' + struct.pack('<I', count) + _string(function), inputs)
+        return self._call(b"C" + struct.pack("<I", count) + _string(function), inputs)
 
     def full_attention(self, inputs: dict):
         """Logits of a bidirectional host's sequence, in which every position attends every other."""
-        return self._call(b'B', inputs)
+        return self._call(b"B", inputs)
 
 
 class Host(_PipeHost):
@@ -198,11 +198,11 @@ class Host(_PipeHost):
         self._directory = tempfile.TemporaryDirectory(prefix=".host-", dir=asset.parent)
         clones = Path(self._directory.name) / "clones"
         clones.mkdir()
-        environment = dict(os.environ, COW_CLIENT_DEST=str(clones),
-                           COW_ASSET_PREFIX=str(asset.resolve()))
+        environment = dict(os.environ, COW_CLIENT_DEST=str(clones), COW_ASSET_PREFIX=str(asset.resolve()))
         try:
-            self._process = subprocess.Popen([str(BINARY), str(asset)],
-                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment)
+            self._process = subprocess.Popen(
+                [str(BINARY), str(asset)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment
+            )
             ready = json.loads(self._read(self._u32()))
             if "error" in ready:
                 raise RuntimeError(f"the Core AI host could not load {asset}: {ready['error']}")
@@ -225,12 +225,14 @@ class Host(_PipeHost):
 
     def set_rope(self, cos, sin) -> None:
         import numpy as np
+
         cos, sin = (np.ascontiguousarray(t, dtype=np.float16) for t in (cos, sin))
         self._send(b"R" + struct.pack("<II", *cos.shape), memoryview(cos).cast("B"), memoryview(sin).cast("B"))
         self._reply()
 
     def hidden_chunks(self, chunks, tokens: int, *, plan=None):
         import numpy as np
+
         if not 0 < tokens <= self.context:
             raise ValueError(f"prompt needs {tokens} tokens; context limit is {self.context}")
         length = -(-tokens // self.width) * self.width
@@ -239,8 +241,10 @@ class Host(_PipeHost):
             if plan is None:
                 self._send(b"S" + struct.pack("<I", tokens))
             else:
-                self._send(b"T" + struct.pack("<II", tokens, len(plan.leaves)),
-                           struct.pack(f"<{len(plan.leaves)}I", *plan.leaves))
+                self._send(
+                    b"T" + struct.pack("<II", tokens, len(plan.leaves)),
+                    struct.pack(f"<{len(plan.leaves)}I", *plan.leaves),
+                )
             for offset in range(0, length, self.width):
                 self._reply()
                 chunk = np.ascontiguousarray(next(producer), dtype=np.float16)

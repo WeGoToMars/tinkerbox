@@ -119,11 +119,13 @@ extension Color {
     ]
 
     init(light: UInt32, dark: UInt32) {
-        self.init(nsColor: NSColor(name: nil) { appearance in
-            let hex = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
-            return NSColor(srgbRed: CGFloat(hex >> 16 & 0xff) / 255, green: CGFloat(hex >> 8 & 0xff) / 255,
-                           blue: CGFloat(hex & 0xff) / 255, alpha: 1)
-        })
+        self.init(
+            nsColor: NSColor(name: nil) { appearance in
+                let hex = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+                return NSColor(
+                    srgbRed: CGFloat(hex >> 16 & 0xff) / 255, green: CGFloat(hex >> 8 & 0xff) / 255,
+                    blue: CGFloat(hex & 0xff) / 255, alpha: 1)
+            })
     }
 }
 
@@ -225,8 +227,9 @@ struct StorageBar: View {
                         .frame(width: max(geometry.size.height, width * Double(part.bytes) / total))  // a small part stays a dot
                         .opacity(highlighted == nil || highlighted == part.kind ? 1 : 0.25)
                         .onHover { highlight(part.kind, $0) }
-                        .help("\(part.kind.title): \(formatBytes(part.bytes)), "
-                              + (Double(part.bytes) / total).formatted(.percent.precision(.fractionLength(0))))
+                        .help(
+                            "\(part.kind.title): \(formatBytes(part.bytes)), "
+                                + (Double(part.bytes) / total).formatted(.percent.precision(.fractionLength(0))))
                 }
             }
         }
@@ -295,8 +298,10 @@ struct StorageView: View {
             Button("Refresh", systemImage: "arrow.clockwise") { Task { await storage.refresh() } }
                 .disabled(!storage.removing.isEmpty)
         }
-        .confirmationDialog(title(of: pending), isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
-                            presenting: pending) { removal in
+        .confirmationDialog(
+            title(of: pending), isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+            presenting: pending
+        ) { removal in
             Button("Delete", role: .destructive) { Task { await remove(removal) } }
         } message: { removal in
             Text(message(of: removal))
@@ -371,9 +376,11 @@ struct StorageView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(model.name)
                         GeometryReader { geometry in
-                            StorageBar(parts: [StorageKind.bundles, .compiled, .outdated].map { ($0, model.bytes($0)) },
-                                       highlighted: $highlighted)
-                                .frame(width: geometry.size.width * Double(model.bytes) / largest)
+                            StorageBar(
+                                parts: [StorageKind.bundles, .compiled, .outdated].map { ($0, model.bytes($0)) },
+                                highlighted: $highlighted
+                            )
+                            .frame(width: geometry.size.width * Double(model.bytes) / largest)
                         }
                         .frame(height: 6)
                     }
@@ -417,9 +424,12 @@ struct StorageView: View {
                     Circle().fill(StorageKind.checkpoints.color).frame(width: 10, height: 10)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(checkpoint.repo)
-                        Text(checkpoint.models.isEmpty ? "No installed model"
-                             : ListFormatter.localizedString(byJoining: checkpoint.models.map { names[$0] ?? $0 }))
-                            .font(.caption).foregroundStyle(.secondary)
+                        Text(
+                            checkpoint.models.isEmpty
+                                ? "No installed model"
+                                : ListFormatter.localizedString(byJoining: checkpoint.models.map { names[$0] ?? $0 })
+                        )
+                        .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("Show in Finder", systemImage: "folder") {

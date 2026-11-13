@@ -12,8 +12,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", choices=[item["id"] for item in CATALOG])
     args = parser.parse_args(argv)
-    download(args.model, lambda done, total: print(
-        json.dumps({"progress": min(done / total, 1.0) if total else None}), flush=True))
+    download(
+        args.model,
+        lambda done, total: print(json.dumps({"progress": min(done / total, 1.0) if total else None}), flush=True),
+    )
     return 0
 
 

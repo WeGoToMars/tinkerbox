@@ -66,13 +66,15 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
 }
 
 @MainActor @Observable final class Catalog {
-    nonisolated static let remoteURL = URL(string: "https://raw.githubusercontent.com/WeGoToMars/tinkerbox/main/src/tinkerbox_ane/models.json")!
+    nonisolated static let remoteURL = URL(
+        string: "https://raw.githubusercontent.com/WeGoToMars/tinkerbox/main/src/tinkerbox_ane/models.json")!
     nonisolated static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
     // Matches tinkerbox_ane.bundle.CACHE: <model>/<revision>/macos27/<architecture>/model.json.
     nonisolated static let cacheURL = URL.cachesDirectory.appending(path: "tinkerbox-ane/models")
     nonisolated static let deviceArchitecture = AIModel.deviceArchitectureName
     // The bundled catalog lists exactly the models this app's Python package can run, and the chips it knows.
-    nonisolated private static let bundledFile = try! decodeFile(Data(contentsOf: Bundle.main.url(forResource: "models", withExtension: "json")!))
+    nonisolated private static let bundledFile = try! decodeFile(
+        Data(contentsOf: Bundle.main.url(forResource: "models", withExtension: "json")!))
     nonisolated static let bundled = bundledFile.models.compactMap(\.model)
     nonisolated static let architectures = bundledFile.architectures ?? [:]
 
@@ -89,7 +91,9 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
 
     // Entries of every accepted update, in the form tinkerbox_ane.models reads; `adding` is one being downloaded.
     nonisolated static func updatesEnvironment(adding: String? = nil) -> String {
-        let entries = bundled.compactMap { model in current(model.id).flatMap { $0.revision == model.revision ? nil : pinnedEntry(model.id) } }
+        let entries = bundled.compactMap { model in
+            current(model.id).flatMap { $0.revision == model.revision ? nil : pinnedEntry(model.id) }
+        }
         return "[" + (entries + [adding].compactMap { $0 }).joined(separator: ",") + "]"
     }
 
@@ -100,8 +104,9 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     // The entry this app runs for a bundled model: its own, unless an accepted update is newer.
     nonisolated static func current(_ id: String) -> CatalogModel? {
         guard let bundled = bundled.first(where: { $0.id == id }) else { return nil }
-        guard let raw = pinnedEntry(id), let pinned = try? Runtime.decoder.decode(CatalogModel.self, from: Data(raw.utf8)),
-              isNewer(pinned.revision, than: bundled.revision), !isNewer(pinned.minVersion, than: appVersion)
+        guard let raw = pinnedEntry(id),
+            let pinned = try? Runtime.decoder.decode(CatalogModel.self, from: Data(raw.utf8)),
+            isNewer(pinned.revision, than: bundled.revision), !isNewer(pinned.minVersion, than: appVersion)
         else { return bundled }
         return pinned
     }
@@ -117,8 +122,9 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
 
     // Whether an earlier revision of the model is installed, so the current one is an update.
     nonisolated static func hasOlderBundle(_ model: CatalogModel) -> Bool {
-        let folders = (try? FileManager.default.contentsOfDirectory(
-            at: cacheURL.appending(path: model.id), includingPropertiesForKeys: nil)) ?? []
+        let folders =
+            (try? FileManager.default.contentsOfDirectory(
+                at: cacheURL.appending(path: model.id), includingPropertiesForKeys: nil)) ?? []
         return folders.contains { folder in
             folder.lastPathComponent != model.revision
                 && bundleIssue(at: folder.appending(path: "macos27").appending(path: deviceArchitecture)) == nil
@@ -128,7 +134,8 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     nonisolated static func bundleIssue(at url: URL) -> String? {
         struct Manifest: Decodable { let architecture: String }
         guard let data = try? Data(contentsOf: url.appending(path: "model.json")),
-              let target = (try? JSONDecoder().decode(Manifest.self, from: data))?.architecture else {
+            let target = (try? JSONDecoder().decode(Manifest.self, from: data))?.architecture
+        else {
             return "Choose a compiled bundle folder containing model.json."
         }
         guard target == deviceArchitecture else {
@@ -148,11 +155,14 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
     }
 
     // A development bundle that the worker loads for whichever model it runs.
-    nonisolated static let overrideAsset = ProcessInfo.processInfo.environment["TINKERBOX_ASSET"].map { URL(fileURLWithPath: $0) }
+    nonisolated static let overrideAsset = ProcessInfo.processInfo.environment["TINKERBOX_ASSET"].map {
+        URL(fileURLWithPath: $0)
+    }
 
     nonisolated static func availabilityIssue(for model: CatalogModel, asset: URL? = nil) -> String? {
         guard architectures[deviceArchitecture] != nil else {
-            return "This Mac's Neural Engine is not supported by this version of Tinkerbox. Update Tinkerbox to use this Mac."
+            return
+                "This Mac's Neural Engine is not supported by this version of Tinkerbox. Update Tinkerbox to use this Mac."
         }
         if let asset { return bundleIssue(at: asset) }
         if let selected = localAsset(for: model.id) {
@@ -217,15 +227,18 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
 
     // A published revision is offered when it is newer than the one this app runs and this app is new enough for it.
     nonisolated private static func offers(in data: Data, remote: [CatalogModel], current: [CatalogModel])
-        -> [String: (model: CatalogModel, raw: String)] {
-        let entries = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["models"] as? [[String: Any]] ?? []
+        -> [String: (model: CatalogModel, raw: String)]
+    {
+        let entries =
+            ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["models"] as? [[String: Any]] ?? []
         var offers: [String: (model: CatalogModel, raw: String)] = [:]
         for model in current {
             guard let newer = remote.first(where: { $0.id == model.id }),
-                  isNewer(newer.revision, than: model.revision), !isNewer(newer.minVersion, than: appVersion),
-                  let entry = entries.first(where: { $0["id"] as? String == model.id }),
-                  let raw = try? JSONSerialization.data(withJSONObject: entry),
-                  let text = String(data: raw, encoding: .utf8) else { continue }
+                isNewer(newer.revision, than: model.revision), !isNewer(newer.minVersion, than: appVersion),
+                let entry = entries.first(where: { $0["id"] as? String == model.id }),
+                let raw = try? JSONSerialization.data(withJSONObject: entry),
+                let text = String(data: raw, encoding: .utf8)
+            else { continue }
             offers[model.id] = (newer, text)
         }
         return offers
@@ -233,8 +246,12 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
 
     // What the model's row offers to replace: an installed older revision, or the newer published one.
     func update(for model: CatalogModel) -> CatalogModel? {
-        if let offer = offers[model.id], Self.localBundle(for: model) != nil || Self.hasOlderBundle(model)
-            || Self.hasOlderBundle(offer.model) { return offer.model }
+        if let offer = offers[model.id],
+            Self.localBundle(for: model) != nil || Self.hasOlderBundle(model)
+                || Self.hasOlderBundle(offer.model)
+        {
+            return offer.model
+        }
         return !downloaded.contains(model.id) && Self.hasOlderBundle(model) ? model : nil
     }
 

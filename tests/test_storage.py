@@ -44,8 +44,13 @@ def checkpoint(hub, repo):
 
 def storage(home, *arguments):
     environment = {**os.environ, "HOME": str(home), "HF_HOME": str(home / "hf"), "HF_HUB_CACHE": str(home / "hub")}
-    result = subprocess.run([sys.executable, "-m", "tinkerbox_ane.storage", *arguments], env=environment,
-                            capture_output=True, text=True, check=True)
+    result = subprocess.run(
+        [sys.executable, "-m", "tinkerbox_ane.storage", *arguments],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     return json.loads(result.stdout)
 
 
@@ -68,7 +73,9 @@ def test_report_and_remove_a_model_with_everything_it_downloaded(tmp_path: Path)
     bundles = [(b["revision"], b["current"], b["compiled"]["paths"]) for b in stored["d3-nano"]["bundles"]]
     assert bundles == [("v2.0.0", False, [str(old_compiled)]), ("v2.2.0", True, [str(current_compiled)])]
     assert [(c["repo"], c["models"]) for c in report["checkpoints"]] == [
-        ("LiquidAI/d1-3B", ["d1-3b"]), ("vllm-sr/d3-nano", ["d3-nano"])]
+        ("LiquidAI/d1-3B", ["d1-3b"]),
+        ("vllm-sr/d3-nano", ["d3-nano"]),
+    ]
     # Clones share the bundle's blocks, so compiled copies add nothing to the model's size.
     assert all(b["compiled"]["bytes"] == 0 for b in stored["d3-nano"]["bundles"])
     assert 2 * 100_000 <= stored["d3-nano"]["bytes"] < 2 * 100_000 + 50_000

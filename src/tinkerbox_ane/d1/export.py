@@ -12,8 +12,20 @@ from coreai_torch import TorchConverter, get_decomp_table
 
 from tinkerbox_ane.coreai import asset_metadata, count_flops, source_hash
 from tinkerbox_ane.bundle import checkpoint_digest, write_checkpoint
-from tinkerbox_ane.d1 import (CHUNK, CONTEXT, INPUT, KIND, MODEL, OUTPUT, REPO, REVISION, RUNTIME_TENSORS, SOURCE,
-                              TIERS, checkpoint)
+from tinkerbox_ane.d1 import (
+    CHUNK,
+    CONTEXT,
+    INPUT,
+    KIND,
+    MODEL,
+    OUTPUT,
+    REPO,
+    REVISION,
+    RUNTIME_TENSORS,
+    SOURCE,
+    TIERS,
+    checkpoint,
+)
 from tinkerbox_ane.d1.model import FusedBackbone, load_weights
 from tinkerbox_ane.d1.vision import export_vision_asset, load_vision_tower
 
@@ -36,20 +48,32 @@ def export(out: Path = SOURCE) -> Path:
             flops[f"c{capacity}"] = count_flops(model, model.example_inputs())
             program = torch.export.export(model, model.example_inputs()).run_decompositions(get_decomp_table())
             converter.add_exported_program(
-                program, input_names=[INPUT, "cos", "sin", "past_mask", "packed_state", "chunk_mask", "conv_route"],
-                output_names=[OUTPUT, "packed_state_out"], entrypoint_name=f"c{capacity}",
+                program,
+                input_names=[INPUT, "cos", "sin", "past_mask", "packed_state", "chunk_mask", "conv_route"],
+                output_names=[OUTPUT, "packed_state_out"],
+                entrypoint_name=f"c{capacity}",
             )
             print(f"staged c{capacity} ({time.monotonic() - started:.1f}s)", flush=True)
     asset = out / "fused.aimodel"
     converter.to_coreai().save_asset(asset, metadata=asset_metadata(MODEL))
     manifest = {
-        "kind": KIND, "version": 2, "width": CHUNK, "context": CONTEXT,
-        "hidden": cfg.hidden, "heads": cfg.heads, "kv_heads": cfg.kv_heads,
-        "head_dim": cfg.head_dim, "conv_taps": cfg.conv_taps, "tiers": list(TIERS),
-        "conv_layers": model.conv_layers, "attention_layers": model.attention_layers,
-        "asset": asset.name, "source_hash": source_hash(asset),
+        "kind": KIND,
+        "version": 2,
+        "width": CHUNK,
+        "context": CONTEXT,
+        "hidden": cfg.hidden,
+        "heads": cfg.heads,
+        "kv_heads": cfg.kv_heads,
+        "head_dim": cfg.head_dim,
+        "conv_taps": cfg.conv_taps,
+        "tiers": list(TIERS),
+        "conv_layers": model.conv_layers,
+        "attention_layers": model.attention_layers,
+        "asset": asset.name,
+        "source_hash": source_hash(asset),
         "parameter_bytes": sum(p.numel() * p.element_size() for p in backbone.parameters()),
-        "flops": flops, "source": {"repo": REPO, "revision": REVISION},
+        "flops": flops,
+        "source": {"repo": REPO, "revision": REVISION},
     }
     tower = load_vision_tower(checkpoint())
     vision_asset = out / "vision.aimodel"

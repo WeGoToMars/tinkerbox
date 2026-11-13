@@ -48,8 +48,11 @@ actor CompletionCapture {
         precondition(first.choices.count == 3 && first.metrics.elapsedMs > 0)
         precondition(!small || first.choices[0].tokenIds == [262, 3139, 286, 262])
         precondition(first.choices[2].tokenIds == first.choices[0].tokenIds)
-        precondition(first.choices.allSatisfy { !$0.text.isEmpty && $0.metrics.inputTokens == 5 &&
-            $0.metrics.outputTokens == $0.tokenIds.count && $0.metrics.batchSize == 4 && $0.finishReason == "length" })
+        precondition(
+            first.choices.allSatisfy {
+                !$0.text.isEmpty && $0.metrics.inputTokens == 5 && $0.metrics.outputTokens == $0.tokenIds.count
+                    && $0.metrics.batchSize == 4 && $0.finishReason == "length"
+            })
         let capture = CompletionCapture(count: prompts.count)
         let streamed = try await runtime.complete(request) { deltas in await capture.receive(deltas) }
         let (text, deliveries) = await capture.snapshot()
@@ -70,19 +73,25 @@ actor CompletionCapture {
         let liveTokens = await live.tokenCounts()
         precondition(zip(liveTokens, finished.choices).allSatisfy { $0 > 0 && $0 <= $1.metrics.outputTokens })
         precondition(finished.choices.allSatisfy { $0.metrics.outputTokens == $0.tokenIds.count })
-        let sampled = CompletionRequest(prompt: prompts, maxTokens: 12,
+        let sampled = CompletionRequest(
+            prompt: prompts, maxTokens: 12,
             temperature: 0.8, topK: 40, topP: 0.95, seed: 42)
         let replay = try await runtime.complete(sampled)
         for (index, prompt) in prompts.enumerated() {
-            let alone = try await runtime.complete(CompletionRequest(prompt: [prompt], maxTokens: 12,
-                temperature: 0.8, topK: 40, topP: 0.95, seed: 42))
+            let alone = try await runtime.complete(
+                CompletionRequest(
+                    prompt: [prompt], maxTokens: 12,
+                    temperature: 0.8, topK: 40, topP: 0.95, seed: 42))
             precondition(alone.choices[0].tokenIds == replay.choices[index].tokenIds)
         }
         let empty = try await runtime.complete(CompletionRequest(prompt: [""], maxTokens: 0))
-        precondition(empty.choices[0].text.isEmpty && empty.choices[0].metrics.inputTokens == 1 && empty.choices[0].tokenIds.isEmpty)
+        precondition(
+            empty.choices[0].text.isEmpty && empty.choices[0].metrics.inputTokens == 1
+                && empty.choices[0].tokenIds.isEmpty)
         do {
-            _ = try await runtime.complete(CompletionRequest(
-                prompt: [prompts[0], String(repeating: " hello", count: 1024)], maxTokens: 1))
+            _ = try await runtime.complete(
+                CompletionRequest(
+                    prompt: [prompts[0], String(repeating: " hello", count: 1024)], maxTokens: 1))
             preconditionFailure("oversized batch accepted")
         } catch { precondition(error.localizedDescription.contains("context limit")) }
         let concurrent = CompletionCapture(count: prompts.count)
@@ -101,6 +110,8 @@ actor CompletionCapture {
         let reloaded = try await runtime.complete(request)
         precondition(reloaded.choices.map(\.tokenIds) == first.choices.map(\.tokenIds))
         await runtime.unload()
-        print("PASS: completion worker, streaming, prompt ordering, usage, token preview, seeded replay, BOS, batch limits, error recovery, concurrent request isolation and reload")
+        print(
+            "PASS: completion worker, streaming, prompt ordering, usage, token preview, seeded replay, BOS, batch limits, error recovery, concurrent request isolation and reload"
+        )
     }
 }

@@ -16,8 +16,15 @@ LICENSE = "LICENSES/LFM-Open-License-v1.0.txt"
 
 
 def upload(staging, tag=None, *, metadata_dir, repo="user/repo"):
-    return publish.upload_release(repo, staging, KIND, tag, license_file=LICENSE,
-                                  expected_source={"repo": REPO, "revision": REVISION}, metadata_dir=metadata_dir)
+    return publish.upload_release(
+        repo,
+        staging,
+        KIND,
+        tag,
+        license_file=LICENSE,
+        expected_source={"repo": REPO, "revision": REVISION},
+        metadata_dir=metadata_dir,
+    )
 
 
 @pytest.fixture
@@ -26,10 +33,23 @@ def source(tmp_path):
     asset = root / "fused.aimodel"
     asset.mkdir(parents=True)
     (asset / "main.hash").write_bytes(bytes.fromhex("11" * 32))
-    spec = dict(kind="lfm2.5-vl", version=2, width=128, context=256, tiers=[256],
-                hidden=8, heads=2, kv_heads=1, head_dim=4, conv_taps=2,
-                conv_layers=[0], attention_layers=[1], asset=asset.name,
-                source_hash="11" * 32, source={"repo": REPO, "revision": REVISION})
+    spec = dict(
+        kind="lfm2.5-vl",
+        version=2,
+        width=128,
+        context=256,
+        tiers=[256],
+        hidden=8,
+        heads=2,
+        kv_heads=1,
+        head_dim=4,
+        conv_taps=2,
+        conv_layers=[0],
+        attention_layers=[1],
+        asset=asset.name,
+        source_hash="11" * 32,
+        source={"repo": REPO, "revision": REVISION},
+    )
     (root / "checkpoint").mkdir()
     (root / "checkpoint/model.safetensors").write_bytes(b"tensors")
     spec["checkpoint_hash"] = checkpoint_digest(root / "checkpoint")
@@ -40,9 +60,15 @@ def source(tmp_path):
 def write_aot(asset, source_hash):
     asset.mkdir(parents=True)
     (asset / "metadata.json").write_text(json.dumps({"sourceHash": source_hash}))
-    manifest = {"Package Version": {"1": {"Optimized Modules": {"module": {
-        "Entry Function Attributes": {"c256": ["mps.fullyPlacedOnANE", "mps.noGPUActivity"]}
-    }}}}}
+    manifest = {
+        "Package Version": {
+            "1": {
+                "Optimized Modules": {
+                    "module": {"Entry Function Attributes": {"c256": ["mps.fullyPlacedOnANE", "mps.noGPUActivity"]}}
+                }
+            }
+        }
+    }
     (asset / "manifest.plist").write_bytes(plistlib.dumps(manifest))
 
 
@@ -57,11 +83,17 @@ def native_tools(monkeypatch):
         return {"passed": True}
 
     build = Mock(side_effect=run)
-    inspect = Mock(return_value=SimpleNamespace(stdout=json.dumps({
-        "supportedArchitectures": ["h17s"],
-        "minSupportedOSVersions": ["macOS 27.0"],
-        "summary": {"functions": [{"name": "c256"}]}
-    })))
+    inspect = Mock(
+        return_value=SimpleNamespace(
+            stdout=json.dumps(
+                {
+                    "supportedArchitectures": ["h17s"],
+                    "minSupportedOSVersions": ["macOS 27.0"],
+                    "summary": {"functions": [{"name": "c256"}]},
+                }
+            )
+        )
+    )
     monkeypatch.setattr(coreai, "run", build)
     monkeypatch.setattr(coreai.subprocess, "run", inspect)
     return build, inspect
@@ -140,7 +172,8 @@ def test_upload_to_hub_assembles_release_and_synchronizes_patterns(release, monk
     assert (staging / "NOTICE").read_text() == "NOTICE"
     assert (staging / "README.md").read_text() == "README.md"
     assert json.loads((staging / "config.json").read_text()) == {
-        "version": 2, "source_hash": "11" * 32,
+        "version": 2,
+        "source_hash": "11" * 32,
         "checkpoint_hash": checkpoint_digest(staging / "macos27/h17s/checkpoint"),
         "bundles": {"h17s": "macos27/h17s/model.json"},
     }
@@ -159,9 +192,7 @@ def test_upload_to_hub_assembles_release_and_synchronizes_patterns(release, monk
     assert kwargs["delete_patterns"] == ["macos27/**"]
     assert "**/__pycache__/**" in kwargs["ignore_patterns"]
 
-    hub.create_tag.assert_called_once_with(
-        "user/d1-3B-CoreAI-ANE", tag="v1.0.1", revision="commit_sha_123"
-    )
+    hub.create_tag.assert_called_once_with("user/d1-3B-CoreAI-ANE", tag="v1.0.1", revision="commit_sha_123")
 
 
 def test_failed_later_stage_preserves_the_complete_previous_bundle(source, tmp_path, native_tools):
@@ -171,8 +202,10 @@ def test_failed_later_stage_preserves_the_complete_previous_bundle(source, tmp_p
     second = source / "second.aimodel"
     second.mkdir()
     (second / "main.hash").write_bytes(bytes.fromhex("22" * 32))
-    spec["assets"] = [{"asset": spec.pop("asset"), "source_hash": spec.pop("source_hash"), "functions": ["c256"]},
-                      {"asset": second.name, "source_hash": "22" * 32, "functions": ["c256"]}]
+    spec["assets"] = [
+        {"asset": spec.pop("asset"), "source_hash": spec.pop("source_hash"), "functions": ["c256"]},
+        {"asset": second.name, "source_hash": "22" * 32, "functions": ["c256"]},
+    ]
     (source / "model.json").write_text(json.dumps(spec))
     out = tmp_path / "out"
     compile_bundle(source, out, KIND, architecture="h17s")
@@ -217,8 +250,12 @@ def test_publish_rejects_different_vision_exports(release):
         spec = json.loads((directory / "model.json").read_text())
         vision = directory / f"vision.{architecture}.aimodelc"
         write_aot(vision, identity)
-        spec.update(architecture=architecture, asset=f"fused.{architecture}.aimodelc",
-                    vision_asset=vision.name, vision_source_hash=identity)
+        spec.update(
+            architecture=architecture,
+            asset=f"fused.{architecture}.aimodelc",
+            vision_asset=vision.name,
+            vision_source_hash=identity,
+        )
         (directory / "model.json").write_text(json.dumps(spec))
     with pytest.raises(ValueError, match="same source identity"):
         upload(staging, metadata_dir=metadata)

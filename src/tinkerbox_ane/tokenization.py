@@ -11,18 +11,18 @@ def token_spans(tokenizer, text):
     offsets = [0]
     for char in text:
         offsets.append(offsets[-1] + 1 + (ord(char) > 0xFFFF))
-    characters = list(regex.finditer(r'\X', text))
+    characters = list(regex.finditer(r"\X", text))
     starts = [character.start() for character in characters]
     ends = [character.end() for character in characters]
     spans = []
-    for token, (start, end) in zip(encoded['input_ids'], encoded['offset_mapping']):
+    for token, (start, end) in zip(encoded["input_ids"], encoded["offset_mapping"]):
         if start == end:
             continue
-        start = offsets[starts[bisect_right(starts, start)-1]]
+        start = offsets[starts[bisect_right(starts, start) - 1]]
         end = offsets[ends[bisect_left(ends, end)]]
-        if spans and start < spans[-1]['end_utf16']:
-            spans[-1]['end_utf16'] = max(end, spans[-1]['end_utf16'])
-            spans[-1]['token_ids'].append(token)
+        if spans and start < spans[-1]["end_utf16"]:
+            spans[-1]["end_utf16"] = max(end, spans[-1]["end_utf16"])
+            spans[-1]["token_ids"].append(token)
         else:
             spans.append(dict(start_utf16=start, end_utf16=end, token_ids=[token]))
     return spans

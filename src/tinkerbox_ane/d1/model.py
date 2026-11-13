@@ -38,8 +38,11 @@ class Config:
     def from_hf(cls, path: str | Path) -> Config:
         t = json.loads(Path(path).read_text())["text_config"]
         return cls(
-            hidden=t["hidden_size"], ffn=t["intermediate_size"], heads=t["num_attention_heads"],
-            kv_heads=t["num_key_value_heads"], layer_types=tuple(t["layer_types"]),
+            hidden=t["hidden_size"],
+            ffn=t["intermediate_size"],
+            heads=t["num_attention_heads"],
+            kv_heads=t["num_key_value_heads"],
+            layer_types=tuple(t["layer_types"]),
             conv_taps=t["conv_L_cache"],
             eps=t["norm_eps"],
         )
@@ -61,9 +64,9 @@ class ShortConv(nn.Module):
         # stride-three depthwise width convolution's ANE channel failure.
         routed = window @ route
         width = x.shape[-1]
-        planes = routed[..., :width * self.taps].reshape(1, self.dim, self.taps, width)
+        planes = routed[..., : width * self.taps].reshape(1, self.dim, self.taps, width)
         convolved = F.conv2d(planes, self.conv.weight.transpose(2, 3), groups=self.dim)
-        return self.out_proj(c * convolved), routed[..., width * self.taps:]
+        return self.out_proj(c * convolved), routed[..., width * self.taps :]
 
 
 class ConvBlock(nn.Module):
@@ -84,8 +87,7 @@ class ConvBlock(nn.Module):
 class AttentionBlock(nn.Module):
     def __init__(self, cfg: Config, scales: tuple[float, float]):
         super().__init__()
-        self.operator_norm = RMSNorm(cfg.hidden, cfg.eps, input_scale=RESIDUAL_SCALE,
-                                     compute_scale=NORM_COMPUTE_SCALE)
+        self.operator_norm = RMSNorm(cfg.hidden, cfg.eps, input_scale=RESIDUAL_SCALE, compute_scale=NORM_COMPUTE_SCALE)
         self.heads, self.kv_heads, self.head_dim = cfg.heads, cfg.kv_heads, cfg.head_dim
         self.q_proj = conv1x1(cfg.hidden, cfg.heads * cfg.head_dim)
         self.k_proj = conv1x1(cfg.hidden, cfg.kv_heads * cfg.head_dim)
@@ -95,8 +97,7 @@ class AttentionBlock(nn.Module):
         self.k_layernorm = RMSNorm(cfg.head_dim, cfg.eps, **norm)
         self.scale = cfg.head_dim**-0.5
         self.out_proj = conv1x1(cfg.hidden, cfg.hidden)
-        self.ffn_norm = RMSNorm(cfg.hidden, cfg.eps, input_scale=RESIDUAL_SCALE,
-                                compute_scale=NORM_COMPUTE_SCALE)
+        self.ffn_norm = RMSNorm(cfg.hidden, cfg.eps, input_scale=RESIDUAL_SCALE, compute_scale=NORM_COMPUTE_SCALE)
         self.feed_forward = MLP(cfg.hidden, cfg.ffn, scales[1])
         self.channels = cfg.hidden
 
@@ -133,15 +134,17 @@ class CacheAttention(nn.Module):
         mask = torch.cat((past_mask, chunk_mask), dim=-1)
         if self.context <= 4096:
             return F.scaled_dot_product_attention(
-                q, k.repeat_interleave(self.group, dim=1),
+                q,
+                k.repeat_interleave(self.group, dim=1),
                 v.repeat_interleave(self.group, dim=1),
-                attn_mask=mask, scale=1.0
+                attn_mask=mask,
+                scale=1.0,
             )
         maxima, masses, means = [], [], []
         for start in range(0, self.context, 4096):
-            kb = k[:, :, start:start + 4096].repeat_interleave(self.group, dim=1)
-            vb = v[:, :, start:start + 4096].repeat_interleave(self.group, dim=1)
-            block_mask = mask[..., start:start + 4096]
+            kb = k[:, :, start : start + 4096].repeat_interleave(self.group, dim=1)
+            vb = v[:, :, start : start + 4096].repeat_interleave(self.group, dim=1)
+            block_mask = mask[..., start : start + 4096]
             scores = q @ kb.transpose(-2, -1) + block_mask
             maximum = scores.amax(-1, keepdim=True)
             maxima.append(maximum)
@@ -167,8 +170,7 @@ class Backbone(nn.Module):
             ConvBlock(cfg, scale[1]) if kind == "conv" else AttentionBlock(cfg, scale)
             for kind, scale in zip(cfg.layer_types, scales)
         )
-        self.final_norm = RMSNorm(cfg.hidden, cfg.eps, input_scale=RESIDUAL_SCALE,
-                                  compute_scale=NORM_COMPUTE_SCALE)
+        self.final_norm = RMSNorm(cfg.hidden, cfg.eps, input_scale=RESIDUAL_SCALE, compute_scale=NORM_COMPUTE_SCALE)
 
 
 class FusedBackbone(nn.Module):
@@ -183,26 +185,32 @@ class FusedBackbone(nn.Module):
         self.attention = CacheAttention(cfg, capacity)
         self.conv_layers = [i for i, kind in enumerate(cfg.layer_types) if kind == "conv"]
         self.attention_layers = [i for i, kind in enumerate(cfg.layer_types) if kind == "full_attention"]
-        self.shapes = ([(1, cfg.hidden, 1, 2 * (cfg.conv_taps - 1))] * len(self.conv_layers)
-                       + [(1, cfg.kv_heads, capacity - CHUNK, cfg.head_dim)] * (2 * len(self.attention_layers)))
+        self.shapes = [(1, cfg.hidden, 1, 2 * (cfg.conv_taps - 1))] * len(self.conv_layers) + [
+            (1, cfg.kv_heads, capacity - CHUNK, cfg.head_dim)
+        ] * (2 * len(self.attention_layers))
         self.size = sum(math.prod(shape) for shape in self.shapes)
 
     def example_inputs(self):
         cfg = self.cfg
-        shapes = [(1, cfg.hidden, 1, CHUNK), (1, 1, cfg.head_dim, CHUNK),
-                  (1, 1, cfg.head_dim, CHUNK), (1, 1, CHUNK, self.capacity - CHUNK),
-                  (1, 1, 1, self.size), (1, 1, CHUNK, CHUNK),
-                   (1, 1, CHUNK + 2 * (cfg.conv_taps - 1), CHUNK * cfg.conv_taps + 2 * (cfg.conv_taps - 1))]
+        shapes = [
+            (1, cfg.hidden, 1, CHUNK),
+            (1, 1, cfg.head_dim, CHUNK),
+            (1, 1, cfg.head_dim, CHUNK),
+            (1, 1, CHUNK, self.capacity - CHUNK),
+            (1, 1, 1, self.size),
+            (1, 1, CHUNK, CHUNK),
+            (1, 1, CHUNK + 2 * (cfg.conv_taps - 1), CHUNK * cfg.conv_taps + 2 * (cfg.conv_taps - 1)),
+        ]
         return tuple(torch.zeros(shape, dtype=torch.float16) for shape in shapes)
 
     def forward(self, x, cos, sin, past_mask, packed_state, chunk_mask, conv_route):
         states, offset = [], 0
         for shape in self.shapes:
             count = math.prod(shape)
-            states.append(packed_state[..., offset:offset + count].reshape(shape))
+            states.append(packed_state[..., offset : offset + count].reshape(shape))
             offset += count
-        tails = iter(states[:len(self.conv_layers)])
-        histories = iter(states[len(self.conv_layers):])
+        tails = iter(states[: len(self.conv_layers)])
+        histories = iter(states[len(self.conv_layers) :])
         new_tails, new_kv = [], []
         attention = lambda q, pk, pv, k, v, mask: self.attention(q, pk, pv, k, v, mask, chunk_mask)
         for layer in self.layers:
@@ -218,14 +226,30 @@ class FusedBackbone(nn.Module):
 def _layer_weights(f, i: int, kind: str) -> dict[str, torch.Tensor]:
     p = f"{PREFIX}layers.{i}."
     op = "conv." if kind == "conv" else "self_attn."
-    names = {n: n for n in ("operator_norm.weight", "ffn_norm.weight", "feed_forward.w1.weight",
-                            "feed_forward.w2.weight", "feed_forward.w3.weight")}
+    names = {
+        n: n
+        for n in (
+            "operator_norm.weight",
+            "ffn_norm.weight",
+            "feed_forward.w1.weight",
+            "feed_forward.w2.weight",
+            "feed_forward.w3.weight",
+        )
+    }
     if kind == "conv":
         names |= {f"operator.{n}": f"{op}{n}" for n in ("in_proj.weight", "out_proj.weight", "conv.weight")}
     else:
-        names |= {f"operator.{n}": f"{op}{n}" for n in (
-            "q_proj.weight", "k_proj.weight", "v_proj.weight", "out_proj.weight",
-            "q_layernorm.weight", "k_layernorm.weight")}
+        names |= {
+            f"operator.{n}": f"{op}{n}"
+            for n in (
+                "q_proj.weight",
+                "k_proj.weight",
+                "v_proj.weight",
+                "out_proj.weight",
+                "q_layernorm.weight",
+                "k_layernorm.weight",
+            )
+        }
     out = {}
     for mine, theirs in names.items():
         t = f.get_tensor(p + theirs).float()

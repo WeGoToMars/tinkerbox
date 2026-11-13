@@ -89,8 +89,9 @@ struct RunTotals {
     }
 
     var previewInput: PreviewInput {
-        PreviewInput(item: Item(state: state, images: images.map(\.path)), questions: questions.map(\.question),
-                     mode: runMode, settings: demo.settingValues, model: demo.model, ready: demo.ready)
+        PreviewInput(
+            item: Item(state: state, images: images.map(\.path)), questions: questions.map(\.question),
+            mode: runMode, settings: demo.settingValues, model: demo.model, ready: demo.ready)
     }
 
     // Counts like `run`: one shared pass, or one pass per question.
@@ -102,7 +103,9 @@ struct RunTotals {
             return
         }
         do {
-            let requests = input.mode == .parallel ? [Request(items: [input.item], questions: input.questions)]
+            let requests =
+                input.mode == .parallel
+                ? [Request(items: [input.item], questions: input.questions)]
                 : input.questions.map { Request(items: [input.item], questions: [$0]) }
             var total = TokenCount()
             for request in requests { total = total + (try await demo.runtime.count(request)[0]) }
@@ -209,7 +212,8 @@ struct RunTotals {
             } else {
                 // Answers appear as each pass finishes.
                 for index in questions.indices {
-                    let result = try await demo.runtime.decide(Request(items: [item], questions: [questions[index].question]))
+                    let result = try await demo.runtime.decide(
+                        Request(items: [item], questions: [questions[index].question]))
                     questions[index].answer = result.results[0].answers[0]
                     questions[index].elapsedMs = result.elapsedMs
                     totals.add(result.results[0], elapsedMs: result.elapsedMs)
@@ -230,7 +234,9 @@ struct RunTotals {
 
     /// Counted FLOPs per second of Neural Engine time over the last run, in TFLOPS.
     var computeRate: Double? {
-        guard let flops = lastRun?.flops, let milliseconds = lastRun?.neuralEngineMs, milliseconds > 0 else { return nil }
+        guard let flops = lastRun?.flops, let milliseconds = lastRun?.neuralEngineMs, milliseconds > 0 else {
+            return nil
+        }
         return flops / milliseconds / 1e9
     }
 }
@@ -238,9 +244,10 @@ struct RunTotals {
 /// Downsamples with ImageIO so previews are filtered rather than shrunk from full resolution by the GPU.
 nonisolated func thumbnail(_ url: URL, side: CGFloat) -> CGImage? {
     guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-          let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-          let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
-          let height = properties[kCGImagePropertyPixelHeight] as? CGFloat else { return nil }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+        let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+        let height = properties[kCGImagePropertyPixelHeight] as? CGFloat
+    else { return nil }
     // The preview fills a square, so the short edge needs `side` pixels.
     let options: [CFString: Any] = [
         kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -258,10 +265,12 @@ nonisolated func resampled(_ url: URL, width: Int, height: Int) -> CGImage? {
         kCGImageSourceThumbnailMaxPixelSize: 2 * max(width, height),
     ]
     guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-          let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-          let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+        let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return nil }
     context.interpolationQuality = .high
     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
     return context.makeImage()
@@ -358,20 +367,27 @@ struct ModelView: View {
                 }
             }
             let (source, size) = (layout.source, layout.size)
-            Text(["\(source[0]) × \(source[1]) → \(size[0]) × \(size[1]) (\(layout.keptPercent))", layout.stretch,
-                  fit < 1 ? "shown at \(Double(fit).formatted(.percent.precision(.fractionLength(0))))" : nil]
-                 .compactMap { $0 }.joined(separator: " · "))
-            Text("\(layout.grid)\(layout.overview == nil ? "" : " + overview") · "
-                 + "\(layout.passes) vision \(layout.passes == 1 ? "pass" : "passes") · \(layout.tokens.formatted()) tokens")
-                .foregroundStyle(.secondary)
+            Text(
+                [
+                    "\(source[0]) × \(source[1]) → \(size[0]) × \(size[1]) (\(layout.keptPercent))", layout.stretch,
+                    fit < 1 ? "shown at \(Double(fit).formatted(.percent.precision(.fractionLength(0))))" : nil,
+                ]
+                .compactMap { $0 }.joined(separator: " · "))
+            Text(
+                "\(layout.grid)\(layout.overview == nil ? "" : " + overview") · "
+                    + "\(layout.passes) vision \(layout.passes == 1 ? "pass" : "passes") · \(layout.tokens.formatted()) tokens"
+            )
+            .foregroundStyle(.secondary)
         }
         .font(.callout.monospacedDigit())
         .padding(16)
         .task {
             let (url, layout) = (url, layout)
             (tiles, overview) = await Task.detached {
-                (resampled(url, width: layout.size[0], height: layout.size[1]),
-                 layout.overview.flatMap { resampled(url, width: $0[0], height: $0[1]) })
+                (
+                    resampled(url, width: layout.size[0], height: layout.size[1]),
+                    layout.overview.flatMap { resampled(url, width: $0[0], height: $0[1]) }
+                )
             }.value
         }
     }
@@ -412,9 +428,11 @@ struct DecisionView: View {
                     Button {
                         withAnimation { textCollapsed.toggle() }
                     } label: {
-                        Label("Input text (optional)",
-                              systemImage: textCollapsed ? "chevron.right" : "chevron.down")
-                            .font(.headline)
+                        Label(
+                            "Input text (optional)",
+                            systemImage: textCollapsed ? "chevron.right" : "chevron.down"
+                        )
+                        .font(.headline)
                     }
                     .buttonStyle(.plain)
                 }
@@ -429,8 +447,12 @@ struct DecisionView: View {
                 Button {
                     Task { await playground.run() }
                 } label: {
-                    Label(demo.busy && !demo.unloading ? "Running…" : playground.questions.count == 1 ? "Run decision"
-                          : "Run \(playground.questions.count) questions", systemImage: "play.fill")
+                    Label(
+                        demo.busy && !demo.unloading
+                            ? "Running…"
+                            : playground.questions.count == 1
+                                ? "Run decision"
+                                : "Run \(playground.questions.count) questions", systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!playground.canRun)
@@ -448,11 +470,14 @@ struct DecisionView: View {
                 if let error = playground.previewError {
                     Text(error).font(.caption).foregroundStyle(.red).lineLimit(2)
                 } else if let preview = playground.preview {
-                    Text(preview.tiles > 0 ? "\(preview.tokens.formatted()) tokens · \(preview.tiles) image tiles"
-                         : "\(preview.tokens.formatted()) tokens")
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                        .contentTransition(.numericText())
-                        .help("Input for the next run; each image tile uses one vision pass")
+                    Text(
+                        preview.tiles > 0
+                            ? "\(preview.tokens.formatted()) tokens · \(preview.tiles) image tiles"
+                            : "\(preview.tokens.formatted()) tokens"
+                    )
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    .contentTransition(.numericText())
+                    .help("Input for the next run; each image tile uses one vision pass")
                 }
                 Spacer()
                 if let setup = demo.loaded?.setupMs {
@@ -470,12 +495,15 @@ struct DecisionView: View {
                     .foregroundStyle(.red).textSelection(.enabled)
             }
 
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), alignment: .leading)], alignment: .leading, spacing: 16) {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 100), alignment: .leading)], alignment: .leading, spacing: 16
+            ) {
                 metric("Last run", duration(playground.lastRun?.elapsedMs))
                 metric("Compute", playground.computeRate.map { String(format: "%.1f TFLOPS", $0) } ?? "—")
-                    .help(playground.lastRun?.neuralEngineMs.map {
-                        "Matmul, convolution and attention FLOPs counted from the model graph, including padding, divided by \(duration($0)) of Neural Engine time"
-                    } ?? "Neural Engine compute rate of the last run")
+                    .help(
+                        playground.lastRun?.neuralEngineMs.map {
+                            "Matmul, convolution and attention FLOPs counted from the model graph, including padding, divided by \(duration($0)) of Neural Engine time"
+                        } ?? "Neural Engine compute rate of the last run")
                 metric("Throughput", playground.throughput.map { String(format: "%.0f tok/s", $0) } ?? "—")
             }
             .help(playground.lastRun.map { "\($0.tokens) rendered input tokens in the last run" } ?? "")
@@ -499,11 +527,17 @@ struct DecisionView: View {
         }
         .navigationTitle(ModelTask.decision.title)
         .navigationSubtitle(demo.loaded.map { "\($0.modelName) · \($0.cpuModel) · \($0.architecture)" } ?? "")
-        .toolbar { ModelToolbar(demo: demo, task: .decision, showingInspector: $showingInspector, showModels: showModels) }
+        .toolbar {
+            ModelToolbar(demo: demo, task: .decision, showingInspector: $showingInspector, showModels: showModels)
+        }
         .inspector(isPresented: $showingInspector) { ModelInspector(demo: demo) }
-        .focusedSceneValue(\.taskAction, TaskAction(
-            title: playground.questions.count == 1 ? "Run Decision" : "Run \(playground.questions.count) Questions",
-            enabled: playground.canRun) { Task { await playground.run() } })
+        .focusedSceneValue(
+            \.taskAction,
+            TaskAction(
+                title: playground.questions.count == 1 ? "Run Decision" : "Run \(playground.questions.count) Questions",
+                enabled: playground.canRun
+            ) { Task { await playground.run() } }
+        )
         .fileImporter(isPresented: $importingImages, allowedContentTypes: [.image], allowsMultipleSelection: true) {
             if case .success(let urls) = $0 { playground.add(urls) }
         }
@@ -511,8 +545,9 @@ struct DecisionView: View {
         .onAppear {
             pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-                      event.charactersIgnoringModifiers == "v", let window = event.window,
-                      !(window is NSPanel), window.attachedSheet == nil else { return event }
+                    event.charactersIgnoringModifiers == "v", let window = event.window,
+                    !(window is NSPanel), window.attachedSheet == nil
+                else { return event }
                 return playground.paste(.general, textFocused: window.firstResponder is NSText) ? nil : event
             }
         }
@@ -541,11 +576,20 @@ struct DecisionView: View {
                                             }
                                         }
                                         .frame(width: 72, height: 72)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
                                 }
                                 .buttonStyle(.plain)
-                                .help(layout == nil ? url.lastPathComponent : "\(url.lastPathComponent): show what the model sees")
-                                .popover(isPresented: Binding { inspectedImage == url } set: { if !$0 { inspectedImage = nil } }) {
+                                .help(
+                                    layout == nil
+                                        ? url.lastPathComponent : "\(url.lastPathComponent): show what the model sees"
+                                )
+                                .popover(
+                                    isPresented: Binding {
+                                        inspectedImage == url
+                                    } set: {
+                                        if !$0 { inspectedImage = nil }
+                                    }
+                                ) {
                                     if let layout { ModelView(url: url, layout: layout) }
                                 }
                                 Button {
@@ -637,7 +681,8 @@ struct QuestionCard: View {
                     .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
                     .frame(height: 80)
-                    .accessibilityLabel(draft.type == .choice ? "Question \(number) options" : "Question \(number) levels")
+                    .accessibilityLabel(
+                        draft.type == .choice ? "Question \(number) options" : "Question \(number) levels")
                 if let validation = draft.validation {
                     Text(validation).font(.caption).foregroundStyle(.red)
                 }
@@ -700,4 +745,3 @@ struct ProbabilityChart: View {
         .animation(.default, value: probabilities.map(\.value))
     }
 }
-

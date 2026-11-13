@@ -96,7 +96,8 @@ import SwiftUI
     // The previous model keeps serving Shortcuts until the chosen one has downloaded.
     func choose(_ choice: CatalogModel, asset: URL? = nil) async {
         guard let task = choice.kind, choice.isSupported, !storage.removing.contains(choice.id),
-              choice.id != model || !ready || asset != nil else { return }
+            choice.id != model || !ready || asset != nil
+        else { return }
         generation += 1
         let current = generation
         model = choice.id  // reserve its files before yielding to the runtime
@@ -197,8 +198,11 @@ struct AppView: View {
         .task(id: destination) {
             if case .task(let task) = destination {
                 let selected = Runtime.selectedModel(for: task)
-                if demo.model == selected { if !demo.ready { await demo.load() } }
-                else if let model = demo.catalog.models.first(where: { $0.id == selected }) { await demo.choose(model) }
+                if demo.model == selected {
+                    if !demo.ready { await demo.load() }
+                } else if let model = demo.catalog.models.first(where: { $0.id == selected }) {
+                    await demo.choose(model)
+                }
             }
         }
         .task { await demo.catalog.refresh() }
@@ -207,8 +211,12 @@ struct AppView: View {
             decisions.modelChanged()
             completions.modelChanged()
         }
-        .alert("Could not update storage", isPresented: Binding(get: { demo.storage.error != nil },
-                                                                set: { if !$0 { demo.storage.error = nil } })) {
+        .alert(
+            "Could not update storage",
+            isPresented: Binding(
+                get: { demo.storage.error != nil },
+                set: { if !$0 { demo.storage.error = nil } })
+        ) {
         } message: {
             Text(demo.storage.error ?? "")
         }
@@ -289,10 +297,15 @@ struct ModelToolbar: ToolbarContent {
         .sharedBackgroundVisibility(.hidden)
         ToolbarItem {
             Menu {
-                Picker("Model for \(task.title)", selection: Binding(get: { demo.model }, set: { id in
-                    guard let model = demo.catalog.models.first(where: { $0.id == id }) else { return }
-                    Task { await demo.choose(model) }
-                })) {
+                Picker(
+                    "Model for \(task.title)",
+                    selection: Binding(
+                        get: { demo.model },
+                        set: { id in
+                            guard let model = demo.catalog.models.first(where: { $0.id == id }) else { return }
+                            Task { await demo.choose(model) }
+                        })
+                ) {
                     ForEach(demo.models(for: task)) { model in
                         Text([model.name, model.fileSize].compactMap { $0 }.joined(separator: " · ")).tag(model.id)
                     }
@@ -328,8 +341,12 @@ struct ModelInspector: View {
         Form {
             Section("Settings") {
                 if demo.settings.isEmpty {
-                    Text(demo.loading ? "Loading settings…" : demo.ready ? "No model settings." : "Load the model to view settings.")
-                        .foregroundStyle(.secondary)
+                    Text(
+                        demo.loading
+                            ? "Loading settings…"
+                            : demo.ready ? "No model settings." : "Load the model to view settings."
+                    )
+                    .foregroundStyle(.secondary)
                 }
                 ForEach(demo.settings) { setting in
                     let value = Binding {
@@ -395,9 +412,12 @@ extension AttributedString {
             let plain = String(text.characters)
             let colors: [Color] = [.teal, .orange, .purple, .pink]
             for (index, span) in spans.enumerated() {
-                guard let range = Range(NSRange(location: span.startUtf16, length: span.endUtf16 - span.startUtf16), in: plain),
-                      let start = AttributedString.Index(range.lowerBound, within: text),
-                      let end = AttributedString.Index(range.upperBound, within: text) else { continue }
+                guard
+                    let range = Range(
+                        NSRange(location: span.startUtf16, length: span.endUtf16 - span.startUtf16), in: plain),
+                    let start = AttributedString.Index(range.lowerBound, within: text),
+                    let end = AttributedString.Index(range.upperBound, within: text)
+                else { continue }
                 for run in text[start..<end].runs {
                     text[run.range][TokenBackgroundKey.self] = TokenBackground(color: run.backgroundColor)
                     text[run.range].backgroundColor = colors[index % colors.count].opacity(0.2)
@@ -437,16 +457,19 @@ struct TaskTextEditor: View {
     }
 
     private var previewInput: PreviewInput {
-        PreviewInput(text: String(text.characters), model: demo.model,
-                     ready: demo.ready, busy: demo.busy, enabled: highlightTokens)
+        PreviewInput(
+            text: String(text.characters), model: demo.model,
+            ready: demo.ready, busy: demo.busy, enabled: highlightTokens)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle("Highlight tokens", systemImage: "highlighter", isOn: $highlightTokens)
                 .toggleStyle(.button).disabled(demo.busy)
-                .help(demo.ready ? "Color the text by token with the model's tokenizer."
-                      : "Colors the text by token once the model is loaded.")
+                .help(
+                    demo.ready
+                        ? "Color the text by token with the model's tokenizer."
+                        : "Colors the text by token once the model is loaded.")
             TextEditor(text: $text, selection: $selection)
                 .focused(focus ?? $ownFocus)
                 .font(.body)
@@ -474,8 +497,7 @@ struct TaskTextEditor: View {
             let spans = try await demo.runtime.tokenSpans(input.text, model: input.model)
             guard input == previewInput, !Task.isCancelled else { return }
             text.highlightTokens(spans, selection: &selection)
-        } catch is CancellationError { }
-        catch {
+        } catch is CancellationError {} catch {
             if input == previewInput, !Task.isCancelled { tokenError = error.localizedDescription }
         }
     }
@@ -506,18 +528,21 @@ private struct EditorFollower: NSViewRepresentable {
 
         private func attach() {
             guard let root = window?.contentView,
-                  let textView = Self.textView(in: root, within: convert(bounds, to: nil)),
-                  let scrollView = textView.enclosingScrollView else { return }
+                let textView = Self.textView(in: root, within: convert(bounds, to: nil)),
+                let scrollView = textView.enclosingScrollView
+            else { return }
             self.scrollView = scrollView
             let clip = scrollView.contentView
             clip.postsBoundsChangedNotifications = true
             textView.postsFrameChangedNotifications = true
             let center = NotificationCenter.default
             observers = [
-                center.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
+                center.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) {
+                    [weak self] _ in
                     MainActor.assumeIsolated { self?.following = clip.bounds.maxY >= textView.frame.height - 4 }
                 },
-                center.addObserver(forName: NSView.frameDidChangeNotification, object: textView, queue: .main) { [weak self] _ in
+                center.addObserver(forName: NSView.frameDidChangeNotification, object: textView, queue: .main) {
+                    [weak self] _ in
                     MainActor.assumeIsolated { if self?.following == true { textView.scrollToEndOfDocument(nil) } }
                 },
             ]
@@ -525,7 +550,10 @@ private struct EditorFollower: NSViewRepresentable {
 
         private static func textView(in node: NSView, within frame: CGRect) -> NSTextView? {
             if let text = node as? NSTextView, let scroll = text.enclosingScrollView,
-               frame.contains(scroll.convert(scroll.bounds, to: nil)) { return text }
+                frame.contains(scroll.convert(scroll.bounds, to: nil))
+            {
+                return text
+            }
             return node.subviews.lazy.compactMap { textView(in: $0, within: frame) }.first
         }
     }
@@ -539,8 +567,10 @@ struct TaskPage<Primary: View, Settings: View>: View {
     @State private var wide = false
 
     var body: some View {
-        let layout = wide ? AnyLayout(HStackLayout(alignment: .top, spacing: 24))
-                          : AnyLayout(VStackLayout(alignment: .leading, spacing: 24))
+        let layout =
+            wide
+            ? AnyLayout(HStackLayout(alignment: .top, spacing: 24))
+            : AnyLayout(VStackLayout(alignment: .leading, spacing: 24))
         ScrollView {
             layout {
                 VStack(alignment: .leading, spacing: 22) { primary }
@@ -551,7 +581,11 @@ struct TaskPage<Primary: View, Settings: View>: View {
             }
             .padding(24)
         }
-        .onGeometryChange(for: Bool.self) { $0.size.width >= 1100 } action: { wide = $0 }
+        .onGeometryChange(for: Bool.self) {
+            $0.size.width >= 1100
+        } action: {
+            wide = $0
+        }
         .frame(minWidth: 650, minHeight: 650)
         .background(.background.secondary)
     }
@@ -595,8 +629,9 @@ struct TaskSection<Content: View>: View {
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         struct Release: Decodable { let tagName: String }
         guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              let release = try? Runtime.decoder.decode(Release.self, from: data) else { return }
+            (response as? HTTPURLResponse)?.statusCode == 200,
+            let release = try? Runtime.decoder.decode(Release.self, from: data)
+        else { return }
         latest = release.tagName.hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName
     }
 }
@@ -639,8 +674,9 @@ struct SystemFooter: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: 8) {
-                Text("\(memory) memory · macOS \(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
-                     + " · Thermal: \(thermalDescription) · Low Power Mode: \(lowPowerMode ? "On" : "Off")")
+                Text(
+                    "\(memory) memory · macOS \(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+                        + " · Thermal: \(thermalDescription) · Low Power Mode: \(lowPowerMode ? "On" : "Off")")
                 Spacer()
                 if let newer = Updates.shared.available {
                     Button("Update to \(newer)") { openURL(Updates.releases) }
@@ -650,7 +686,9 @@ struct SystemFooter: View {
                         .help("Download the new version from GitHub")
                 }
                 Text("Tinkerbox \(Catalog.appVersion)")
-                Button { openURL(Updates.repository) } label: {
+                Button {
+                    openURL(Updates.repository)
+                } label: {
                     Image(nsImage: Self.githubMark).resizable().frame(width: 12, height: 12)
                 }
                 .buttonStyle(.plain)
@@ -691,9 +729,11 @@ struct RuntimeMenu: View {
             if let reply = state.reply {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(reply.modelName).font(.headline)
-                    Text([Catalog.current(reply.modelId)?.kind?.title, "Unloads after 5 minutes without inference"]
-                        .compactMap { $0 }.joined(separator: " · "))
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text(
+                        [Catalog.current(reply.modelId)?.kind?.title, "Unloads after 5 minutes without inference"]
+                            .compactMap { $0 }.joined(separator: " · ")
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
                 }
             } else if state.loading {
                 VStack(alignment: .leading, spacing: 6) {
@@ -735,7 +775,11 @@ struct RuntimeMenu: View {
         MenuBarExtra {
             RuntimeMenu(demo: demo)
         } label: {
-            Label { Text("Tinkerbox") } icon: { Image(nsImage: LogoGeometry.menuBarIcon) }
+            Label {
+                Text("Tinkerbox")
+            } icon: {
+                Image(nsImage: LogoGeometry.menuBarIcon)
+            }
         }
         .menuBarExtraStyle(.window)
     }

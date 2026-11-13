@@ -34,8 +34,13 @@ def download_bundle(model: str, repo: str, revision: str, progress=None, *, subf
 
     def fetch():
         # The manifest comes last, so a bundle that has one is complete.
-        snapshot_download(repo, revision=revision, allow_patterns=["config.json", f"{folder}/*"],
-                          ignore_patterns=[f"{folder}/model.json"], local_dir=root)
+        snapshot_download(
+            repo,
+            revision=revision,
+            allow_patterns=["config.json", f"{folder}/*"],
+            ignore_patterns=[f"{folder}/model.json"],
+            local_dir=root,
+        )
         hf_hub_download(repo, f"{folder}/model.json", revision=revision, local_dir=root)
         if subfolder:
             bundle.parent.mkdir(parents=True, exist_ok=True)
@@ -46,8 +51,11 @@ def download_bundle(model: str, repo: str, revision: str, progress=None, *, subf
         fetch()
         return bundle
     # A multi-model repository holds other bundles too, so size only this one.
-    total = sum(f.size for f in HfApi().list_repo_tree(repo, path_in_repo=folder, revision=revision, recursive=True)
-                if hasattr(f, "size"))
+    total = sum(
+        f.size
+        for f in HfApi().list_repo_tree(repo, path_in_repo=folder, revision=revision, recursive=True)
+        if hasattr(f, "size")
+    )
     with ThreadPoolExecutor(1) as pool:
         done = pool.submit(fetch)
         # Partial files grow under the local cache folder until they are moved into place.
@@ -88,8 +96,9 @@ def write_checkpoint(upstream: Path, out: Path, tensors: Iterable[str], dtype=No
 
     upstream, out = Path(upstream), Path(out)
     index = upstream / "model.safetensors.index.json"
-    weights = sorted(set(json.loads(index.read_text())["weight_map"].values())) if index.is_file() \
-        else ["model.safetensors"]
+    weights = (
+        sorted(set(json.loads(index.read_text())["weight_map"].values())) if index.is_file() else ["model.safetensors"]
+    )
     wanted = list(tensors)
 
     def matches(key, name):
@@ -107,8 +116,12 @@ def write_checkpoint(upstream: Path, out: Path, tensors: Iterable[str], dtype=No
     try:
         for path in sorted(upstream.rglob("*")):
             relative = path.relative_to(upstream)
-            if (path.is_file() and str(relative) not in weights and path != index
-                    and not any(part.startswith(".") or part == "__pycache__" for part in relative.parts)):
+            if (
+                path.is_file()
+                and str(relative) not in weights
+                and path != index
+                and not any(part.startswith(".") or part == "__pycache__" for part in relative.parts)
+            ):
                 (staged / relative).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(path, staged / relative)
         save_file(selected, staged / "model.safetensors", metadata={"format": "pt"})
@@ -134,8 +147,11 @@ def checkpoint_digest(checkpoint: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(Path(checkpoint).rglob("*")):
         relative = path.relative_to(checkpoint)
-        if (not path.is_file() or path.suffix == ".pyc"
-                or any(part.startswith(".") or part == "__pycache__" for part in relative.parts)):
+        if (
+            not path.is_file()
+            or path.suffix == ".pyc"
+            or any(part.startswith(".") or part == "__pycache__" for part in relative.parts)
+        ):
             continue
         digest.update(str(relative).encode() + b"\0")
         with path.open("rb") as stream:
@@ -256,22 +272,37 @@ def compile_bundle(source: Path, out: Path, kind: str, architecture: str | None 
         marker.write_text(json.dumps(identity))
     if "asset" in spec:
         target = build / f"{Path(spec['asset']).stem}.{architecture}.aimodelc"
-        compile_asset(source / spec["asset"], target, architecture=architecture, min_deployment_version="27.0",
-                      expected_functions=(f"c{capacity}" for capacity in spec["tiers"]))
+        compile_asset(
+            source / spec["asset"],
+            target,
+            architecture=architecture,
+            min_deployment_version="27.0",
+            expected_functions=(f"c{capacity}" for capacity in spec["tiers"]),
+        )
         spec.update(asset=target.name)
     for stage in spec.get("assets", []):
         target = build / f"{Path(stage['asset']).stem}.{architecture}.aimodelc"
-        compile_asset(source / stage["asset"], target, architecture=architecture, min_deployment_version="27.0",
-                      expected_functions=stage["functions"], timeout=3600,
-                      report=f"compile-{Path(stage['asset']).stem}")
+        compile_asset(
+            source / stage["asset"],
+            target,
+            architecture=architecture,
+            min_deployment_version="27.0",
+            expected_functions=stage["functions"],
+            timeout=3600,
+            report=f"compile-{Path(stage['asset']).stem}",
+        )
         stage.update(asset=target.name)
-    spec.update(architecture=architecture, min_os="27.0",
-                deployment="aot-staged" if "assets" in spec else "aot-fused")
+    spec.update(architecture=architecture, min_os="27.0", deployment="aot-staged" if "assets" in spec else "aot-fused")
     if "vision_asset" in spec:
         vision = build / f"vision.{architecture}.aimodelc"
-        compile_asset(source / spec["vision_asset"], vision, architecture=architecture,
-                      min_deployment_version="27.0", expected_functions=spec.get("vision_functions", ("main",)),
-                      report="compile-vision")
+        compile_asset(
+            source / spec["vision_asset"],
+            vision,
+            architecture=architecture,
+            min_deployment_version="27.0",
+            expected_functions=spec.get("vision_functions", ("main",)),
+            report="compile-vision",
+        )
         spec.update(vision_asset=vision.name)
     staged = build / f".{CHECKPOINT}"
     shutil.rmtree(staged, ignore_errors=True)

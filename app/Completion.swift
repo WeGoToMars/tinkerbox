@@ -64,8 +64,9 @@ struct TokenSample: Identifiable {
     }
 
     var previewInput: PreviewInput {
-        PreviewInput(prompts: prompts.map(\.text), model: demo.model,
-                     ready: demo.ready, busy: demo.busy)
+        PreviewInput(
+            prompts: prompts.map(\.text), model: demo.model,
+            ready: demo.ready, busy: demo.busy)
     }
 
     var canRun: Bool {
@@ -108,7 +109,8 @@ struct TokenSample: Identifiable {
         error = nil
         // A maximum, so each run generates at most what still fits after the longest prompt.
         let room = counts.count == prompts.count ? counts.map { context - $0.tokens }.min() : nil
-        let request = CompletionRequest(prompt: prompts.map(\.text), maxTokens: min(maxNewTokens, room ?? .max),
+        let request = CompletionRequest(
+            prompt: prompts.map(\.text), maxTokens: min(maxNewTokens, room ?? .max),
             temperature: sampling ? temperature : 0, topK: sampling ? topK : 0, topP: sampling ? topP : 1,
             seed: sampling ? seed : nil, batchSize: batchSize == 0 ? nil : batchSize)
         let ids = prompts.map(\.id)
@@ -141,7 +143,9 @@ struct TokenSample: Identifiable {
 
     private func receive(_ deltas: [CompletionDelta], ids: [UUID], seconds: Double) {
         for delta in deltas {
-            if let index = prompts.firstIndex(where: { $0.id == ids[delta.index] }) { prompts[index].append(delta.text) }
+            if let index = prompts.firstIndex(where: { $0.id == ids[delta.index] }) {
+                prompts[index].append(delta.text)
+            }
             let tokens = timeline.last { $0.prompt == delta.index }?.tokens ?? 0
             timeline.append(TokenSample(prompt: delta.index, seconds: seconds, tokens: tokens + delta.tokens))
         }
@@ -181,9 +185,11 @@ struct CompletionView: View {
                         TaskTextEditor(text: $prompt.content, selection: $prompt.selection, demo: demo)
                             .accessibilityLabel("Prompt \(index + 1)")
                         if let result = prompt.completion {
-                            Text("\(result.metrics.inputTokens) in · \(result.metrics.outputTokens) out · batch \(result.metrics.batchSize) · \(result.finishReason == "stop" ? "End of text" : "Token limit")")
-                                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-                                .frame(maxWidth: .infinity, alignment: .trailing)
+                            Text(
+                                "\(result.metrics.inputTokens) in · \(result.metrics.outputTokens) out · batch \(result.metrics.batchSize) · \(result.finishReason == "stop" ? "End of text" : "Token limit")"
+                            )
+                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                            .frame(maxWidth: .infinity, alignment: .trailing)
                         }
                     }.padding(.vertical, 4)
                 }
@@ -204,8 +210,10 @@ struct CompletionView: View {
                         Text("Generating…").foregroundStyle(.secondary)
                     } else if let elapsed = playground.elapsedMs {
                         let tokens = playground.results.reduce(0) { $0 + $1.metrics.outputTokens }
-                        Text("\(tokens) output tokens · \((elapsed / 1000).formatted(.number.precision(.fractionLength(2)))) s · \((Double(tokens) * 1000 / max(elapsed, 1)).formatted(.number.precision(.fractionLength(1)))) tokens/s")
-                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                        Text(
+                            "\(tokens) output tokens · \((elapsed / 1000).formatted(.number.precision(.fractionLength(2)))) s · \((Double(tokens) * 1000 / max(elapsed, 1)).formatted(.number.precision(.fractionLength(1)))) tokens/s"
+                        )
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
                     }
                 }
                 if let message = playground.error ?? playground.previewError ?? demo.error {
@@ -225,8 +233,10 @@ struct CompletionView: View {
                     HStack {
                         TextField("Maximum new tokens", value: $playground.maxNewTokens, format: .number)
                             .labelsHidden().frame(width: 70)
-                        Stepper("Maximum new tokens", value: $playground.maxNewTokens,
-                                in: 1...max(1, playground.context - 1)).labelsHidden()
+                        Stepper(
+                            "Maximum new tokens", value: $playground.maxNewTokens,
+                            in: 1...max(1, playground.context - 1)
+                        ).labelsHidden()
                     }
                 }
                 Picker("Batch size", selection: $playground.batchSize) {
@@ -252,18 +262,27 @@ struct CompletionView: View {
                             .labelsHidden().frame(width: 90)
                     }
                     LabeledContent("Seed") {
-                        TextField("Seed", value: $playground.seed, format: .number.grouping(.never), prompt: Text("Random"))
-                            .labelsHidden().frame(maxWidth: 180)
+                        TextField(
+                            "Seed", value: $playground.seed, format: .number.grouping(.never), prompt: Text("Random")
+                        )
+                        .labelsHidden().frame(maxWidth: 180)
                     }
                     .help("Replays the same text for each prompt.")
                 }
             }.disabled(demo.busy)
         }
         .navigationTitle(ModelTask.completion.title)
-        .toolbar { ModelToolbar(demo: demo, task: .completion, showingInspector: $showingInspector, showModels: showModels) }
+        .toolbar {
+            ModelToolbar(demo: demo, task: .completion, showingInspector: $showingInspector, showModels: showModels)
+        }
         .inspector(isPresented: $showingInspector) { ModelInspector(demo: demo) }
-        .focusedSceneValue(\.taskAction, TaskAction(title: playground.results.isEmpty ? "Generate" : "Continue",
-                                                    enabled: playground.canRun) { Task { await playground.run() } })
+        .focusedSceneValue(
+            \.taskAction,
+            TaskAction(
+                title: playground.results.isEmpty ? "Generate" : "Continue",
+                enabled: playground.canRun
+            ) { Task { await playground.run() } }
+        )
         .task(id: playground.previewInput) {
             try? await Task.sleep(for: .milliseconds(250))  // wait for typing to pause
             if !Task.isCancelled { await playground.preview() }
@@ -286,10 +305,15 @@ struct TokenTimeline: View {
             return prompts.map { prompt in ("Prompt \(prompt + 1)", samples.filter { $0.prompt == prompt }) }
         }
         var latest: [Int: Int] = [:]
-        return [("All prompts", samples.map { sample in
-            latest[sample.prompt] = sample.tokens
-            return TokenSample(prompt: 0, seconds: sample.seconds, tokens: latest.values.reduce(0, +))
-        })]
+        return [
+            (
+                "All prompts",
+                samples.map { sample in
+                    latest[sample.prompt] = sample.tokens
+                    return TokenSample(prompt: 0, seconds: sample.seconds, tokens: latest.values.reduce(0, +))
+                }
+            )
+        ]
     }
 
     var body: some View {
@@ -305,8 +329,10 @@ struct TokenTimeline: View {
             if let selected {
                 RuleMark(x: .value("Seconds", selected))
                     .foregroundStyle(.secondary.opacity(0.5))
-                    .annotation(position: .overlay, alignment: .top,
-                                overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))) {
+                    .annotation(
+                        position: .overlay, alignment: .top,
+                        overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))
+                    ) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("\(selected.formatted(.number.precision(.fractionLength(2)))) s").bold()
                             ForEach(series, id: \.name) { line in

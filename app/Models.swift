@@ -33,8 +33,11 @@ struct ModelsView: View {
         var families: [ModelFamily] = []
         for model in demo.catalog.models where model.task == task {
             let id = model.family.map { "\(task)/\(model.publisher)/\($0)" } ?? "\(task)/\(model.id)"
-            if let index = families.firstIndex(where: { $0.id == id }) { families[index].models.append(model) }
-            else { families.append(ModelFamily(id: id, name: model.family ?? model.name, models: [model])) }
+            if let index = families.firstIndex(where: { $0.id == id }) {
+                families[index].models.append(model)
+            } else {
+                families.append(ModelFamily(id: id, name: model.family ?? model.name, models: [model]))
+            }
         }
         return families
     }
@@ -62,9 +65,15 @@ struct ModelsView: View {
             if family.models.count > 1 {
                 HStack(spacing: 16) {
                     if sizes.count > 1 {
-                        Picker("Size", selection: Binding(get: { model.size ?? "Default" }, set: { size in
-                            variants[family.id] = family.variant(size: size, quantization: model.quantization)?.id
-                        })) {
+                        Picker(
+                            "Size",
+                            selection: Binding(
+                                get: { model.size ?? "Default" },
+                                set: { size in
+                                    variants[family.id] =
+                                        family.variant(size: size, quantization: model.quantization)?.id
+                                })
+                        ) {
                             ForEach(sizes, id: \.self) { size in
                                 let variant = family.variant(size: size, quantization: model.quantization)
                                 Text([size, variant?.fileSize].compactMap { $0 }.joined(separator: " · ")).tag(size)
@@ -72,18 +81,27 @@ struct ModelsView: View {
                         }.fixedSize().accessibilityLabel("\(family.name) size")
                     }
                     if quantizations.count > 1 {
-                        Picker("Quantization", selection: Binding(get: { model.quantization ?? "Default" }, set: { quantization in
-                            variants[family.id] = weights.first { ($0.quantization ?? "Default") == quantization }?.id
-                        })) {
+                        Picker(
+                            "Quantization",
+                            selection: Binding(
+                                get: { model.quantization ?? "Default" },
+                                set: { quantization in
+                                    variants[family.id] =
+                                        weights.first { ($0.quantization ?? "Default") == quantization }?.id
+                                })
+                        ) {
                             ForEach(quantizations, id: \.self) { quantization in
                                 let variant = weights.first { ($0.quantization ?? "Default") == quantization }
-                                Text([quantization, variant?.fileSize].compactMap { $0 }.joined(separator: " · ")).tag(quantization)
+                                Text([quantization, variant?.fileSize].compactMap { $0 }.joined(separator: " · ")).tag(
+                                    quantization)
                             }
                         }.fixedSize().accessibilityLabel("\(family.name) quantization")
                     }
                     Spacer()
-                    Text("\(installed) of \(family.models.count) installed\(downloading > 0 ? " · \(downloading) downloading" : "")")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text(
+                        "\(installed) of \(family.models.count) installed\(downloading > 0 ? " · \(downloading) downloading" : "")"
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
                 }
             }
         }.padding(.vertical, 8)
@@ -108,21 +126,37 @@ struct ModelsView: View {
                 }
             }
         }
-        .alert("Model files", isPresented: Binding(get: { removalError != nil }, set: { if !$0 { removalError = nil } })) {
-        } message: { Text(removalError ?? "") }
-        .confirmationDialog("Delete \(pending?.name ?? "")?", isPresented: Binding(
-            get: { pending != nil }, set: { if !$0 { pending = nil } }), presenting: pending) { model in
+        .alert(
+            "Model files", isPresented: Binding(get: { removalError != nil }, set: { if !$0 { removalError = nil } })
+        ) {
+        } message: {
+            Text(removalError ?? "")
+        }
+        .confirmationDialog(
+            "Delete \(pending?.name ?? "")?",
+            isPresented: Binding(
+                get: { pending != nil }, set: { if !$0 { pending = nil } }), presenting: pending
+        ) { model in
             Button("Delete", role: .destructive) { Task { await demo.remove(model.id) } }
         } message: { model in
             if let report = demo.storage.report, let stored = report.models.first(where: { $0.id == model.id }) {
                 Text(report.removal(of: stored))
             }
         }
-        .fileImporter(isPresented: Binding { choosingBundle != nil } set: { if !$0 { choosingBundle = nil } },
-                      allowedContentTypes: [.folder]) { result in
+        .fileImporter(
+            isPresented: Binding {
+                choosingBundle != nil
+            } set: {
+                if !$0 { choosingBundle = nil }
+            },
+            allowedContentTypes: [.folder]
+        ) { result in
             guard let model = choosingBundle, case .success(let url) = result else { return }
-            if let issue = Catalog.bundleIssue(at: url) { removalError = issue }
-            else { Task { await demo.choose(model, asset: url) } }
+            if let issue = Catalog.bundleIssue(at: url) {
+                removalError = issue
+            } else {
+                Task { await demo.choose(model, asset: url) }
+            }
         }
         .task {
             await demo.catalog.refresh()
@@ -140,9 +174,11 @@ struct ModelsView: View {
         // Partial downloads count, so an interrupted one can be deleted.
         let stored = demo.catalog.downloaded.contains(model.id) || downloading || files != nil
         let inputs = model.inputs?.map { $0 == "image" ? "Images" : $0.capitalized }.joined(separator: " + ")
-        let details = [inputs, model.context.map { "\($0 / 1024)K-token context" },
-                       model.fileSize,
-                       model.license].compactMap { $0 }
+        let details = [
+            inputs, model.context.map { "\($0 / 1024)K-token context" },
+            model.fileSize,
+            model.license,
+        ].compactMap { $0 }
         return HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
@@ -155,7 +191,8 @@ struct ModelsView: View {
                     HStack(spacing: 6) {
                         Text("\(formatBytes(files.bytes)) on this Mac")
                         Button("Show in Finder", systemImage: "folder") {
-                            NSWorkspace.shared.activateFileViewerSelecting(files.bundles.map { URL(fileURLWithPath: $0.path) })
+                            NSWorkspace.shared.activateFileViewerSelecting(
+                                files.bundles.map { URL(fileURLWithPath: $0.path) })
                         }
                         .labelStyle(.iconOnly)
                         .buttonStyle(.borderless)
@@ -173,8 +210,10 @@ struct ModelsView: View {
             }
             Spacer()
             Menu("Hugging Face", systemImage: "arrow.up.right.square") {
-                let repositories = [("Base model", model.baseModel), ("Original model", model.originalModel),
-                                    ("Converted model", model.repo)]
+                let repositories = [
+                    ("Base model", model.baseModel), ("Original model", model.originalModel),
+                    ("Converted model", model.repo),
+                ]
                 ForEach(repositories, id: \.0) { title, repository in
                     if let repository {
                         Button("\(title) · \(repository)") {
@@ -190,9 +229,11 @@ struct ModelsView: View {
             .fixedSize()
             .help("Open on Hugging Face")
             if !model.isSupported {
-                Text(Catalog.isNewer(model.minVersion, than: Catalog.appVersion)
-                     ? "Requires Tinkerbox \(model.minVersion)" : "Update Tinkerbox to use this model")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text(
+                    Catalog.isNewer(model.minVersion, than: Catalog.appVersion)
+                        ? "Requires Tinkerbox \(model.minVersion)" : "Update Tinkerbox to use this model"
+                )
+                .font(.caption).foregroundStyle(.secondary)
             } else {
                 if issue != nil {
                     Button("Choose bundle…") { choosingBundle = model }
@@ -214,27 +255,34 @@ struct ModelsView: View {
                 }
                 if issue == nil, !downloading, demo.catalog.update(for: model) != nil {
                     Button("Update") { Task { await demo.update(model.id) } }
-                        .disabled(demo.busy || demo.updating.contains(model.id) || demo.storage.removing.contains(model.id))
+                        .disabled(
+                            demo.busy || demo.updating.contains(model.id) || demo.storage.removing.contains(model.id))
                 } else if !outdated.isEmpty && files?.bundles.contains(where: \.current) == true {
                     Button("Remove Outdated") { Task { await demo.remove(model.id, outdated: true) } }
                         .disabled(!demo.storage.removing.isEmpty)
-                        .help("Delete \(formatBytes(outdated.map { $0.bytes + $0.compiled.bytes }.reduce(0, +))) "
-                              + "of revisions this version no longer loads")
+                        .help(
+                            "Delete \(formatBytes(outdated.map { $0.bytes + $0.compiled.bytes }.reduce(0, +))) "
+                                + "of revisions this version no longer loads")
                 }
                 if demo.storage.removing.contains(model.id) {
                     ProgressView().controlSize(.small)
                 } else if stored && !demo.keeps(model.id) {
-                    Button(role: .destructive) { pending = model } label: { Image(systemName: "trash") }
-                        .buttonStyle(.borderless)
-                        .help(downloading ? "Stop the download and delete its files" : "Delete model files and cached copies")
-                        .disabled(!demo.storage.removing.isEmpty)
+                    Button(role: .destructive) {
+                        pending = model
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(
+                        downloading ? "Stop the download and delete its files" : "Delete model files and cached copies"
+                    )
+                    .disabled(!demo.storage.removing.isEmpty)
                 }
                 if model.id != demo.model && issue == nil {
                     Button(downloaded ? "Select" : "Download & Select") { Task { await demo.choose(model) } }
-                    .disabled(demo.busy || demo.storage.removing.contains(model.id))
+                        .disabled(demo.busy || demo.storage.removing.contains(model.id))
                 }
             }
         }
     }
 }
-

@@ -18,8 +18,9 @@ func require(_ condition: Bool, _ message: String) throws {
 
 func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throws {
     try require(values.map(\.label) == labels, "Probability labels or ordering changed")
-    try require(values.allSatisfy { $0.probability.isFinite && (0...1).contains($0.probability) },
-                "Probabilities must be finite and between zero and one")
+    try require(
+        values.allSatisfy { $0.probability.isFinite && (0...1).contains($0.probability) },
+        "Probabilities must be finite and between zero and one")
     try require(abs(values.reduce(0) { $0 + $1.probability } - 1) < 0.00001, "Probabilities must sum to one")
 }
 
@@ -94,13 +95,20 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         try checkProbabilities(affirmative.probabilities, labels: ["Yes", "No"])
         try checkProbabilities(chosen.probabilities, labels: choice.options)
         try checkProbabilities(scored.probabilities, labels: ["0 · Unfriendly", "1 · Neutral", "2 · Friendly"])
-        try require([affirmative.inputTokens, negative.inputTokens, chosen.inputTokens, scored.inputTokens].allSatisfy { $0 > 0 },
-                    "Missing input-token usage")
-        try require([affirmative.inferenceTime, negative.inferenceTime, chosen.inferenceTime, scored.inferenceTime]
-            .allSatisfy { $0.isFinite && $0 >= 0 }, "Missing inference timing")
-        try require(abs(uiReply.results[0].answers[0].noul! - affirmative.yesProbability) < 0.01, "UI and Shortcut answers differ")
-        try require(String(localized: affirmative.displayRepresentation.title).hasPrefix("Yes ("),
-                    "The text form should state the answer and its probability")
+        try require(
+            [affirmative.inputTokens, negative.inputTokens, chosen.inputTokens, scored.inputTokens].allSatisfy {
+                $0 > 0
+            },
+            "Missing input-token usage")
+        try require(
+            [affirmative.inferenceTime, negative.inferenceTime, chosen.inferenceTime, scored.inferenceTime]
+                .allSatisfy { $0.isFinite && $0 >= 0 }, "Missing inference timing")
+        try require(
+            abs(uiReply.results[0].answers[0].noul! - affirmative.yesProbability) < 0.01,
+            "UI and Shortcut answers differ")
+        try require(
+            String(localized: affirmative.displayRepresentation.title).hasPrefix("Yes ("),
+            "The text form should state the answer and its probability")
 
         // Image-only decisions: Shortcuts file data reaches the vision tower and changes the answer.
         let blue = YesNoDecisionIntent()
@@ -146,8 +154,9 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
             try require(error.localizedDescription.contains("context limit"), "Expected a context-limit error")
         }
         let repeated = try await yes.perform().value!
-        try require(repeated.answer && abs(repeated.yesProbability - affirmative.yesProbability) < 0.01,
-                    "A failed request affected the next decision")
+        try require(
+            repeated.answer && abs(repeated.yesProbability - affirmative.yesProbability) < 0.01,
+            "A failed request affected the next decision")
         // Unloading preserves the selection, and the next App Intent reloads it automatically.
         let selected = Runtime.selectedModel(for: .decision)
         let settings = Runtime.settings(for: selected)
@@ -155,14 +164,16 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         try require(await !Runtime.shared.isConnected, "Manual unload kept the model loaded")
         try require(Runtime.selectedModel(for: .decision) == selected, "Unload changed the selected model")
         let afterUnload = try await yes.perform().value!
-        try require(afterUnload.answer && abs(afterUnload.yesProbability - affirmative.yesProbability) < 0.01,
-                    "The App Intent did not recover after unloading")
+        try require(
+            afterUnload.answer && abs(afterUnload.yesProbability - affirmative.yesProbability) < 0.01,
+            "The App Intent did not recover after unloading")
         try require(Runtime.settings(for: selected) == settings, "Reload changed the saved settings")
         await Runtime.shared.unload()
 
         // A short idle policy exercises the same lifecycle without waiting five minutes.
         let idle = Runtime(idleTimeout: .seconds(2))
-        let request = Request(items: [Item(state: yes.text!)], questions: [Question(type: .noul, instructions: yes.question)])
+        let request = Request(
+            items: [Item(state: yes.text!)], questions: [Question(type: .noul, instructions: yes.question)])
         _ = try await idle.decide(request)
         try await Task.sleep(for: .milliseconds(1200))
         _ = try await idle.decide(request)
@@ -172,8 +183,7 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         var expired = false
         while ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(200))
-            do { _ = try await idle.count(request) }
-            catch is TinkerboxError { expired = true; break }
+            do { _ = try await idle.count(request) } catch is TinkerboxError { expired = true; break }
         }
         let disconnected = await !idle.isConnected
         try require(expired && disconnected, "Token previews kept an idle model loaded")
@@ -181,13 +191,16 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         try require(reloaded.results[0].answers[0].noul! > 0.9, "Inference did not reload the idle model")
 
         // Unload waits for an active request rather than cancelling it.
-        let long = Request(items: [Item(state: String(repeating: "Hello, friend! ", count: 1200))], questions: request.questions)
+        let long = Request(
+            items: [Item(state: String(repeating: "Hello, friend! ", count: 1200))], questions: request.questions)
         async let active = idle.decide(long)
         try await Task.sleep(for: .milliseconds(100))
         await idle.unload()
         let completed = try await active
         try require(completed.results[0].answers.count == 1, "Unload interrupted inference")
         try require(await !idle.isConnected, "Queued unload did not release the model")
-        print("PASS: typed answers, probabilities, usage, images, several questions, list filter and sort, cold startup, concurrent UI/Shortcuts calls, validation, error recovery, manual/idle unload, preview inactivity, automatic reload and queued unload")
+        print(
+            "PASS: typed answers, probabilities, usage, images, several questions, list filter and sort, cold startup, concurrent UI/Shortcuts calls, validation, error recovery, manual/idle unload, preview inactivity, automatic reload and queued unload"
+        )
     }
 }

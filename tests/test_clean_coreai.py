@@ -9,8 +9,9 @@ import sys
 import pytest
 
 
-pytestmark = pytest.mark.skipif(sys.platform != "darwin" or os.getuid() == 0,
-                                reason="cleanup is for an unprivileged macOS user")
+pytestmark = pytest.mark.skipif(
+    sys.platform != "darwin" or os.getuid() == 0, reason="cleanup is for an unprivileged macOS user"
+)
 
 
 @pytest.fixture
@@ -25,8 +26,9 @@ def cleanup(tmp_path):
     environment = dict(os.environ, HOME=str(home), TMPDIR=str(temporary))
 
     def run(*arguments):
-        return subprocess.run([sys.executable, str(script), *arguments], env=environment,
-                              capture_output=True, text=True)
+        return subprocess.run(
+            [sys.executable, str(script), *arguments], env=environment, capture_output=True, text=True
+        )
 
     return root, run
 
@@ -81,9 +83,13 @@ def test_apply_refuses_a_live_coreai_host_before_deleting(cleanup):
     sentinel = cache / "weights"
     sentinel.write_text("keep")
     host = root / "tinkerbox-ane-host"
-    subprocess.run(["cc", "-x", "c", "-", "-o", str(host)],
-                   input="#include <unistd.h>\nint main(void) { sleep(60); return 0; }\n",
-                   text=True, capture_output=True, check=True)
+    subprocess.run(
+        ["cc", "-x", "c", "-", "-o", str(host)],
+        input="#include <unistd.h>\nint main(void) { sleep(60); return 0; }\n",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
     process = subprocess.Popen([str(host), "60"])
     try:
         result = run("--apply")
