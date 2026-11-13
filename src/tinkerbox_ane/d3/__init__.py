@@ -52,9 +52,8 @@ def checkpoint(repo: str, revision: str) -> Path:
     return Path(snapshot_download(repo, revision=revision))
 
 
-def load(asset=None, model: str = "d3-nano"):
+def load(asset):
     """Load the synchronous System One API; use as a context manager."""
     from tinkerbox_ane.d3.runtime import load as load_model
-    from tinkerbox_ane.models import download
 
-    return load_model(download(model) if asset is None else Path(asset))
+    return load_model(Path(asset))

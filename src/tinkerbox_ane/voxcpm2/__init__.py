@@ -3,14 +3,14 @@
 import os
 from pathlib import Path
 
+from .parameters import CAPABILITIES as SPEECH_CAPABILITIES, PARAMETERS as SPEECH_PARAMETERS  # noqa: F401
+
 MODEL = 'voxcpm2'
 KIND = 'voxcpm2-minicpm'
 REPO = 'openbmb/VoxCPM2'
 REVISION = '32279effe8c19989596f05d353d1447f51d9e915'
 UPSTREAM_REVISION = 'cce58a5b59303c9bd63d12f23afe6a49a4a80c59'
 SOURCE = Path('artifacts/voxcpm2/export')
-from .parameters import PARAMETERS as SPEECH_PARAMETERS  # noqa: F401 (model registry)
-from .parameters import CAPABILITIES as SPEECH_CAPABILITIES  # noqa: F401 (model registry)
 SETTINGS = []
 INFO = [dict(label='Synthesis', value='ANE · MiniCPM + local diffusion'),
         dict(label='Audio', value='48 kHz · CPU AudioVAE V2')]
@@ -25,5 +25,7 @@ def checkpoint():
 
 
 def load(asset):
+    """Load the speech API; use as a context manager."""
     from .runtime import Speech
-    return Speech(asset)
+
+    return Speech(Path(asset))

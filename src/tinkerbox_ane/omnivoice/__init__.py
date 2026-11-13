@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from .parameters import CAPABILITIES as SPEECH_CAPABILITIES, PARAMETERS as SPEECH_PARAMETERS  # noqa: F401
+
 MODEL = 'omnivoice'
 KIND = 'omnivoice-qwen3'
 REPO = 'k2-fsa/OmniVoice'
@@ -13,8 +15,6 @@ INFO = [
     {'label': 'Synthesis', 'value': 'ANE · Qwen3 diffusion'},
     {'label': 'Audio codec', 'value': 'ANE decoder · 24 kHz'},
 ]
-from .parameters import PARAMETERS as SPEECH_PARAMETERS  # noqa: F401 (model registry)
-from .parameters import CAPABILITIES as SPEECH_CAPABILITIES  # noqa: F401 (model registry)
 
 
 def checkpoint():
@@ -25,7 +25,8 @@ def checkpoint():
     return Path(snapshot_download(REPO, revision=REVISION))
 
 
-def load(asset=None):
+def load(asset):
+    """Load the speech API; use as a context manager."""
     from .runtime import Speech
-    from tinkerbox_ane.models import download
-    return Speech(download(MODEL) if asset is None else Path(asset))
+
+    return Speech(Path(asset))
