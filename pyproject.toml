@@ -1,6 +1,6 @@
 [project]
 name = "tinkerbox-ane"
-version = "2.3.0"
+version = "2.3.1"
 description = "Optimized AI model runtime for practical tasks on Apple Neural Engine."
 readme = "README.md"
 license-files = ["LICENSES/*.txt", "NOTICE"]
