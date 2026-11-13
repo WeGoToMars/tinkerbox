@@ -41,7 +41,7 @@ private struct HomeTaskCard: View {
         }
     }
 
-    private var description: String {
+    private static func description(_ task: ModelTask) -> String {
         switch task {
         case .decision:
             "Open weight models based on original TypeSafe AI Jev architecture. Classify text and images, compare options, and score results with calibrated probabilities."
@@ -58,9 +58,13 @@ private struct HomeTaskCard: View {
                     .font(.title).foregroundStyle(color)
                     .frame(height: 32)
                 Text(task.title).font(.headline)
-                Text(description)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                // Every card reserves the longest description, so all cards share one height at any width.
+                ZStack(alignment: .topLeading) {
+                    ForEach(ModelTask.allCases, id: \.self) { Text(Self.description($0)).hidden() }
+                    Text(Self.description(task))
+                }
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             }
             .padding(22)
             .frame(maxWidth: .infinity, minHeight: 180, alignment: .topLeading)
