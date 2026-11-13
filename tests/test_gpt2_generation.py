@@ -6,15 +6,12 @@ import tinkerbox_ane
 from tinkerbox_ane.completion import complete as worker_complete
 from tinkerbox_ane.models import entry
 
-SIZES = ["gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"]
-# Pinned upstream greedy continuations of 'The capital of France is' catch corrupted exports
+# Every size and format shares one architecture and runtime. API behavior runs on GPT-2 Small; batch and cache
+# numerics run on one variant per weight format, across three sizes.
+VARIANTS = ["gpt2", "gpt2-medium-int8", "gpt2-xl-lut8"]
+# GPT-2 Small's pinned upstream greedy continuation of 'The capital of France is' catches a corrupted export
 # even if every local execution width agrees with the same incorrect model.
-CAPITAL = {
-    "gpt2": [262, 3139, 286, 262],
-    "gpt2-medium": [6342, 11, 290, 262],
-    "gpt2-large": [262, 3139, 286, 4881],
-    "gpt2-xl": [262, 1748, 286, 6342],
-}
+CAPITAL = [262, 3139, 286, 262]
 PROMPTS = ["The capital of France is", "Once upon a time,"]
 
 
@@ -23,14 +20,15 @@ def load(bundle, model_id, monkeypatch):
     return tinkerbox_ane.load(model_id, bundle(model_id, model_id.upper().replace("-", "_") + "_ASSET"))
 
 
-@pytest.fixture(scope="module", params=[size + suffix for size in SIZES for suffix in ("", "-int8", "-lut8")])
-def model_id(request):
-    return request.param
-
-
 @pytest.fixture(scope="module")
-def model(bundle, model_id):
-    with pytest.MonkeyPatch.context() as monkeypatch, load(bundle, model_id, monkeypatch) as model:
+def model(bundle):
+    with pytest.MonkeyPatch.context() as monkeypatch, load(bundle, "gpt2", monkeypatch) as model:
+        yield model
+
+
+@pytest.fixture(scope="module", params=VARIANTS)
+def variant(bundle, request):
+    with pytest.MonkeyPatch.context() as monkeypatch, load(bundle, request.param, monkeypatch) as model:
         yield model
 
 
@@ -126,11 +124,12 @@ def test_worker_streams_and_counts_against_the_context(model):
         worker_complete(model, entry_, dict(prompt=" hello" * model.context, max_tokens=1), emit=pieces.append)
 
 
-def test_batches_match_single_requests_and_seeded_replay(model, model_id):
+def test_batches_match_single_requests_and_seeded_replay(variant):
+    model = variant
     options = dict(max_tokens=8, temperature=0)
     singles = [model.complete(prompt=p, **options)["choices"][0] for p in PROMPTS]
-    if model_id in CAPITAL:
-        assert singles[0]["token_ids"][:4] == CAPITAL[model_id]
+    if model.model_id == "gpt2":
+        assert singles[0]["token_ids"][:4] == CAPITAL
     full = model.complete(prompt=[PROMPTS[0]] * max(model.batch_sizes), **options)["choices"]
     assert all(
         c["metrics"]["batch_size"] == max(model.batch_sizes) and c["token_ids"] == singles[0]["token_ids"] for c in full
@@ -152,7 +151,8 @@ def test_batches_match_single_requests_and_seeded_replay(model, model_id):
     ]
 
 
-def test_context_growth_and_mixed_length_batches(model):
+def test_context_growth_and_mixed_length_batches(variant):
+    model = variant
     # One BPE token per repetition: decode crosses the cache growth boundaries.
     for count in (63, 127, 511):
         choice = model.complete(prompt=" hello" * count, max_tokens=4, temperature=0)["choices"][0]

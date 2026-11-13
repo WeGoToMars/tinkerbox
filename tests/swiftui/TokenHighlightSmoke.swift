@@ -4,7 +4,7 @@ import Foundation
     static func main() async throws {
         let runtime = Runtime.shared
         let environment = ProcessInfo.processInfo.environment
-        let models = (environment["TINKERBOX_TOKEN_TEST_MODELS"] ?? "gpt2-lut8,d1-3b,d3-nano,d3-mini,omnivoice,voxcpm2")
+        let models = (environment["TINKERBOX_TOKEN_TEST_MODELS"] ?? "gpt2,d1-3b,d3-nano,d3-mini,omnivoice,voxcpm2")
             .split(separator: ",").map(String.init)
         let assets =
             environment["TINKERBOX_TOKEN_TEST_ASSETS"].flatMap {

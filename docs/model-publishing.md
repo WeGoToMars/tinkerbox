@@ -95,7 +95,7 @@ Numerical checks compare against upstream references. Report the device, the bun
 | d3 | `scripts/validate_d3.py` (`--smoke` is partial; full acceptance needs the FP32 reference) | `tests/test_d3_runtime.py` |
 | OmniVoice | `scripts/omnivoice/reference_logits.py`, `scripts/omnivoice/validate_context.py` | `tests/test_speech.py` |
 | VoxCPM2 | `scripts/voxcpm2/reference.py`, `scripts/voxcpm2/validate.py`, `scripts/voxcpm2/full_length.py` | `tests/test_voxcpm2_speech.py` |
-| GPT-2 | — | `tests/test_gpt2_generation.py` |
+| GPT-2 | — | `tests/test_gpt2_generation.py` (Small, Medium INT8 and XL LUT8; every variant shares one architecture) |
 
 Each script's `--help` lists its paths. Reports belong under `artifacts/`.
 
