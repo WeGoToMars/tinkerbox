@@ -34,8 +34,7 @@ class TreePlan:
         def ancestor(index, lag):
             if index < p:
                 return index - lag
-            start = int(self.starts[min(np.searchsorted(self.starts, index, side="right") - 1,
-                                        len(self.starts) - 1)])
+            start = int(self.starts[min(np.searchsorted(self.starts, index, side="right") - 1, len(self.starts) - 1)])
             return index - lag if index - lag >= start else p + index - start - lag
 
         def source(index):
@@ -52,8 +51,9 @@ class TreePlan:
                 positions.append(index)
                 ranges.extend((0, index + 1, 0, 0))
             else:
-                start = int(self.starts[min(np.searchsorted(self.starts, index, side="right") - 1,
-                                            len(self.starts) - 1)])
+                start = int(
+                    self.starts[min(np.searchsorted(self.starts, index, side="right") - 1, len(self.starts) - 1)]
+                )
                 positions.append(p + index - start)
                 ranges.extend((0, p, start, index + 1))
         last = offset + width - 1

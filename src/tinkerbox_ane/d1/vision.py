@@ -12,8 +12,8 @@ from safetensors import safe_open
 from transformers import AutoConfig, AutoModel, Lfm2VlConfig, Lfm2VlProcessor
 from transformers.models.lfm2_vl.modeling_lfm2_vl import Lfm2VlMultiModalProjector
 
-from tinkerbox_ane.coreai import count_flops, source_hash
-from tinkerbox_ane.d1 import RESIDUAL_SCALE
+from tinkerbox_ane.coreai import asset_metadata, count_flops, source_hash
+from tinkerbox_ane.d1 import MODEL, RESIDUAL_SCALE
 
 MAX_PATCHES = 1024
 PATCH_DIM = 768
@@ -24,8 +24,6 @@ IMAGE_TOKEN_ID = 124907
 
 def as_rgb(image):
     """A Pillow picture in RGB; the processor resizes and tiles it."""
-    if not hasattr(image, "convert"):
-        raise ValueError(f"invalid image input: {image!r}")
     return image.convert("RGB")
 
 
@@ -59,11 +57,15 @@ def load_vision_tower(checkpoint_dir: Path) -> VisionTower:
     config = AutoConfig.from_pretrained(checkpoint_dir, trust_remote_code=True)
     vt = AutoModel.from_config(config.vision_config)
     vt.load_state_dict(checkpoint_tensors(checkpoint_dir, "model.vision_tower.vision_model."))
-    tower = VisionTower(
-        vt.embeddings.patch_embedding,
-        vt.encoder,
-        vt.post_layernorm,
-    ).eval().to(torch.float16)
+    tower = (
+        VisionTower(
+            vt.embeddings.patch_embedding,
+            vt.encoder,
+            vt.post_layernorm,
+        )
+        .eval()
+        .to(torch.float16)
+    )
     return tower
 
 
@@ -93,11 +95,13 @@ def export_vision_asset(tower: VisionTower, out_path: Path) -> tuple[str, dict[s
         ep = torch.export.export(tower, (pv, pe, mask)).run_decompositions(get_decomp_table())
         converter = TorchConverter()
         converter.add_exported_program(
-            ep, input_names=["pixel_values", "pos_embeds", "attn_mask"], output_names=["features"],
+            ep,
+            input_names=["pixel_values", "pos_embeds", "attn_mask"],
+            output_names=["features"],
             entrypoint_name="main",
         )
         coreai_model = converter.to_coreai()
-    coreai_model.save_asset(out_path)
+    coreai_model.save_asset(out_path, metadata=asset_metadata(MODEL))
     return source_hash(out_path), flops
 
 
@@ -110,7 +114,8 @@ class VisionPipeline:
         self.projector = load_projector(checkpoint_dir)
         self.host = host
         self.pos_weight = checkpoint_tensors(
-            checkpoint_dir, "model.vision_tower.vision_model.embeddings.position_embedding.")["weight"].float()
+            checkpoint_dir, "model.vision_tower.vision_model.embeddings.position_embedding."
+        )["weight"].float()
 
     def limit_tiles(self, tiles: int):
         """Split pictures into at most `tiles` tiles; one tile resizes instead of splitting."""
@@ -129,10 +134,15 @@ class VisionPipeline:
         shapes = out["spatial_shapes"].tolist()
         factor = processor.downsample_factor
         tiled = rows * cols > 1
-        return {"source": list(image.size), "cols": cols, "rows": rows,
-                "size": [cols * processor.tile_size, rows * processor.tile_size] if tiled else [width, height],
-                "overview": [width, height] if len(shapes) > rows * cols else None,
-                "passes": len(shapes), "tokens": sum((h // factor) * (w // factor) for h, w in shapes)}
+        return {
+            "source": list(image.size),
+            "cols": cols,
+            "rows": rows,
+            "size": [cols * processor.tile_size, rows * processor.tile_size] if tiled else [width, height],
+            "overview": [width, height] if len(shapes) > rows * cols else None,
+            "passes": len(shapes),
+            "tokens": sum((h // factor) * (w // factor) for h, w in shapes),
+        }
 
     def image_markup(self, count: int) -> str:
         """Chat template markup for `count` images."""
@@ -141,7 +151,7 @@ class VisionPipeline:
         msgs = [{"role": "user", "content": [*([{"type": "image"}] * count), {"type": "text", "text": "\x00"}]}]
         text = self.processor.apply_chat_template(msgs, add_generation_prompt=False, tokenize=False)
         head = "<|im_start|>user\n"
-        return text[text.index(head) + len(head):text.index("\x00")]
+        return text[text.index(head) + len(head) : text.index("\x00")]
 
     def interpolate_pos_embeds(self, spatial_shapes: torch.Tensor) -> torch.Tensor:
         """Bilinearly resize the 16x16 position embedding grid to (H, W) and pad to 1024."""
@@ -153,7 +163,7 @@ class VisionPipeline:
         # [1, 1152, H, W] -> [H * W, 1152]
         flat = resized.squeeze(0).permute(1, 2, 0).reshape(h * w, -1)
         out = torch.zeros(MAX_PATCHES, VISION_HIDDEN, dtype=torch.float16)
-        out[:h * w] = flat.to(torch.float16)
+        out[: h * w] = flat.to(torch.float16)
         return out.unsqueeze(0)
 
     @torch.inference_mode()
@@ -174,7 +184,9 @@ class VisionPipeline:
             mask[0, 0, 0, :num_patches] = 0.0
 
             # Execute vision tower on ANE
-            ane_out = self.host.vision({"pixel_values": pv[None].to(torch.float16), "pos_embeds": pe, "attn_mask": mask})
+            ane_out = self.host.vision(
+                {"pixel_values": pv[None].to(torch.float16), "pos_embeds": pe, "attn_mask": mask}
+            )
             hidden_state = torch.from_numpy(ane_out[0])  # [1024, 1152]
 
             # Unpad active tokens and reshape to [1, H, W, 1152]

@@ -21,22 +21,25 @@ def active_clients(names: set[str]) -> list[str]:
     # Keep comm separate: executable paths may contain spaces in ps output.
     processes = {}
     for column in ("comm", "args"):
-        result = subprocess.run(["ps", "-axo", f"pid=,{column}="],
-                                capture_output=True, text=True, check=True)
-        processes[column] = dict(line.strip().split(maxsplit=1)
-                                 for line in result.stdout.splitlines() if line.strip())
+        result = subprocess.run(["ps", "-axo", f"pid=,{column}="], capture_output=True, text=True, check=True)
+        processes[column] = dict(line.strip().split(maxsplit=1) for line in result.stdout.splitlines() if line.strip())
     active = []
     for pid, executable in processes["comm"].items():
         if int(pid) == os.getpid():
             continue
         arguments = processes["args"].get(pid, executable)
         name = Path(executable).name
-        if (name in names | {"coreai-build", "TinkerboxDemo", "ANECompilerService",
-                             "ANELargeModelCompilerService"}
-                or name.startswith("tinkerbox-ane-host")
-                or (name.startswith("python") and (
+        if (
+            name in names | {"coreai-build", "TinkerboxDemo", "ANECompilerService", "ANELargeModelCompilerService"}
+            or name.startswith("tinkerbox-ane-host")
+            or (
+                name.startswith("python")
+                and (
                     re.search(r"\btinkerbox_ane\..*(?:guard|compile|export|validation)", arguments)
-                    or re.search(r"(?:^|/)worker\.py(?:\s|$)", arguments)))):
+                    or re.search(r"(?:^|/)worker\.py(?:\s|$)", arguments)
+                )
+            )
+        ):
             active.append(f"PID {pid}: {arguments}")
     return active
 
@@ -58,15 +61,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="delete after preflight; never kills clients")
     parser.add_argument("--include-build", action="store_true", help="also remove this repo's artifacts/build")
-    parser.add_argument("--include-models", action="store_true",
-                        help="also remove Tinkerbox's model cache, including locally installed bundles")
+    parser.add_argument(
+        "--include-models",
+        action="store_true",
+        help="also remove Tinkerbox's model cache, including locally installed bundles",
+    )
     args = parser.parse_args()
 
     home = Path.home()
     persistent = home / "Library/Application Support/coreai-cache"
     models = home / "Library/Caches/tinkerbox-ane"
-    targets = [("persistent specialization", persistent),
-               ("Core AI locks/temp", home / "Library/Caches/coreai-cache")]
+    targets = [("persistent specialization", persistent), ("Core AI locks/temp", home / "Library/Caches/coreai-cache")]
     names = {"tinkerbox-ane-host"}
     if persistent.is_dir():
         for version in persistent.iterdir():
@@ -104,10 +109,10 @@ def main() -> int:
     total = 0
     if selected:
         # One du invocation avoids counting hard-linked files multiple times.
-        usage = subprocess.run(["du", "-k", "-s", *[str(p) for _, p in selected]],
-                               capture_output=True, text=True, check=True)
-        sizes = dict((line.split("\t", 1)[1], int(line.split("\t", 1)[0]) * 1024)
-                     for line in usage.stdout.splitlines())
+        usage = subprocess.run(
+            ["du", "-k", "-s", *[str(p) for _, p in selected]], capture_output=True, text=True, check=True
+        )
+        sizes = dict((line.split("\t", 1)[1], int(line.split("\t", 1)[0]) * 1024) for line in usage.stdout.splitlines())
         for label, path in selected:
             size = sizes[str(path)]
             total += size

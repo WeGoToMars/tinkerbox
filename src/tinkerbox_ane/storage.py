@@ -90,8 +90,11 @@ class Meter:
 
 def revisions(model: str) -> list[Path]:
     folder = CACHE / model
-    return sorted(p for p in folder.iterdir() if p.is_dir() and not p.is_symlink()
-                  and not p.name.startswith(".")) if folder.is_dir() and not folder.is_symlink() else []
+    return (
+        sorted(p for p in folder.iterdir() if p.is_dir() and not p.is_symlink() and not p.name.startswith("."))
+        if folder.is_dir() and not folder.is_symlink()
+        else []
+    )
 
 
 def keys(revision: Path) -> set[str]:
@@ -138,15 +141,17 @@ def files(paths: list[Path], size: Meter) -> dict:
 def model_ids() -> list[str]:
     """Catalog models, then leftovers of earlier versions that are no longer in it."""
     catalog = [entry["id"] for entry in CATALOG]
-    found = sorted(p.name for p in CACHE.iterdir() if p.is_dir() and not p.is_symlink()
-                   and not p.name.startswith(".")) \
-        if CACHE.is_dir() else []
+    found = (
+        sorted(p.name for p in CACHE.iterdir() if p.is_dir() and not p.is_symlink() and not p.name.startswith("."))
+        if CACHE.is_dir()
+        else []
+    )
     return catalog + [model for model in found if model not in catalog]
 
 
 def usage() -> dict:
-    """Every model with files on this Mac, Core AI's compiled copies that no downloaded bundle uses,
-    and the Python and packages the models share."""
+    """Every model with files on this Mac, the upstream checkpoints in the Hugging Face cache, Core AI's
+    compiled copies that no downloaded bundle uses, and the Python and packages the models share."""
     cached = checkpoints()
     catalog = {entry["id"]: entry for entry in CATALOG}
     current, earlier = specializations()
@@ -155,27 +160,52 @@ def usage() -> dict:
     for model in model_ids():
         entry = catalog.get(model, {})
         bundles = []
-        for revision in revisions(model):
+        # The current revision first: an earlier one then counts only what deleting it frees.
+        for revision in sorted(revisions(model), key=lambda r: r.name != entry.get("revision")):
             compiled = sorted(current[key] for key in keys(revision) if key in current)
             used |= {p.name for p in compiled}
-            bundles.append({"revision": revision.name, "path": str(revision), "bytes": size(revision),
-                            "current": revision.name == entry.get("revision"), "compiled": files(compiled, size)})
-        repo = cached.get(entry.get("original_model"))
-        checkpoint = repo and {"repo": repo.repo_id, "path": str(repo.repo_path), "bytes": repo.size_on_disk}
-        if bundles or checkpoint:
-            total = sum(b["bytes"] + b["compiled"]["bytes"] for b in bundles)
-            total += checkpoint["bytes"] if checkpoint else 0
-            models.append({"id": model, "name": entry.get("name", model), "bundles": bundles,
-                           "checkpoint": checkpoint, "bytes": total})
+            bundles.append(
+                {
+                    "revision": revision.name,
+                    "path": str(revision),
+                    "bytes": size(revision),
+                    "current": revision.name == entry.get("revision"),
+                    "compiled": files(compiled, size),
+                }
+            )
+        if bundles:
+            models.append(
+                {
+                    "id": model,
+                    "name": entry.get("name", model),
+                    "bundles": sorted(bundles, key=lambda b: b["revision"]),
+                    "bytes": sum(b["bytes"] + b["compiled"]["bytes"] for b in bundles),
+                }
+            )
+    # One checkpoint can serve several variants; it is listed once, with the models that have files.
+    stored, upstream = {m["id"] for m in models}, []
+    for name in dict.fromkeys(entry.get("original_model") for entry in CATALOG):
+        if repo := cached.get(name):
+            users = [e["id"] for e in CATALOG if e.get("original_model") == name and e["id"] in stored]
+            upstream.append({"repo": name, "path": str(repo.repo_path), "bytes": repo.size_on_disk, "models": users})
     unused = files([p for key, p in current.items() if key not in used] + earlier, size)
     # uv links the packages from its cache, shared with other uv projects, into the environment.
     python = Path(sys.base_prefix)
-    sites = {Path(p): size(Path(p)) for p in sys.path
-             if p.endswith("site-packages") and Path(p).is_dir() and not Path(p).is_relative_to(python)}
+    sites = {
+        Path(p): size(Path(p))
+        for p in sys.path
+        if p.endswith("site-packages") and Path(p).is_dir() and not Path(p).is_relative_to(python)
+    }
     packages = {"path": str(max(sites, key=sites.get).parents[2]) if sites else "", "bytes": sum(sites.values())}
     shared = {"unused_compiled": unused, "python": {"path": str(python), "bytes": size(python)}, "packages": packages}
-    return {"models": models, **shared,
-            "bytes": sum(m["bytes"] for m in models) + sum(item["bytes"] for item in shared.values())}
+    return {
+        "models": models,
+        "checkpoints": upstream,
+        **shared,
+        "bytes": sum(m["bytes"] for m in models)
+        + sum(c["bytes"] for c in upstream)
+        + sum(item["bytes"] for item in shared.values()),
+    }
 
 
 def remove(model: str, outdated: bool = False) -> None:
@@ -199,12 +229,25 @@ def remove(model: str, outdated: bool = False) -> None:
         return
     shutil.rmtree(CACHE / model, ignore_errors=True)  # also interrupted installs and downloads
     repo = checkpoints().get(entry.get("original_model"))
-    shared = any(e.get("original_model") == entry.get("original_model") and revisions(e["id"])
-                 for e in CATALOG if e["id"] != model)
+    shared = any(
+        e.get("original_model") == entry.get("original_model") and revisions(e["id"])
+        for e in CATALOG
+        if e["id"] != model
+    )
     if repo is not None and not shared:
         from huggingface_hub import scan_cache_dir
 
         scan_cache_dir().delete_revisions(*(revision.commit_hash for revision in repo.revisions)).execute()
+
+
+def remove_checkpoint(repo: str) -> None:
+    """Delete a catalog model's upstream checkpoint; exports download it again."""
+    cached = checkpoints().get(repo)
+    if cached is None or not any(e.get("original_model") == repo for e in CATALOG):
+        raise ValueError(f"no cached checkpoint {repo!r}")
+    from huggingface_hub import scan_cache_dir
+
+    scan_cache_dir().delete_revisions(*(revision.commit_hash for revision in cached.revisions)).execute()
 
 
 def remove_unused() -> None:
@@ -218,15 +261,25 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Report, as JSON, what models have stored on this Mac.")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--remove", metavar="MODEL", help="delete a model's files first")
-    action.add_argument("--remove-unused", action="store_true",
-                        help="delete compiled copies that no downloaded bundle uses first")
-    parser.add_argument("--outdated", action="store_true",
-                        help="with --remove: only revisions the catalog no longer uses")
+    action.add_argument("--remove-checkpoint", nargs="+", metavar="REPO", help="delete upstream checkpoints first")
+    action.add_argument(
+        "--remove-unused", action="store_true", help="delete compiled copies that no downloaded bundle uses first"
+    )
+    parser.add_argument(
+        "--outdated",
+        action="store_true",
+        help="delete revisions the catalog no longer uses: of --remove's model, else of every model",
+    )
     args = parser.parse_args(argv)
-    if args.outdated and not args.remove:
-        parser.error("--outdated requires --remove")
+    if args.outdated and (args.remove_checkpoint or args.remove_unused):
+        parser.error("--outdated combines only with --remove")
     if args.remove:
         remove(args.remove, args.outdated)
+    elif args.outdated:
+        for model in model_ids():
+            remove(model, outdated=True)
+    for repo in args.remove_checkpoint or []:
+        remove_checkpoint(repo)
     if args.remove_unused:
         remove_unused()
     print(json.dumps(usage()))

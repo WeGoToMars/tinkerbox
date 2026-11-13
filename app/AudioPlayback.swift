@@ -16,9 +16,11 @@ struct AudioWaveform: View {
                 let x = (Double(index) + 0.5) * size.width / Double(count)
                 let height = max(2, Double(peak) * (size.height - 12))
                 let bar = CGRect(x: x - 1, y: (size.height - height) / 2, width: 2, height: height)
-                context.fill(Path(roundedRect: bar, cornerRadius: 1),
-                             with: .color(progress == nil || x <= size.width * (progress ?? 0)
-                                          ? .accentColor : .secondary.opacity(0.45)))
+                context.fill(
+                    Path(roundedRect: bar, cornerRadius: 1),
+                    with: .color(
+                        progress == nil || x <= size.width * (progress ?? 0)
+                            ? .accentColor : .secondary.opacity(0.45)))
             }
             if let progress {
                 let x = min(size.width - 1, max(1, size.width * progress))
@@ -48,10 +50,11 @@ struct AudioPlayback: View {
             VStack(spacing: 12) {
                 GeometryReader { geometry in
                     AudioWaveform(peaks: peaks, progress: duration > 0 ? time / duration : 0)
-                    .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                        seek(value.location.x / max(1, geometry.size.width) * duration)
-                    })
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0).onChanged { value in
+                                seek(value.location.x / max(1, geometry.size.width) * duration)
+                            })
                 }
                 .frame(height: 88)
                 .accessibilityElement(children: .ignore)
@@ -109,8 +112,7 @@ struct AudioPlayback: View {
                 player = try AVAudioPlayer(data: data)
                 player?.prepareToPlay()
                 peaks = samples
-            } catch is CancellationError { }
-            catch { self.error = error.localizedDescription }
+            } catch is CancellationError {} catch { self.error = error.localizedDescription }
         }
         .onDisappear {
             position = player?.currentTime ?? 0
@@ -139,7 +141,9 @@ struct AudioPlayback: View {
         try data.write(to: url)
         let file = try AVAudioFile(forReading: url)
         guard file.length > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else { return [] }
+            let buffer = AVAudioPCMBuffer(
+                pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))
+        else { return [] }
         try file.read(into: buffer)
         guard let channels = buffer.floatChannelData else { return [] }
         let frames = Int(buffer.frameLength), count = min(1200, frames)
@@ -171,17 +175,18 @@ struct AudioPlayback: View {
     var duration: Double { sampleRate > 0 ? Double(frames) / sampleRate : 0 }
     var finished: Bool { stopped || (complete && unplayed == 0) }
     var position: Double {
-        guard let now = node.lastRenderTime, let time = node.playerTime(forNodeTime: now), sampleRate > 0 else { return 0 }
+        // The node joins the engine with the first piece; asking it the time before then raises.
+        guard sampleRate > 0, let now = node.lastRenderTime, let time = node.playerTime(forNodeTime: now) else {
+            return 0
+        }
         return min(duration, max(0, Double(time.sampleTime) / sampleRate))
     }
 
     func append(_ chunk: SpeechChunk) {
-        guard !stopped else { return }
         let count = chunk.pcm.count / 2
+        guard !stopped, count > 0 else { return }
         if sampleRate == 0 {
-            guard let format = AVAudioFormat(standardFormatWithSampleRate: Double(chunk.sampleRate), channels: 1) else {
-                return fail("Unsupported speech sample rate.")
-            }
+            let format = AVAudioFormat(standardFormatWithSampleRate: Double(chunk.sampleRate), channels: 1)!
             sampleRate = format.sampleRate
             engine.attach(node)
             do {
@@ -190,13 +195,13 @@ struct AudioPlayback: View {
                 try node.playAudio()
             } catch { return fail(error.localizedDescription) }
         }
-        guard Double(chunk.sampleRate) == sampleRate, count > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: node.outputFormat(forBus: 0), frameCapacity: AVAudioFrameCount(count)),
-              let samples = buffer.floatChannelData?[0] else { return fail("The model returned unplayable audio.") }
+        let buffer = AVAudioPCMBuffer(pcmFormat: node.outputFormat(forBus: 0), frameCapacity: AVAudioFrameCount(count))!
+        let samples = buffer.floatChannelData![0]
         buffer.frameLength = AVAudioFrameCount(count)
         chunk.pcm.withUnsafeBytes { raw in
             for index in 0..<count {
-                samples[index] = Float(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: 2 * index, as: Int16.self))) / 32768
+                samples[index] =
+                    Float(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: 2 * index, as: Int16.self))) / 32768
             }
         }
         // One peak per 10 ms, matching the finished clip's waveform closely enough while it grows.
@@ -251,13 +256,17 @@ struct StreamingPlayback: View {
                 HStack {
                     Text(playbackStamp(time))
                     Spacer()
-                    Text(audio.complete ? "−" + playbackStamp(audio.duration - time) :
-                         "Generating · \(playbackStamp(audio.duration)) ready")
+                    Text(
+                        audio.complete
+                            ? "−" + playbackStamp(audio.duration - time)
+                            : "Generating · \(playbackStamp(audio.duration)) ready")
                 }
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 HStack(spacing: 32) {
-                    Button(audio.paused ? "Play" : "Pause", systemImage: audio.paused ? "play.fill" : "pause.fill") { audio.toggle() }
-                        .font(.system(size: 30)).frame(width: 44, height: 44)
+                    Button(audio.paused ? "Play" : "Pause", systemImage: audio.paused ? "play.fill" : "pause.fill") {
+                        audio.toggle()
+                    }
+                    .font(.system(size: 30)).frame(width: 44, height: 44)
                     Button("Stop", systemImage: "stop.fill") { audio.stop() }
                 }
                 .font(.title2).labelStyle(.iconOnly).buttonStyle(.plain)

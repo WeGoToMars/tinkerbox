@@ -18,7 +18,9 @@ func check(_ condition: Bool, _ message: String) {
         _ = try await runtime.start(model: model)
         let capabilities = Catalog.speechCapabilities[model]!
         let options = try await SpeechModeQuery().suggestedEntities().filter { $0.modelID == model }
-        check(options.map(\.title).contains("Automatic voice") && options.map(\.title).contains("Voice clone"), "Missing synthesis modes")
+        check(
+            options.map(\.title).contains("Automatic voice") && options.map(\.title).contains("Voice clone"),
+            "Missing synthesis modes")
         let restored = try await SpeechModeQuery().entities(for: [options.first { $0.modeID == "auto" }!.id])
         check(restored.count == 1 && restored[0].title == "Automatic voice", "Saved mode did not resolve")
 
@@ -28,7 +30,9 @@ func check(_ condition: Bool, _ message: String) {
         generate.mode = restored[0]
         generate.seed = 42
         let first = try await generate.perform().value!
-        check(first.count == 2 && first.map(\.filename) == ["speech-42-1.wav", "speech-42-2.wav"], "Output ordering/seed filenames")
+        check(
+            first.count == 2 && first.map(\.filename) == ["speech-42-1.wav", "speech-42-2.wav"],
+            "Output ordering/seed filenames")
         let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -58,29 +62,32 @@ func check(_ condition: Bool, _ message: String) {
         let blank = GenerateSpeechIntent()
         blank.model = shortcutModel
         blank.texts = ["Hello.", " "]
-        do { _ = try await blank.perform(); preconditionFailure("Blank speech was accepted") }
-        catch { check(error.localizedDescription.contains("must not be empty"), "Blank input error: \(error)") }
+        do { _ = try await blank.perform(); preconditionFailure("Blank speech was accepted") } catch {
+            check(error.localizedDescription.contains("must not be empty"), "Blank input error: \(error)")
+        }
         let invalid = GenerateSpeechIntent()
         invalid.model = shortcutModel
         invalid.texts = single.texts
         invalid.speed = 0
-        do { _ = try await invalid.perform(); preconditionFailure("Invalid speed was accepted") }
-        catch { check(error.localizedDescription.contains("positive"), "Speed validation: \(error)") }
+        do { _ = try await invalid.perform(); preconditionFailure("Invalid speed was accepted") } catch {
+            check(error.localizedDescription.contains("positive"), "Speed validation: \(error)")
+        }
         let unsupported = GenerateSpeechIntent()
         unsupported.model = shortcutModel
         unsupported.texts = single.texts
         unsupported.mode = SpeechModeEntity(model: "unavailable-model", mode: capabilities.modes[0])
-        do { _ = try await unsupported.perform(); preconditionFailure("Unknown mode was accepted") }
-        catch { check(error.localizedDescription.contains("does not support"), "Mode validation: \(error)") }
+        do { _ = try await unsupported.perform(); preconditionFailure("Unknown mode was accepted") } catch {
+            check(error.localizedDescription.contains("does not support"), "Mode validation: \(error)")
+        }
 
         // Exercise every advertised reference-required conditioning mode through both actual actions.
-        for mode in capabilities.modes where mode.reference == "required" {
+        for mode in capabilities.modes where mode.reference == .required {
             let prepare = CreateVoicePromptIntent()
             prepare.model = shortcutModel
             prepare.reference = first[0]
             prepare.mode = options.first { $0.modeID == mode.id }!
             prepare.preprocess = false
-            prepare.transcript = mode.referenceTranscript == "none" ? nil : generate.texts[0]
+            prepare.transcript = mode.referenceTranscript == Requirement.none ? nil : generate.texts[0]
             let saved = try await prepare.perform().value!
             check(saved.filename == "voice.pt" && !saved.data.isEmpty, "Missing voice prompt")
             let clone = GenerateSpeechIntent()
@@ -101,8 +108,9 @@ func check(_ condition: Bool, _ message: String) {
             let direct = try await clone.perform().value!
             check(!direct[0].data.isEmpty, "Missing direct-reference speech")
             clone.voice = saved
-            do { _ = try await clone.perform(); preconditionFailure("Ambiguous reference was accepted") }
-            catch { check(error.localizedDescription.contains("not both"), "Reference conflict validation: \(error)") }
+            do { _ = try await clone.perform(); preconditionFailure("Ambiguous reference was accepted") } catch {
+                check(error.localizedDescription.contains("not both"), "Reference conflict validation: \(error)")
+            }
         }
         let designed = GenerateSpeechIntent()
         designed.model = shortcutModel
@@ -121,9 +129,12 @@ func check(_ condition: Bool, _ message: String) {
         async let shortcut = single.perform()
         async let ui = runtime.speak(SpeechRequest(items: [SpeechItem(text: single.texts[0])], seed: 42))
         let (shortcutReply, uiReply) = try await (shortcut, ui)
-        check(shortcutReply.value![0].data == standalone[0].data && uiReply.audio![0].wav == standalone[0].data,
-              "Concurrent UI/Shortcut request isolation or replay differs")
+        check(
+            shortcutReply.value![0].data == standalone[0].data && uiReply.audio[0].wav == standalone[0].data,
+            "Concurrent UI/Shortcut request isolation or replay differs")
         await runtime.unload()
-        print("PASS: \(model) speech App Intents, ordered WAV files, seed replay, voice prompts, cloning/continuation after unload, design, errors and concurrent UI requests")
+        print(
+            "PASS: \(model) speech App Intents, ordered WAV files, seed replay, voice prompts, cloning/continuation after unload, design, errors and concurrent UI requests"
+        )
     }
 }

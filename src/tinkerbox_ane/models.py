@@ -24,17 +24,23 @@ def entry(model: str) -> dict:
     raise ValueError(f"unknown model {model!r}; available: {', '.join(item['id'] for item in CATALOG)}")
 
 
-def download(model: str, progress=None) -> Path:
-    """Fetch the AOT bundle for this Mac; `progress(done_bytes, total_bytes)` reports the download."""
-    from tinkerbox_ane.bundle import CACHE, download_bundle
+def cached(model: str) -> Path:
+    """Where this Mac's bundle for the catalog revision lives once downloaded or installed."""
+    from tinkerbox_ane.bundle import CACHE
     from tinkerbox_ane.host import device_architecture
 
-    item = entry(model)
-    # Downloaded or locally installed: the manifest is written last, so a bundle that has one is complete.
-    bundle = CACHE / model / item["revision"] / "macos27" / device_architecture()
+    return CACHE / model / entry(model)["revision"] / "macos27" / device_architecture()
+
+
+def download(model: str, progress=None) -> Path:
+    """Fetch the AOT bundle for this Mac; `progress(done_bytes, total_bytes)` reports the download."""
+    from tinkerbox_ane.bundle import download_bundle
+
+    item, bundle = entry(model), cached(model)
+    # The manifest is written last, so a bundle that has one is complete.
     if (bundle / "model.json").is_file():
         return bundle
-    return download_bundle(item["id"], item["repo"], item["revision"], progress)
+    return download_bundle(item["id"], item["repo"], item["revision"], progress, subfolder=item.get("subfolder", ""))
 
 
 def install(model: str, bundle: Path) -> Path:
@@ -47,5 +53,5 @@ def install(model: str, bundle: Path) -> Path:
 
 
 def load(model: str, asset=None):
-    """Load a model's System One API from a local bundle, or download it; use as a context manager."""
+    """Load a model's task API from a local bundle, or download it; use as a context manager."""
     return importlib.import_module(entry(model)["module"]).load(download(model) if asset is None else asset)

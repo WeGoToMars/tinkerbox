@@ -2,24 +2,28 @@
 
 # Tinkerbox for Apple Neural Engine
 
-Run models on Apple's Neural Engine through Core AI. Critical inference always runs on the Neural Engine, the CPU does only supplementary work, and the GPU stays idle.
+Run models on Apple's Neural Engine through Core AI. Inference runs on the Neural Engine, the CPU handles tokenization and other light work, and the GPU stays idle.
 
-| Model | Task | Supported SoC | Notes |
+| Model | Task | Chips | Notes |
 | --- | --- | --- | --- |
-| [LiquidAI/d1-3B](https://huggingface.co/LiquidAI/d1-3B) (`d1-3b`) | Parallel decisions over text and images | M4-M6+ | [docs/models/d1.md](docs/models/d1.md) |
-| [vllm-sr/d3-nano](https://huggingface.co/vllm-sr/d3-nano) (`d3-nano`), [vllm-sr/d3-mini](https://huggingface.co/vllm-sr/d3-mini) (`d3-mini`) | Decisions over text and images | M4-M6+ | [docs/models/d3.md](docs/models/d3.md) |
-| [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) (`omnivoice`) | Speech synthesis, voice cloning and voice design | M4-M6+ | [docs/models/omnivoice.md](docs/models/omnivoice.md) |
-| [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) (`voxcpm2`) | Multilingual speech synthesis, voice design, cloning and continuation | M1-M6+ | [docs/models/voxcpm2.md](docs/models/voxcpm2.md) |
+| [LiquidAI/d1-3B](https://huggingface.co/LiquidAI/d1-3B) (`d1-3b`) | Decisions over text and images, several questions per pass | M4–M6 | [d1.md](docs/models/d1.md) |
+| [vllm-sr/d3-nano](https://huggingface.co/vllm-sr/d3-nano), [d3-mini](https://huggingface.co/vllm-sr/d3-mini) (`d3-nano`, `d3-mini`) | Decisions over text and images | M4–M6 | [d3.md](docs/models/d3.md) |
+| [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) (`omnivoice`) | Speech, voice design and cloning | M4–M6 | [omnivoice.md](docs/models/omnivoice.md) |
+| [openbmb/VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) (`voxcpm2`, `voxcpm2-lut8`) | Speech, voice design, cloning and continuation | M1–M6 | [voxcpm2.md](docs/models/voxcpm2.md) |
+| [openai-community/gpt2](https://huggingface.co/openai-community/gpt2) (`gpt2`, `gpt2-medium`, `gpt2-large`, `gpt2-xl`) | Text completion | M1–M6 | [gpt2.md](docs/models/gpt2.md) |
 
-Requires Apple Silicon (M1–M6), macOS 27, and Python 3.12 or 3.13. Bundle availability
-varies by model and chip.
+Requires macOS 27 on Apple Silicon.
 
-## Quickstart
+## App
 
-Install the wheel from the GitHub release (Xcode is not required):
+Download `Tinkerbox-ANE-*-macos-arm64.zip` from the [latest release](https://github.com/WeGoToMars/tinkerbox/releases/latest), move **Tinkerbox.app** to Applications and open it. It sets up its own Python environment and downloads each model the first time you select it. Its tasks are also available as Shortcuts actions. See the [app guide](app/README.md).
+
+## Python
+
+Python 3.12 or 3.13:
 
 ```sh
-python -m pip install ./tinkerbox_ane-*.whl
+python -m pip install tinkerbox-ane            # add [speech] for OmniVoice and VoxCPM2
 ```
 
 ```python
@@ -30,80 +34,17 @@ with tinkerbox_ane.load("d1-3b") as model:
         "I was charged twice this month.",
         {"refund": {"type": "noul", "instructions": "Is this a refund request?"}},
     )
-    print(result)
+    print(result["answers"])
 ```
 
-`tinkerbox_ane.load(model_id)` loads any model in the catalog and returns the API for its task. It downloads the Core AI bundle for this Mac to `~/Library/Caches/tinkerbox-ane/models/<model>/<revision>/`; pass a directory as the second argument to select a local AOT-compiled bundle. Each bundle carries a `checkpoint` folder with everything the runtime reads from the upstream checkpoint: its code, tokenizer and configuration, and only the weights that run on the CPU, such as the token embeddings. Loading never downloads the upstream checkpoint, and imports only upstream code whose digest the package pins. Each model package also has its own `load()`, such as `tinkerbox_ane.d1.load()`.
+`tinkerbox_ane.load(model_id)` downloads the Core AI bundle for this Mac to `~/Library/Caches/tinkerbox-ane/models/` and returns the API for the model's task. Pass a directory as the second argument to load a local bundle instead. Bundles include the tokenizer, configuration and the few weights that run on the CPU, so loading never downloads the upstream checkpoint.
 
-`python -m tinkerbox_ane.storage` reports, as JSON, each model's bundles, Core AI's compiled copies of their assets, and any upstream checkpoint in the Hugging Face cache, which exports and earlier versions download, then the compiled copies no downloaded bundle uses and the Python and packages the models share. `--remove MODEL` deletes all of a model's files; add `--outdated` to delete only bundle revisions the catalog no longer loads. `--remove-unused` deletes unused compiled copies, such as those of local exports, which compile again on their next load.
+- **Decisions** (d1, d3): `system_one`, `system_one_batch`, `probabilities`, `probabilities_batch` and `count_tokens` answer yes/no (`noul`), `choice` and `score` questions. d1-3B answers several questions about one input in a shared pass; d3 runs them one after another.
+- **Speech** (OmniVoice, VoxCPM2): `generate`, reusable voice prompts and on-device transcription. VoxCPM2 also streams. See the [speech API](docs/speech.md).
+- **Text completion** (GPT-2): OpenAI-style `complete(prompt=..., max_tokens=...)` with streaming, sampling and batching.
 
-Decision models expose the System One API: `system_one`, `system_one_batch`, `probabilities`, and `probabilities_batch` for binary, choice, and score queries, plus `count_tokens`. Models with parallel decisions (`question_trees` in the catalog, such as d1-3B) answer several questions about one input in a shared pass; the others answer them one after another and warn when a call asks more than one. Inputs, limits, and execution details are in each model's notes.
+`python -m tinkerbox_ane.storage` lists what each model keeps on disk. `--remove MODEL` deletes a model's files (with `--outdated`, only revisions the catalog no longer loads; `--outdated` alone does that for every model). `--remove-checkpoint REPO...` deletes upstream checkpoints, and `--remove-unused` deletes compiled copies that no bundle uses.
 
-OmniVoice and VoxCPM2 expose `generate`, reusable voice prompts, and on-device transcription. Python users need the `speech` dependency extra; compatible model bundles download automatically. The app includes a Text to Speech page with playback and WAV/M4A export. Saved voices belong to the model that created them.
+## Development
 
-The [speech API](docs/speech.md) advertises each model's native modes and controls.
-The UI uses those capabilities to display supported controls. OmniVoice supplies
-native numeric duration and speed controls; VoxCPM2 supplies descriptive delivery
-conditioning and distinct reference-cloning and continuation modes.
-
-## Tinkerbox app
-
-A standalone desktop application is in [app](app). To build and launch it from source:
-
-```sh
-uv run --no-project --python 3.12 python app/run.py
-```
-
-Pass `--build-only` to create `artifacts/swiftui/Tinkerbox.app` and the release ZIP without launching. The prebuilt app manages its own Python environment and dependencies via an embedded `uv` binary.
-
-The Storage page, opened from the bottom of the sidebar, lists every file the models keep on this Mac and deletes a model with everything it downloaded.
-
-## Architecture & Staging
-
-The Swift host manages persistent state and dynamically allocates attention cache buffers. Initial execution compiles and specializes the AOT asset for the local ANE hardware, after which Core AI reuses its persistent cache.
-
-Weight staging uses an [APFS copy-on-write workaround](docs/cow-staging.md) to eliminate redundant disk writes during specialization.
-
-## Adding a Model
-
-Model-independent infrastructure is located at the package top level and is shared across models:
-
-| Module | Role |
-| --- | --- |
-| `host.py`, `host.swift` | Native Core AI host: tiered caches, packed chains and trees, RoPE tables, and named vision inputs |
-| `bundle.py` | Bundle manifest and asset identity verification, downloads, and AOT compilation |
-| `coreai.py`, `guard.py`, `publish.py` | Compiler watchdog, ANE placement verification, and Hugging Face releases |
-| `models.json`, `models.py` | Model catalog shared by `tinkerbox_ane.load()` and the app |
-| `storage.py` | Disk usage of downloaded models, and their removal |
-
-A model package (such as `tinkerbox_ane.d1`) provides:
-- **Neural Graph & Export:** Fused FP16 graph (`model.py`) and Core AI export (`export.py`).
-- **Runtime:** Tokenization, prompt formatting, readout (`runtime.py`), and optional tree planning (`tree.py`) or vision processing (`vision.py`).
-- **Package Interface:** Exposes `load(asset=None)`, bundle `KIND`, and compile/publish CLI wrappers.
-
-To register a model, add an entry to `src/tinkerbox_ane/models.json` specifying `id`, `name`, `publisher`, `summary`, `task`, `repo`, `revision`, and `min_version`. Add notes in `docs/models/<id>.md`.
-
-## Building from Source
-
-Building requires Xcode 27 / Swift 6.4 and [uv](https://docs.astral.sh/uv/):
-
-```sh
-uv sync --locked
-uv build
-```
-
-The wheel in `dist/` bundles the native `tinkerbox-ane-host` executable and links against macOS system frameworks. Source and editable installs compile the host during installation. Compilation verifies source identity, function manifests, and full ANE placement.
-
-The [developer guide](docs/model-publishing.md#model-builds) describes model export, compilation, publishing and validation. Reusable Core AI compilation and Hugging Face publishing utilities are provided in `tinkerbox_ane.coreai` and `tinkerbox_ane.publish`. To use a compiled bundle locally before publishing:
-
-```sh
-uv run python -m tinkerbox_ane.install <model> <bundle directory>
-```
-
-For package releases, see [Releasing](docs/releasing.md).
-
-## Tests
-
-```sh
-uv run python -m tinkerbox_ane.d1.guard artifacts/validation/smoke -- uv run pytest -q
-```
+Building from source, exporting and publishing models, and running tests are covered in the [developer guide](docs/model-publishing.md). Releases follow [Releasing](docs/releasing.md).

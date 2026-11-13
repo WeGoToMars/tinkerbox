@@ -17,16 +17,40 @@ class CustomBuildHook(BuildHookInterface):
         with tempfile.TemporaryDirectory(prefix=".host-", dir=package) as temporary:
             staging = Path(temporary) / "staging.o"
             host = Path(temporary) / "tinkerbox-ane-host"
-            subprocess.run([
-                "xcrun", "--sdk", "macosx", "clang", "-O2", "-fobjc-arc",
-                "-target", "arm64-apple-macos27.0", "-c", str(package / "cow-staging.m"),
-                "-o", str(staging),
-            ], check=True)
-            subprocess.run([
-                "xcrun", "--sdk", "macosx", "swiftc", "-O", "-parse-as-library",
-                "-target", "arm64-apple-macos27.0", *map(str, sorted(package.glob("*.swift"))),
-                str(staging), "-o", str(host),
-            ], check=True)
+            subprocess.run(
+                [
+                    "xcrun",
+                    "--sdk",
+                    "macosx",
+                    "clang",
+                    "-O2",
+                    "-fobjc-arc",
+                    "-target",
+                    "arm64-apple-macos27.0",
+                    "-c",
+                    str(package / "cow-staging.m"),
+                    "-o",
+                    str(staging),
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "xcrun",
+                    "--sdk",
+                    "macosx",
+                    "swiftc",
+                    "-O",
+                    "-parse-as-library",
+                    "-target",
+                    "arm64-apple-macos27.0",
+                    *map(str, sorted(package.glob("*.swift"))),
+                    str(staging),
+                    "-o",
+                    str(host),
+                ],
+                check=True,
+            )
             host.replace(binary)
         build_data["artifacts"].append("src/tinkerbox_ane/tinkerbox-ane-host")
         build_data["pure_python"] = False

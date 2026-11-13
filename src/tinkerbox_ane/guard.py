@@ -13,8 +13,13 @@ import time
 
 
 def disk_written():
-    result = subprocess.run(["ioreg", "-r", "-c", "IOBlockStorageDriver", "-w0", "-l"],
-                            capture_output=True, text=True, check=True, timeout=5)
+    result = subprocess.run(
+        ["ioreg", "-r", "-c", "IOBlockStorageDriver", "-w0", "-l"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=5,
+    )
     values = re.findall(r'"Bytes \(Write\)"=(\d+)', result.stdout)
     if not values:
         raise RuntimeError("SSD write counter unavailable")
@@ -22,13 +27,17 @@ def disk_written():
 
 
 def workers():
-    result = subprocess.run(["pgrep", "-fl", "ANE.*CompilerService.xpc/Contents/MacOS/"],
-                            capture_output=True, text=True, timeout=5)
+    result = subprocess.run(
+        ["pgrep", "-fl", "ANE.*CompilerService.xpc/Contents/MacOS/"], capture_output=True, text=True, timeout=5
+    )
     if result.returncode not in (0, 1):
         raise RuntimeError("cannot inventory ANE compiler workers")
-    return {int(line.split()[0]): line for line in result.stdout.splitlines()
-            if "/ANECompilerService.xpc/Contents/MacOS/" in line
-            or "/ANELargeModelCompilerService.xpc/Contents/MacOS/" in line}
+    return {
+        int(line.split()[0]): line
+        for line in result.stdout.splitlines()
+        if "/ANECompilerService.xpc/Contents/MacOS/" in line
+        or "/ANELargeModelCompilerService.xpc/Contents/MacOS/" in line
+    }
 
 
 def stop(process, initial, privileged):
@@ -51,22 +60,27 @@ def stop(process, initial, privileged):
 def run(command, output, timeout=1500):
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    if output.with_suffix(".json").exists():
+    # Names such as release-2.3 keep their dots.
+    log, summary = output.with_name(f"{output.name}.log"), output.with_name(f"{output.name}.json")
+    if summary.exists():
         raise RuntimeError(f"refusing to overwrite {output}")
     initial = workers()
     if any("/ANELargeModelCompilerService.xpc/" in line for line in initial.values()):
         raise RuntimeError(f"compiler workers already active: {initial}")
     privileged = subprocess.run(["sudo", "-n", "/usr/bin/true"], capture_output=True).returncode == 0
     if not privileged:
-        print("warning: sudo unavailable; root-owned compiler workers may survive cancellation.",
-              file=sys.stderr, flush=True)
+        print(
+            "warning: sudo unavailable; root-owned compiler workers may survive cancellation.",
+            file=sys.stderr,
+            flush=True,
+        )
     before, started = disk_written(), time.monotonic()
     report = {"command": command, "abort": None}
     written, refresh_at, progress_at, exited_at = 0, 30, 30, None
     tail = ""
     with (
-        output.with_suffix(".log").open("w") as sink,
-        output.with_suffix(".log").open("r", errors="replace") as diagnostics,
+        log.open("w") as sink,
+        log.open("r", errors="replace") as diagnostics,
     ):
         process = subprocess.Popen(command, stdout=sink, stderr=subprocess.STDOUT, start_new_session=True)
         try:
@@ -88,9 +102,12 @@ def run(command, output, timeout=1500):
                 if report["abort"]:
                     break
                 if elapsed >= progress_at:
-                    print(f"    {output.name}: still running after {elapsed:.0f}s; "
-                          f"system writes {written / 1_000_000_000:.1f} GB; "
-                          f"free disk {free / 1024**3:.1f} GiB", flush=True)
+                    print(
+                        f"    {output.name}: still running after {elapsed:.0f}s; "
+                        f"system writes {written / 1_000_000_000:.1f} GB; "
+                        f"free disk {free / 1024**3:.1f} GiB",
+                        flush=True,
+                    )
                     progress_at = elapsed + 30
                 if privileged and elapsed >= refresh_at:
                     privileged = subprocess.run(["sudo", "-n", "-v"], capture_output=True).returncode == 0
@@ -103,7 +120,7 @@ def run(command, output, timeout=1500):
                     if elapsed - exited_at >= 15:
                         report["abort"] = "compiler workers still running after client exit"
                         break
-                time.sleep(.2)
+                time.sleep(0.2)
         except BaseException as error:
             report["abort"] = f"watchdog interrupted: {type(error).__name__}: {error}"
             raise
@@ -112,10 +129,13 @@ def run(command, output, timeout=1500):
             if remaining:
                 report["abort"] = report["abort"] or f"compiler workers did not stop: {sorted(remaining)}"
                 print(f"warning: ANE compiler workers still running: {sorted(remaining)}", file=sys.stderr)
-            report.update(returncode=process.returncode, seconds=time.monotonic() - started,
-                          system_written_bytes=written,
-                          passed=report["abort"] is None and process.returncode == 0)
-            output.with_suffix(".json").write_text(json.dumps(report, indent=2) + "\n")
+            report.update(
+                returncode=process.returncode,
+                seconds=time.monotonic() - started,
+                system_written_bytes=written,
+                passed=report["abort"] is None and process.returncode == 0,
+            )
+            summary.write_text(json.dumps(report, indent=2) + "\n")
     return report
 
 

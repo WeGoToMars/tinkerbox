@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // The Tinkerbox logo, drawn from the geometry in Tinkerbox.icon/Assets (a 1085×1015 view box)
@@ -15,13 +16,52 @@ enum LogoGeometry {
         CGPoint(x: 545.42, y: 504.58), CGPoint(x: 1006.25, y: 358.75), CGPoint(x: 189.58, y: 177.92),
         CGPoint(x: 650.42, y: 78.75),
     ].map { CGPoint(x: $0.x + inset, y: $0.y + inset) }
+    // The logo simplified for the menu bar: ring nodes joined by the Short layer's edges, without the long
+    // crossing ones, drawn bold enough to read at 18 points. A template, so the menu bar tints it.
+    static let menuBarIcon: NSImage = {
+        let edge: CGFloat = 75, ring: CGFloat = 125, hole: CGFloat = 42.5
+        let points = nodes.map { CGPoint(x: $0.x - inset, y: $0.y - inset) }
+        let box = points.reduce(CGRect.null) {
+            $0.union(CGRect(x: $1.x - ring, y: $1.y - ring, width: 2 * ring, height: 2 * ring))
+        }
+        let scale = 18 / box.height
+        let image = NSImage(size: CGSize(width: box.width * scale, height: 18), flipped: true) { _ in
+            func point(_ index: Int) -> CGPoint {
+                CGPoint(x: (points[index].x - box.minX) * scale, y: (points[index].y - box.minY) * scale)
+            }
+            func disc(_ index: Int, _ radius: CGFloat) -> NSBezierPath {
+                let center = point(index), radius = radius * scale
+                return NSBezierPath(
+                    ovalIn: CGRect(x: center.x - radius, y: center.y - radius, width: 2 * radius, height: 2 * radius))
+            }
+            NSColor.black.set()
+            for (a, b) in edgeLayers[0].edges {
+                let path = NSBezierPath()
+                path.move(to: point(a))
+                path.line(to: point(b))
+                path.lineWidth = edge * scale
+                path.stroke()
+            }
+            for index in points.indices {
+                disc(index, ring).fill()
+                NSGraphicsContext.current?.compositingOperation = .clear
+                disc(index, hole).fill()
+                NSGraphicsContext.current?.compositingOperation = .sourceOver
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
     static let cyan = Color(red: 0, green: 0.753, blue: 0.910)
     static let teal = Color(red: 0, green: 0.765, blue: 0.816)
     // The icon's three edge layers, back to front (Short, Long 1, Long 2), with their gradients
     // from icon.json as unit points of the view box. The nodes sit in front of all of them.
     static let edgeLayers: [(edges: [(Int, Int)], colors: [Color], start: UnitPoint, end: UnitPoint)] = [
-        ([(1, 0), (3, 0), (4, 1), (3, 2), (5, 2), (4, 3), (6, 3), (6, 5)], [cyan, teal.opacity(0.74)],
-         UnitPoint(x: 0.070, y: 0), UnitPoint(x: 0.911, y: 0.935)),
+        (
+            [(1, 0), (3, 0), (4, 1), (3, 2), (5, 2), (4, 3), (6, 3), (6, 5)], [cyan, teal.opacity(0.74)],
+            UnitPoint(x: 0.070, y: 0), UnitPoint(x: 0.911, y: 0.935)
+        ),
         ([(1, 2), (4, 5)], [teal, teal.opacity(0.73)], UnitPoint(x: 1, y: 0.661), UnitPoint(x: 0, y: 0.333)),
         ([(0, 5), (1, 6)], [cyan.opacity(0.6), cyan], UnitPoint(x: 0.344, y: 0), UnitPoint(x: 0.601, y: 1)),
     ]
@@ -70,13 +110,15 @@ enum LogoGeometry {
             let from = route[step], to = route[step + 1]
             if local < dart {
                 // Smootherstep: slow out of the node, fastest mid-edge, slow into the next node.
-                let progress = local / dart, eased = progress * progress * progress * (progress * (progress * 6 - 15) + 10)
+                let progress = local / dart,
+                    eased = progress * progress * progress * (progress * (progress * 6 - 15) + 10)
                 let (start, end) = segment(from, to)
                 func point(_ t: Double) -> CGPoint {
                     CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t)
                 }
                 let layer = edgeLayers.firstIndex { $0.edges.contains { $0 == (from, to) || $0 == (to, from) } }!
-                state.particles.append(Particle(layer: layer, position: point(eased), tail: point(max(0, eased - 0.12))))
+                state.particles.append(
+                    Particle(layer: layer, position: point(eased), tail: point(max(0, eased - 0.12))))
                 state.glow[from] += 1 - progress
             } else {
                 let resting = local - dart, remaining = rest[step] - resting
@@ -91,10 +133,11 @@ enum LogoGeometry {
             // Accelerate into one and a half turns under the ring, then sink back to the centre.
             let angle = -Double.pi / 2 + t * t * 3 * .pi
             let size = sin(t * .pi), radius = (nodeRadius - ringWidth / 2) * min(1, size * 2)
-            state.spinners.append(Spinner(
-                position: CGPoint(x: nodes[node].x + cos(angle) * radius, y: nodes[node].y + sin(angle) * radius),
-                size: size
-            ))
+            state.spinners.append(
+                Spinner(
+                    position: CGPoint(x: nodes[node].x + cos(angle) * radius, y: nodes[node].y + sin(angle) * radius),
+                    size: size
+                ))
             state.glow[node] += 0.6 * size
         }
         return state
@@ -114,16 +157,21 @@ enum LogoGeometry {
     }
 
     static func tile(_ context: inout GraphicsContext, phase: Double) {
-        let tile = Path(roundedRect: CGRect(origin: .zero, size: stage), cornerRadius: stage.width * 0.22, style: .continuous)
+        let tile = Path(
+            roundedRect: CGRect(origin: .zero, size: stage), cornerRadius: stage.width * 0.22, style: .continuous)
         context.clip(to: tile)
-        context.fill(tile, with: .linearGradient(Gradient(colors: [Color(white: 0.11), Color(white: 0.04)]),
-                                                 startPoint: .zero, endPoint: CGPoint(x: 0, y: stage.height)))
+        context.fill(
+            tile,
+            with: .linearGradient(
+                Gradient(colors: [Color(white: 0.11), Color(white: 0.04)]),
+                startPoint: .zero, endPoint: CGPoint(x: 0, y: stage.height)))
         // A soft teal light behind the network, breathing four times a loop, gives the glass something to bend.
         var glow = context
         glow.addFilter(.blur(radius: 140))
         let breath = (1 - cos(phase * 4 * 2 * .pi)) / 2
-        glow.fill(circle(CGPoint(x: stage.width / 2, y: stage.height / 2), 330 + 70 * breath),
-                  with: .color(Color(red: 0.05, green: 0.47, blue: 0.54).opacity(0.45 + 0.3 * breath)))
+        glow.fill(
+            circle(CGPoint(x: stage.width / 2, y: stage.height / 2), 330 + 70 * breath),
+            with: .color(Color(red: 0.05, green: 0.47, blue: 0.54).opacity(0.45 + 0.3 * breath)))
     }
 
     // One edge layer under its glass: the edge lines over a wide glow of their own color, and the
@@ -158,9 +206,12 @@ enum LogoGeometry {
             streak.addLine(to: particle.position)
             bloom.stroke(streak, with: .color(.white.opacity(0.5)), style: StrokeStyle(lineWidth: 24, lineCap: .round))
             bloom.fill(circle(particle.position, 34), with: .color(.white))
-            context.stroke(streak, with: .linearGradient(
-                Gradient(colors: [.white.opacity(0), .white]), startPoint: particle.tail, endPoint: particle.position
-            ), style: StrokeStyle(lineWidth: edgeWidth, lineCap: .round))
+            context.stroke(
+                streak,
+                with: .linearGradient(
+                    Gradient(colors: [.white.opacity(0), .white]), startPoint: particle.tail,
+                    endPoint: particle.position
+                ), style: StrokeStyle(lineWidth: edgeWidth, lineCap: .round))
             context.fill(circle(particle.position, 16), with: .color(.white))
         }
     }
@@ -275,9 +326,11 @@ struct EdgeGlass: View {
                 ForEach(LogoGeometry.edgeLayers[index].edges.indices, id: \.self) { edge in
                     let (a, b) = LogoGeometry.edgeLayers[index].edges[edge]
                     let (from, to) = LogoGeometry.segment(a, b, trim: LogoGeometry.nodeRadius)
-                    Color.clear.glassEffect(.clear, in: Tube(
-                        from: from.scaled(scale), to: to.scaled(scale), width: LogoGeometry.tubeWidth * scale
-                    ))
+                    Color.clear.glassEffect(
+                        .clear,
+                        in: Tube(
+                            from: from.scaled(scale), to: to.scaled(scale), width: LogoGeometry.tubeWidth * scale
+                        ))
                 }
             }
         }
@@ -297,7 +350,9 @@ struct Nodes: View, Equatable {
                 ZStack {
                     ForEach(LogoGeometry.nodes.indices, id: \.self) { index in
                         Color.clear
-                            .frame(width: LogoGeometry.lensRadius * 2 * scale, height: LogoGeometry.lensRadius * 2 * scale)
+                            .frame(
+                                width: LogoGeometry.lensRadius * 2 * scale, height: LogoGeometry.lensRadius * 2 * scale
+                            )
                             .glassEffect(Glass.clear.interactive(), in: Circle())
                             .position(LogoGeometry.nodes[index].scaled(scale))
                     }

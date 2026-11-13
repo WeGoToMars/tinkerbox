@@ -93,7 +93,7 @@ class LinearAttentionBlock(nn.Module):
         self.taps = cfg.conv_taps
         self.conv_dim = self.k_heads * self.k_dim * 2 + self.v_heads * self.v_dim
         self.eps = cfg.eps
-        self.scaling = self.k_dim ** -0.5
+        self.scaling = self.k_dim**-0.5
 
         self.in_proj = conv1x1(cfg.hidden, self.conv_dim + self.v_heads * self.v_dim + 2 * self.v_heads)
         self.conv = nn.Conv2d(self.conv_dim, self.conv_dim, (1, self.taps), groups=self.conv_dim, bias=False)
@@ -108,8 +108,12 @@ class LinearAttentionBlock(nn.Module):
             mask = torch.zeros(sub_chunk, sub_chunk, dtype=torch.float16)
             mask = mask.masked_fill(torch.ones(sub_chunk, sub_chunk, dtype=torch.bool).triu(1), MASK_MIN)
             self.register_buffer("upper_mask_sub", mask, persistent=False)
-            self.register_buffer("triu_ones_sub", torch.ones(sub_chunk, sub_chunk, dtype=torch.float16).triu(), persistent=False)
-            self.register_buffer("tril_mask_sub", torch.ones(sub_chunk, sub_chunk, dtype=torch.float16).tril(-1), persistent=False)
+            self.register_buffer(
+                "triu_ones_sub", torch.ones(sub_chunk, sub_chunk, dtype=torch.float16).triu(), persistent=False
+            )
+            self.register_buffer(
+                "tril_mask_sub", torch.ones(sub_chunk, sub_chunk, dtype=torch.float16).tril(-1), persistent=False
+            )
             self.register_buffer("eye_sub", torch.eye(sub_chunk, dtype=torch.float16), persistent=False)
             m_diag = torch.zeros(sub_chunk, sub_chunk, dtype=torch.float16)
             m_diag[:16, :16] = 1.0
@@ -119,7 +123,9 @@ class LinearAttentionBlock(nn.Module):
             m_off[16:, :16] = 1.0
             self.register_buffer("m_off", m_off, persistent=False)
 
-            i, j, t = torch.meshgrid(torch.arange(sub_chunk), torch.arange(sub_chunk), torch.arange(sub_chunk), indexing="ij")
+            i, j, t = torch.meshgrid(
+                torch.arange(sub_chunk), torch.arange(sub_chunk), torch.arange(sub_chunk), indexing="ij"
+            )
             intervals = ((t > j) & (t <= i)).to(torch.float16).reshape(sub_chunk * sub_chunk, sub_chunk).T.contiguous()
             self.register_buffer("decay_intervals", intervals, persistent=False)
 
@@ -132,11 +138,13 @@ class LinearAttentionBlock(nn.Module):
         z = z.view(1, self.v_heads, self.v_dim, chunk).permute(0, 1, 3, 2)
 
         window = torch.cat((tail, qkv), dim=-1)
-        new_tail = window[..., -(self.taps - 1):]
+        new_tail = window[..., -(self.taps - 1) :]
         # A 1 x taps kernel along tokens is faster on ANE than stacking tap planes.
         convolved = silu(self.conv(window), 1.0)
 
-        q, k, v = convolved.split([self.k_heads * self.k_dim, self.k_heads * self.k_dim, self.v_heads * self.v_dim], dim=1)
+        q, k, v = convolved.split(
+            [self.k_heads * self.k_dim, self.k_heads * self.k_dim, self.v_heads * self.v_dim], dim=1
+        )
         q = q.view(1, self.k_heads, self.k_dim, chunk).permute(0, 1, 3, 2)
         k = k.view(1, self.k_heads, self.k_dim, chunk).permute(0, 1, 3, 2)
         # Keep DeltaNet values and recurrent state above the ANE FP16 subnormal range.
@@ -179,7 +187,12 @@ class LinearAttentionBlock(nn.Module):
         L4 = L2 @ _non_alias(L2)
 
         L8 = L4 @ _non_alias(L4)
-        inv_diag = (self.eye_sub - L_diag) @ _non_alias(self.eye_sub + L2) @ _non_alias(self.eye_sub + L4) @ _non_alias(self.eye_sub + L8)
+        inv_diag = (
+            (self.eye_sub - L_diag)
+            @ _non_alias(self.eye_sub + L2)
+            @ _non_alias(self.eye_sub + L4)
+            @ _non_alias(self.eye_sub + L8)
+        )
         inv = inv_diag - inv_diag @ _non_alias(L_off) @ _non_alias(inv_diag)
 
         q_decayed = q_b * cum_decay.exp().unsqueeze(-1)
@@ -199,7 +212,11 @@ class LinearAttentionBlock(nn.Module):
 
         # RMSNormGated
         norm_input = core_attn_out * (GATED_NORM_SCALE / DELTA_STATE_SCALE)
-        normed = norm_input * torch.rsqrt((norm_input * norm_input).mean(-1, keepdim=True) + self.eps * GATED_NORM_SCALE**2) * self.norm_weight
+        normed = (
+            norm_input
+            * torch.rsqrt((norm_input * norm_input).mean(-1, keepdim=True) + self.eps * GATED_NORM_SCALE**2)
+            * self.norm_weight
+        )
         normed = normed * silu(z, 1.0)
         attn_out = normed.permute(0, 1, 3, 2).reshape(1, self.v_heads * self.v_dim, 1, chunk)
         h = self.out_proj(attn_out)
@@ -218,7 +235,7 @@ class AttentionBlock(nn.Module):
         self.kv_heads = cfg.kv_heads
         self.head_dim = cfg.head_dim
         self.hidden = cfg.hidden
-        self.scaling = cfg.head_dim ** -0.5
+        self.scaling = cfg.head_dim**-0.5
         self.rotary_dim = cfg.rotary_dim
 
         # Query projection has 2x channels for attention output gate
@@ -264,9 +281,7 @@ class Backbone(nn.Module):
             LinearAttentionBlock(cfg, scale[1]) if kind == "linear_attention" else AttentionBlock(cfg, scale)
             for kind, scale in zip(cfg.layer_types, scales)
         )
-        self.final_norm = RMSNorm(
-            cfg.hidden, cfg.eps, input_scale=RESIDUAL_SCALE, compute_scale=NORM_COMPUTE_SCALE
-        )
+        self.final_norm = RMSNorm(cfg.hidden, cfg.eps, input_scale=RESIDUAL_SCALE, compute_scale=NORM_COMPUTE_SCALE)
 
 
 class ScanStage(nn.Module):
@@ -278,10 +293,14 @@ class ScanStage(nn.Module):
         self.attention = backbone.layers[end]
         cfg = backbone.cfg
         conv_dim = cfg.linear_k_heads * cfg.linear_k_dim * 2 + cfg.linear_v_heads * cfg.linear_v_dim
-        self.shapes = [shape for _ in self.layers for shape in (
-            (1, conv_dim, 1, cfg.conv_taps - 1),
-            (1, cfg.linear_v_heads, cfg.linear_k_dim, cfg.linear_v_dim),
-        )]
+        self.shapes = [
+            shape
+            for _ in self.layers
+            for shape in (
+                (1, conv_dim, 1, cfg.conv_taps - 1),
+                (1, cfg.linear_v_heads, cfg.linear_k_dim, cfg.linear_v_dim),
+            )
+        ]
         if any(math.prod(s) % CHUNK for s in self.shapes):
             raise ValueError("recurrent state must pack into whole chunk columns")
         self.channels = sum(math.prod(s) for s in self.shapes) // CHUNK
@@ -290,7 +309,7 @@ class ScanStage(nn.Module):
         states, offset = [], 0
         for shape in self.shapes:
             count = math.prod(shape) // CHUNK
-            states.append(packed_state[:, offset:offset + count].reshape(shape))
+            states.append(packed_state[:, offset : offset + count].reshape(shape))
             offset += count
         outputs = []
         for i, layer in enumerate(self.layers):

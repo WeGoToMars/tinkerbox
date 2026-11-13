@@ -2,8 +2,8 @@
 
 TTS models share text input, language selection, instructions, reference audio,
 saved voices, ordered audio results and seed replay. Each backend advertises its
-native synthesis modes and controls through `model.capabilities`; the app renders
-that metadata without branching on model names or architecture types.
+native synthesis modes and controls through `model.capabilities`, which the app
+uses to build its controls.
 
 ```python
 import tinkerbox_ane
@@ -59,18 +59,13 @@ with tinkerbox_ane.load("voxcpm2") as model:
 | Streaming | Unsupported: every frame is refined together until the last step | One text, in 0.64-second pieces |
 
 For example, OmniVoice accepts `controls={"duration": 3.0}` or
-`controls={"speed": 1.25}`. Its existing direct `duration` and `speed` arguments
-remain native API options. Other backends can advertise different fields and
-categorical controls. The shared task does not approximate unsupported controls
-through audio postprocessing.
+`controls={"speed": 1.25}`, as well as direct `duration` and `speed` arguments.
 
 Each reference-capable mode may advertise `reference_transcript="none"` or
-`"required"`. The app hides transcription controls for `"none"`; an omitted
-field preserves transcript-based preparation. `create_voice` accepts `mode` so
-the backend can prepare the corresponding representation. Saved voices may be
-specific to a conditioning mode as well as a model; incompatible combinations
-return an error. Audio preparation and any missing-transcript recognition are
-owned by the backend, so Python, the worker, and app automation share behavior.
+`"required"`; the app hides transcription controls for `"none"`.
+`create_voice_clone_prompt` accepts `mode` to prepare a voice for that mode. Saved
+voices belong to one model, and possibly one mode; other combinations return an
+error. The backend transcribes a missing reference transcript on-device.
 
 The worker protocol carries per-item intent separately from request-wide
 generation settings:
@@ -90,6 +85,4 @@ Replies preserve item order and contain PCM WAV data, sample rate, duration,
 request seed and timing. With `"stream": true`, a request for one text to a
 streaming model first sends each piece as `{"chunk": {"pcm": ..., "sampleRate": ...}}`
 (base64 mono little-endian PCM16; joined in order, the WAV's samples), then the
-complete reply, which adds `firstAudioMs`. Clone preparation is timed separately. Saved voice
-files belong to their originating model. Pynini normalization is not part of
-the shared task API or app.
+complete reply, which adds `firstAudioMs`. Clone preparation is timed separately.

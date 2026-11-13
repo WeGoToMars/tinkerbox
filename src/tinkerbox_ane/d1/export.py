@@ -10,38 +10,27 @@ import time
 import torch
 from coreai_torch import TorchConverter, get_decomp_table
 
-from tinkerbox_ane.coreai import count_flops, source_hash
+from tinkerbox_ane.coreai import asset_metadata, count_flops, source_hash
 from tinkerbox_ane.bundle import checkpoint_digest, write_checkpoint
-from tinkerbox_ane.d1 import (CHUNK, CONTEXT, INPUT, KIND, OUTPUT, REPO, REVISION, RUNTIME_TENSORS, SOURCE, TIERS,
-                              checkpoint)
+from tinkerbox_ane.d1 import (
+    CHUNK,
+    CONTEXT,
+    INPUT,
+    KIND,
+    MODEL,
+    OUTPUT,
+    REPO,
+    REVISION,
+    RUNTIME_TENSORS,
+    SOURCE,
+    TIERS,
+    checkpoint,
+)
 from tinkerbox_ane.d1.model import FusedBackbone, load_weights
 from tinkerbox_ane.d1.vision import export_vision_asset, load_vision_tower
 
 
-def export_vision(out: Path = SOURCE) -> Path:
-    out = Path(out)
-    out.mkdir(parents=True, exist_ok=True)
-    started = time.monotonic()
-    tower = load_vision_tower(checkpoint())
-    vision_asset = out / "vision.aimodel"
-    vhash, vflops = export_vision_asset(tower, vision_asset)
-    manifest_path = out / "model.json"
-    if manifest_path.is_file():
-        manifest = json.loads(manifest_path.read_text())
-    else:
-        manifest = {"kind": KIND, "version": 2}
-    manifest.update(
-        vision_asset=vision_asset.name,
-        vision_source_hash=vhash,
-        vision_parameter_bytes=sum(p.numel() * p.element_size() for p in tower.parameters()),
-        vision_flops=vflops,
-    )
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"exported vision tower ({time.monotonic() - started:.1f}s): {out}", flush=True)
-    return out
-
-
-def export(out: Path = SOURCE, include_vision: bool = True) -> Path:
+def export(out: Path = SOURCE) -> Path:
     out = Path(out)
     if out.exists() and any(out.iterdir()):
         raise ValueError("source output is not empty; use a new directory")
@@ -59,31 +48,42 @@ def export(out: Path = SOURCE, include_vision: bool = True) -> Path:
             flops[f"c{capacity}"] = count_flops(model, model.example_inputs())
             program = torch.export.export(model, model.example_inputs()).run_decompositions(get_decomp_table())
             converter.add_exported_program(
-                program, input_names=[INPUT, "cos", "sin", "past_mask", "packed_state", "chunk_mask", "conv_route"],
-                output_names=[OUTPUT, "packed_state_out"], entrypoint_name=f"c{capacity}",
+                program,
+                input_names=[INPUT, "cos", "sin", "past_mask", "packed_state", "chunk_mask", "conv_route"],
+                output_names=[OUTPUT, "packed_state_out"],
+                entrypoint_name=f"c{capacity}",
             )
             print(f"staged c{capacity} ({time.monotonic() - started:.1f}s)", flush=True)
     asset = out / "fused.aimodel"
-    converter.to_coreai().save_asset(asset)
+    converter.to_coreai().save_asset(asset, metadata=asset_metadata(MODEL))
     manifest = {
-        "kind": KIND, "version": 2, "width": CHUNK, "context": CONTEXT,
-        "hidden": cfg.hidden, "heads": cfg.heads, "kv_heads": cfg.kv_heads,
-        "head_dim": cfg.head_dim, "conv_taps": cfg.conv_taps, "tiers": list(TIERS),
-        "conv_layers": model.conv_layers, "attention_layers": model.attention_layers,
-        "asset": asset.name, "source_hash": source_hash(asset),
+        "kind": KIND,
+        "version": 2,
+        "width": CHUNK,
+        "context": CONTEXT,
+        "hidden": cfg.hidden,
+        "heads": cfg.heads,
+        "kv_heads": cfg.kv_heads,
+        "head_dim": cfg.head_dim,
+        "conv_taps": cfg.conv_taps,
+        "tiers": list(TIERS),
+        "conv_layers": model.conv_layers,
+        "attention_layers": model.attention_layers,
+        "asset": asset.name,
+        "source_hash": source_hash(asset),
         "parameter_bytes": sum(p.numel() * p.element_size() for p in backbone.parameters()),
-        "flops": flops, "source": {"repo": REPO, "revision": REVISION},
+        "flops": flops,
+        "source": {"repo": REPO, "revision": REVISION},
     }
-    if include_vision:
-        tower = load_vision_tower(checkpoint())
-        vision_asset = out / "vision.aimodel"
-        vhash, vflops = export_vision_asset(tower, vision_asset)
-        manifest.update(
-            vision_asset=vision_asset.name,
-            vision_source_hash=vhash,
-            vision_parameter_bytes=sum(p.numel() * p.element_size() for p in tower.parameters()),
-            vision_flops=vflops,
-        )
+    tower = load_vision_tower(checkpoint())
+    vision_asset = out / "vision.aimodel"
+    vhash, vflops = export_vision_asset(tower, vision_asset)
+    manifest.update(
+        vision_asset=vision_asset.name,
+        vision_source_hash=vhash,
+        vision_parameter_bytes=sum(p.numel() * p.element_size() for p in tower.parameters()),
+        vision_flops=vflops,
+    )
     manifest["checkpoint_hash"] = checkpoint_digest(write_checkpoint(checkpoint(), out, RUNTIME_TENSORS))
     (out / "model.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"exported fused backbone ({time.monotonic() - started:.1f}s): {out}", flush=True)
@@ -93,12 +93,7 @@ def export(out: Path = SOURCE, include_vision: bool = True) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=SOURCE)
-    parser.add_argument("--vision-only", action="store_true", help="Export only vision tower")
-    args = parser.parse_args()
-    if args.vision_only:
-        export_vision(args.out)
-    else:
-        export(args.out)
+    export(parser.parse_args().out)
 
 
 if __name__ == "__main__":

@@ -29,10 +29,10 @@ class BlockAttention(nn.Module):
         grouped = q.view(batch, k.shape[1], self.group, tokens, dim)
         maxima, masses, means = [], [], []
         for start in range(0, self.context, self.block_size):
-            keys = k[:, :, start:start + self.block_size]
+            keys = k[:, :, start : start + self.block_size]
             kb = keys.repeat_interleave(self.group, dim=1)
-            vb = v[:, :, start:start + self.block_size].repeat_interleave(self.group, dim=1)
-            block_mask = mask[..., start:start + self.block_size]
+            vb = v[:, :, start : start + self.block_size].repeat_interleave(self.group, dim=1)
+            block_mask = mask[..., start : start + self.block_size]
             scores = (grouped @ keys.unsqueeze(2).transpose(-2, -1)).view(batch, heads, tokens, -1)
             if self.scale != 1.0:
                 scores = scores * self.scale

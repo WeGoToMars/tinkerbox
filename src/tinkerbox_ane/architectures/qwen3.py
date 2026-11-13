@@ -22,12 +22,18 @@ class Config:
 
     @classmethod
     def from_dict(cls, config):
-        if config['model_type'] != 'qwen3' or config.get('attention_bias', False):
-            raise ValueError('expected a bias-free Qwen3 backbone')
-        return cls(config['hidden_size'], config['intermediate_size'],
-                   config['num_attention_heads'], config['num_key_value_heads'],
-                   config['head_dim'], config['num_hidden_layers'], config['rms_norm_eps'],
-                   config['rope_parameters']['rope_theta'])
+        if config["model_type"] != "qwen3" or config.get("attention_bias", False):
+            raise ValueError("expected a bias-free Qwen3 backbone")
+        return cls(
+            config["hidden_size"],
+            config["intermediate_size"],
+            config["num_attention_heads"],
+            config["num_key_value_heads"],
+            config["head_dim"],
+            config["num_hidden_layers"],
+            config["rms_norm_eps"],
+            config["rope_parameters"]["rope_theta"],
+        )
 
 
 class Block(nn.Module):
@@ -54,9 +60,11 @@ class Block(nn.Module):
         q = self.q_norm(self.q(h).reshape(b, cfg.heads, cfg.head_dim, n))
         k = self.k_norm(self.k(h).reshape(b, cfg.kv_heads, cfg.head_dim, n))
         v = self.v(h).reshape(b, cfg.kv_heads, cfg.head_dim, n).transpose(2, 3)
+
         def rope(t):
             a, b = t.chunk(2, dim=2)
             return (t * cos + torch.cat((-b, a), dim=2) * sin).transpose(2, 3)
+
         q, k = rope(q), rope(k)
         return q, k, v
 
@@ -74,9 +82,15 @@ class Block(nn.Module):
             # Long sequences run faster on the ANE as query blocks; the result is
             # identical. 256-row blocks fail ANE compilation above 2,048 positions.
             rows = 256 if q.shape[2] <= 2048 else 512
-            h = torch.cat([F.scaled_dot_product_attention(q[:, :, start:start+rows], k, v,
-                                                          attn_mask=mask[..., start:start+rows, :])
-                           for start in range(0, q.shape[2], rows)], dim=2)
+            h = torch.cat(
+                [
+                    F.scaled_dot_product_attention(
+                        q[:, :, start : start + rows], k, v, attn_mask=mask[..., start : start + rows, :]
+                    )
+                    for start in range(0, q.shape[2], rows)
+                ],
+                dim=2,
+            )
         return self.finish(x, h.transpose(2, 3).reshape(x.shape[0], -1, 1, x.shape[-1]))
 
 
@@ -92,25 +106,30 @@ class Backbone(nn.Module):
             x = layer(x, cos, sin, mask)
         return self.norm(x)
 
-    def load_hf(self, tensors, prefix='llm.'):
+    def load_hf(self, tensors, prefix="llm."):
         """Read Qwen3 weights from an opened safetensors checkpoint."""
+
         def copy(target, name, scale=1.0):
             value = tensors.get_tensor(prefix + name)
             if scale != 1.0:
                 value = value * scale
             target.data.copy_(value.reshape(target.shape))
+
         for i, layer in enumerate(self.layers):
-            root = f'layers.{i}.'
-            copy(layer.input_norm.weight, root + 'input_layernorm.weight')
-            copy(layer.post_norm.weight, root + 'post_attention_layernorm.weight')
-            for name in ('q', 'k', 'v', 'o'):
-                copy(getattr(layer, name).weight, root + f'self_attn.{name}_proj.weight',
-                     layer.value_scale if name == 'v' else 1.0)
-            for name in ('q', 'k'):
-                copy(getattr(layer, name + '_norm').weight, root + f'self_attn.{name}_norm.weight')
-            for name, upstream in (('w1', 'gate_proj'), ('w3', 'up_proj'), ('w2', 'down_proj')):
-                value = tensors.get_tensor(prefix + root + f'mlp.{upstream}.weight')
-                chunks = value.chunk(layer.mlp.splits, dim=1 if name == 'w2' else 0)
+            root = f"layers.{i}."
+            copy(layer.input_norm.weight, root + "input_layernorm.weight")
+            copy(layer.post_norm.weight, root + "post_attention_layernorm.weight")
+            for name in ("q", "k", "v", "o"):
+                copy(
+                    getattr(layer, name).weight,
+                    root + f"self_attn.{name}_proj.weight",
+                    layer.value_scale if name == "v" else 1.0,
+                )
+            for name in ("q", "k"):
+                copy(getattr(layer, name + "_norm").weight, root + f"self_attn.{name}_norm.weight")
+            for name, upstream in (("w1", "gate_proj"), ("w3", "up_proj"), ("w2", "down_proj")):
+                value = tensors.get_tensor(prefix + root + f"mlp.{upstream}.weight")
+                chunks = value.chunk(layer.mlp.splits, dim=1 if name == "w2" else 0)
                 for target, chunk in zip(getattr(layer.mlp, name), chunks):
                     target.weight.data.copy_(chunk.reshape(target.weight.shape))
-        copy(self.norm.weight, 'norm.weight')
+        copy(self.norm.weight, "norm.weight")

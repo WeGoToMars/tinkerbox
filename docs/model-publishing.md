@@ -1,162 +1,105 @@
-# Model Publishing Guide
+# Developer guide
 
-`tinkerbox_ane` provides reusable utilities for Ahead-of-Time (AOT) Core AI compilation and publishing model releases to Hugging Face Hub. Model packages define their own export steps, deployment manifests, architecture support policies, and release metadata.
+Building the package, exporting and publishing models, and testing. End users get model bundles through the app or `tinkerbox_ane.load()` and need none of this.
 
-## Multi-Architecture Compilation
+## Build from source
 
-`build_architectures()` runs a model's compile function across target architectures:
-
-```python
-from pathlib import Path
-
-from my_models.encoder import compile_model
-from tinkerbox_ane.publish import build_architectures
-
-staging = Path("artifacts/encoder-release")
-bundles = build_architectures(
-    compile_model,
-    source=Path("artifacts/encoder-export"),
-    out=staging / "macos28",
-    architectures=["h17s", "h16g"],
-)
-```
-
-The compile callable receives `source`, `out`, `architecture`, and `force` keyword arguments and returns the path to the compiled bundle. By default, the first failure raises immediately. Set `continue_on_error=True` to log errors and continue compiling remaining architectures; if all architectures fail, `RuntimeError` is raised.
-
-## Core AI Asset Compilation
-
-A model's `compile_model()` function can delegate to `tinkerbox_ane.coreai.compile_asset()` to compile `.aimodel` packages into `.aimodelc` bundles:
-
-- **Verification:** Validates source identity, full ANE placement (`mps.fullyPlacedOnANE`), target architecture, and minimum deployment version before accepting an asset.
-- **Safe Replacement:** Compiles into a temporary directory and verifies the result before replacing an existing target.
-- **Rebuilds:** Pass `force=True` to recompile an existing target when sources or build configurations change. Bundle builds keep verified stages in a sibling `.<name>.build` directory after failure and resume on retry. Only a complete build replaces the deployment directory, using an atomic macOS directory swap.
-- **Watchdog Protection:** Monitors compilation time, SSD write budgets, and free disk space, writing reports to `compile.json` and `compile.log` in the target's parent directory (pass `report=` to name them per asset).
-
-Exports write the upstream files their runtime reads into a `checkpoint` folder with `tinkerbox_ane.bundle.write_checkpoint()`: everything but the weights, plus a `model.safetensors` with only the named tensors. Exports record its `checkpoint_hash`; compilation and publishing verify that identity. `compile_bundle()` and `install_bundle()` copy it into each bundle as an APFS clone, and `upload_release()` requires matching text, vision and checkpoint identities across architectures before publishing.
-
-## Publishing to Hugging Face Hub
-
-Stage release metadata (`README.md`, `LICENSE`, `NOTICE`) and compiled bundles in the staging directory, then publish:
-
-```python
-from pathlib import Path
-from tinkerbox_ane.publish import upload_to_hub
-
-staging = Path("artifacts/encoder-release")
-patterns = ["README.md", "LICENSE"]
-for architecture in bundles:
-    patterns.append(f"macos28/{architecture}/**")
-
-commit = upload_to_hub(
-    "your-account/encoder-ANE",
-    staging,
-    tag="v1.0.0",
-    allow_patterns=patterns,
-    delete_patterns=["macos28/**"],
-)
-```
-
-`upload_to_hub()` behaviors:
-- **Authentication:** Uses saved Hugging Face credentials (`huggingface-cli login`) or an explicit `token`.
-- **Filtering:** `allow_patterns` restricts uploaded files to specified paths.
-- **Synchronization:** `delete_patterns` removes matching remote files absent from the upload directory, allowing clean replacement of a release tree. Without `delete_patterns`, existing remote files are preserved.
-- **Release Tags:** If `tag` is specified, it creates a new release tag pointing to the uploaded commit. Pre-existing tags are rejected before uploading.
-
-## Model builds
-
-These commands are for developers creating bundles. End users download model
-files through the app or `tinkerbox_ane.load()`.
-
-Build from source with Xcode 27 and `uv sync --locked --extra speech`. Export to
-empty directories. Compilation uses the existing watchdog and verifies source
-identity, function manifests and full ANE placement. It defaults to this Mac's
-architecture; standard M4 is `h16g`. Cross-compilation establishes placement,
-not on-device correctness or performance.
-
-### d1-3B
+Requires Xcode 27 and [uv](https://docs.astral.sh/uv/):
 
 ```sh
-uv run python -m tinkerbox_ane.d1.export
-uv run python -m tinkerbox_ane.d1.compile
+uv sync --locked --all-extras
+uv build
 ```
 
-The source is `artifacts/build/d1_fp16_fused128_ctx32768`; the compiled bundle is
-`artifacts/d1_fp16_fused128_ctx32768`. Use `--force` to rebuild and
-`--architecture` to select a different target.
+Installing the package compiles the native host, `tinkerbox-ane-host`, from `src/tinkerbox_ane/*.swift` and `cow-staging.m`. The wheel in `dist/` includes it. To build the app, see the [app guide](../app/README.md#development).
 
-### d3-nano and d3-mini
+## Layout
+
+Shared infrastructure sits at the package top level:
+
+| Module | Role |
+| --- | --- |
+| `host.py`, `host.swift`, `cached.swift`, `chunked.swift`, `staged.swift`, `bidirectional.swift` | Native Core AI host: KV caches by capacity, packed batches and question trees, RoPE tables, vision inputs |
+| `bundle.py`, `compile.py`, `install.py` | Bundle manifests, downloads, AOT compilation and local installs |
+| `coreai.py`, `guard.py`, `publish.py` | Core AI export helpers, the compiler watchdog, and Hugging Face releases |
+| `generation.py`, `completion.py`, `speech.py`, `tokenization.py` | Task APIs shared by model families |
+| `models.json`, `models.py`, `storage.py` | The catalog shared by `load()` and the app, and disk usage |
+
+A model package, such as `tinkerbox_ane.d1`, has a graph (`model.py`), a Core AI export (`export.py`), a runtime (`runtime.py`) and optional vision or tree planning. Its `__init__.py` defines `KIND` (the bundle kind), `load(asset)`, and the `SETTINGS` and `INFO` the app shows in **Model Settings**. Speech packages also define `SPEECH_PARAMETERS`.
+
+To add a model, register it in `src/tinkerbox_ane/models.json`: `id`, `name`, `publisher`, `summary`, `task`, `module`, `repo`, `revision`, `min_version` and `architectures`, plus `subfolder`, `context`, `inputs`, `question_trees`, `download_bytes` and `license` where they apply. `family`, `size` and `quantization` group variants on the app's Models page. Add usage notes in `docs/models/<family>.md`.
+
+## Export and compile
+
+Exports need an empty destination. Compile with `tinkerbox_ane.compile`, which reads the kind from the export's manifest:
 
 ```sh
-uv run python -m tinkerbox_ane.d3.export d3-nano --out artifacts/build/d3-nano
-uv run python -m tinkerbox_ane.d3.compile artifacts/build/d3-nano --out artifacts/d3-nano
+uv run python -m tinkerbox_ane.compile SOURCE --out BUNDLE [--architecture h16g] [--force]
 ```
 
-Substitute `d3-mini` for the larger variant. Failed bundle builds retain verified
-stages and resume on retry.
+Compilation runs under the watchdog, verifies source identity, function manifests and full ANE placement, and defaults to this Mac's architecture (standard M4 is `h16g`). A failed build keeps its verified stages and resumes on retry. Cross-compiling verifies placement, not on-device correctness or speed.
 
-### OmniVoice
+| Model | Export |
+| --- | --- |
+| d1-3B | `python -m tinkerbox_ane.d1.export` (to `artifacts/build/d1_fp16_fused128_ctx32768`) |
+| d3 | `python -m tinkerbox_ane.d3.export d3-nano --out artifacts/build/d3-nano`; `--no-vision` exports text only |
+| OmniVoice | `python -m tinkerbox_ane.omnivoice.export` (to `artifacts/omnivoice/export`) |
+| VoxCPM2 | `python -m tinkerbox_ane.voxcpm2.export` (to `artifacts/voxcpm2/export`); `--main-weights` selects LUT8 |
+| GPT-2 | `python -m tinkerbox_ane.gpt2.export gpt2 --batch-sizes 1 4 8 --out artifacts/gpt2/export` |
+
+`--checkpoint` selects a local upstream checkpoint. GPT-2 takes any size (`gpt2-medium`, `gpt2-large`, `gpt2-xl`) and `--weights int8-per-channel` or `lut8-group32`. Each export writes a `checkpoint` folder with the tokenizer, configuration and CPU weights, and records its hash; compilation and publishing check it. Each Core AI asset carries its catalog entry's publisher, license and summary as asset metadata, which compiled assets keep, so register a model before exporting it.
+
+To use a bundle locally before publishing:
 
 ```sh
-uv run python -m tinkerbox_ane.omnivoice.export \
-  --out artifacts/omnivoice/source --compile-to artifacts/omnivoice/ane
+uv run python -m tinkerbox_ane.install MODEL BUNDLE
 ```
 
-`--checkpoint` selects a local upstream checkpoint. The export includes diffusion,
-fused short-context inference and the ANE acoustic codec decoder. M3 cannot place
-the current codec graph; published bundles target M4 and newer.
+## Publish
 
-### VoxCPM2
+`tinkerbox_ane.publish` compiles an export for every catalog architecture, stages the bundles with their license, and uploads them as a tagged Hugging Face release. It works for every model except GPT-2:
 
 ```sh
-uv run python -m tinkerbox_ane.voxcpm2.export \
-  --out artifacts/voxcpm2/source --compile-to artifacts/voxcpm2/ane
+uv run python -m tinkerbox_ane.publish d1-3b --source EXPORT --no-upload   # compile and stage only
+uv run python -m tinkerbox_ane.publish d1-3b --upload-only                 # publish the staged bundles
 ```
 
-`--checkpoint` selects a local upstream checkpoint. See the export command's
-`--help` for weight variants and stage options.
+It refuses an export whose upstream checkpoint differs from the model's. `--arch`, `--staging`, `--repo`, `--tag` and `--metadata` override the catalog defaults; `--continue-on-error` keeps going past a failed architecture. Update `revision` in `models.json` after publishing. A family supports publishing by defining `upstream(model)`, the checkpoint its exports record, and `LICENSE_FILE`.
 
-## Model publishing
+GPT-2 is published by hand: every size and format shares [wegotomars/GPT2-CoreAI-ANE](https://huggingface.co/wegotomars/GPT2-CoreAI-ANE), with bundles under `<model>/<format>/macos27/<architecture>` (the catalog's `subfolder`). Compile each export with `tinkerbox_ane.publish.build_architectures`, then upload the tree with `upload_to_hub(repo, staging, tag, allow_patterns=..., delete_patterns=...)`.
 
-`tinkerbox_ane.d1.publish` implements this workflow for the d1 model:
+## Style
+
+`pyproject.toml` configures Ruff and `.swift-format` configures Swift (layout only). Format before committing:
 
 ```sh
-# Compile bundles for specific architectures without uploading
-python -m tinkerbox_ane.d1.publish --arch h17s h16g --no-upload
-
-# Publish prepared bundles and create a release tag
-python -m tinkerbox_ane.d1.publish --arch h17s h16g --upload-only --tag <new-release-tag>
+uvx ruff format && uvx ruff check
+swift format --in-place --recursive app src tests
 ```
 
-The other entry points are `tinkerbox_ane.d3.publish MODEL`,
-`tinkerbox_ane.omnivoice.publish` and `tinkerbox_ane.voxcpm2.publish`.
-Pass `--source` to choose the export and `--no-upload` to stage without publishing.
-`--staging`, `--repo`, `--tag` and `--metadata` select the output and release
-metadata. With `--upload-only`, publish previously staged bundles. Update
-`src/tinkerbox_ane/models.json` after publishing.
+## Tests
 
-To use a compiled bundle locally:
+Run tests under the watchdog, with a new report path each time:
 
 ```sh
-uv run python -m tinkerbox_ane.install <model-id> <bundle-directory>
+uv run python -m tinkerbox_ane.guard artifacts/validation/run-1 -- uv run pytest -q -rs
 ```
 
-## Validation
+Model tests use this Mac's installed catalog bundle, or a bundle from `D1_ASSET`, `D3_NANO_ASSET`, `D3_MINI_ASSET`, `GPT2_ASSET` (`GPT2_XL_LUT8_ASSET` and so on), `TINKERBOX_SPEECH_TEST_ASSET` or `TINKERBOX_VOXCPM2_TEST_ASSET`. Without one they skip; `scripts/release.py` fails on any skip. The OmniVoice portability test also needs `TINKERBOX_OMNIVOICE_CHECKPOINT`. App behavior is covered by the [Swift smokes](../app/README.md#development).
 
-Run inference and compilation checks under `python -m tinkerbox_ane.guard`.
-Report the device, bundle and whether the check was on-device or cross-compiled.
+Numerical checks compare against upstream references. Report the device, the bundle, and whether a check ran on-device or was cross-compiled.
 
-| Model | Reference and numerical checks | Public behavior |
+| Model | Reference checks | Tests |
 | --- | --- | --- |
 | d1-3B | `scripts/build_reference.py`, `scripts/validate.py` | `tests/test_runtime.py` |
-| d3 | `scripts/validate_d3.py` | `tests/test_d3_runtime.py` |
-| OmniVoice | `scripts/omnivoice/reference_logits.py`, `scripts/omnivoice/validate_context.py` | `tests/test_speech.py`, `app/test_speech.py` |
-| VoxCPM2 | `scripts/voxcpm2/reference.py`, `scripts/voxcpm2/validate.py`, `scripts/voxcpm2/full_length.py` | `tests/test_voxcpm2_speech.py`, `app/test_voxcpm2_speech.py` |
+| d3 | `scripts/validate_d3.py` (`--smoke` is partial; full acceptance needs the FP32 reference) | `tests/test_d3_runtime.py` |
+| OmniVoice | `scripts/omnivoice/reference_logits.py`, `scripts/omnivoice/validate_context.py` | `tests/test_speech.py` |
+| VoxCPM2 | `scripts/voxcpm2/reference.py`, `scripts/voxcpm2/validate.py`, `scripts/voxcpm2/full_length.py` | `tests/test_voxcpm2_speech.py` |
+| GPT-2 | — | `tests/test_gpt2_generation.py` (Small, Medium INT8 and XL LUT8; every variant shares one architecture) |
 
-Use each script's `--help` for checkpoint, bundle and output paths. D3's `--smoke`
-is a partial numerical check; full acceptance requires the pinned FP32 reference
-and coverage of all reachable capacities. Speech checks require a compiled bundle;
-set the asset and checkpoint variables documented by the tests. Generated reports
-belong under `artifacts/`.
+Each script's `--help` lists its paths. Reports belong under `artifacts/`.
 
-Exercise speech Shortcuts through `app/test_shortcuts.py --speech`; use
-`TINKERBOX_SPEECH_MODEL` and an absolute `TINKERBOX_ASSET` for each backend.
+## Maintenance
+
+- [Core AI disk cleanup](cache-cleanup.md): removes leftover specializations and staging directories.
+- [Copy-on-write staging](cow-staging.md): the host workaround that stops weight files being copied during specialization.

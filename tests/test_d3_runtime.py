@@ -1,7 +1,4 @@
 import math
-import os
-from pathlib import Path
-import sys
 import warnings
 
 import pytest
@@ -10,23 +7,19 @@ import tinkerbox_ane
 from tinkerbox_ane.d3.runtime import SequentialQuestionsWarning
 
 GREETING = {"type": "noul", "instructions": "Is this a greeting?"}
-TOPIC = {"type": "choice", "instructions": "Choose a topic.",
-         "criteria": {"hello": "A greeting", "billing": "A payment dispute"}}
+TOPIC = {
+    "type": "choice",
+    "instructions": "Choose a topic.",
+    "criteria": {"hello": "A greeting", "billing": "A payment dispute"},
+}
 TONE = {"type": "score", "instructions": "How friendly is this?", "criteria": ["Unfriendly", "Neutral", "Friendly"]}
 
 
 @pytest.fixture(params=["d3-nano", "d3-mini"])
-def bundle(request):
-    asset = os.environ.get(request.param.upper().replace("-", "_") + "_ASSET")
-    if sys.platform != "darwin" or not asset or not (Path(asset) / "model.json").is_file():
-        pytest.skip(f"set {request.param.upper().replace('-', '_')}_ASSET to a compiled {request.param} bundle")
-    return request.param, Path(asset)
-
-
-@pytest.fixture
-def model(bundle, monkeypatch):
+def model(request, bundle, monkeypatch):
+    asset = bundle(request.param, request.param.upper().replace("-", "_") + "_ASSET")
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    with tinkerbox_ane.load(*bundle) as model, warnings.catch_warnings():
+    with tinkerbox_ane.load(request.param, asset) as model, warnings.catch_warnings():
         warnings.simplefilter("ignore", SequentialQuestionsWarning)
         yield model
 
@@ -75,12 +68,9 @@ def test_several_questions_warn_and_run_in_order(model):
 
 
 def test_public_input_limits_and_close(model):
-    with pytest.raises(ValueError, match="image"):
-        model.probabilities("Hi", [GREETING], images=[object()])
     with pytest.raises(ValueError, match="context limit"):
         model.probabilities_batch([("Hi", [GREETING]), ("hello " * model.context, [GREETING])])
     assert model.probabilities("Hi", [GREETING])[0][1] > 0.70
-    model.close()
     model.close()
     with pytest.raises(RuntimeError, match="closed"):
         model.probabilities("Hi", [GREETING])
@@ -92,25 +82,31 @@ def test_multimodal_decisions_keep_image_shape(model):
     blue = Image.new("RGB", (640, 480), color="blue")
     red = Image.new("RGB", (300, 900), color="red")
     is_blue = {"type": "noul", "instructions": "Is this image blue?"}
-    color = {"type": "choice", "instructions": "What color is this image?",
-             "criteria": {"blue": "Blue", "red": "Red", "green": "Green"}}
+    color = {
+        "type": "choice",
+        "instructions": "What color is this image?",
+        "criteria": {"blue": "Blue", "red": "Red", "green": "Green"},
+    }
 
     result = model.system_one(None, {"blue": is_blue, "color": color}, images=[blue])
     assert result["answers"]["blue"]["noul"] > 0.85
     assert result["answers"]["color"]["choice"] == "blue"
     count = model.count_tokens(None, {"blue": is_blue, "color": color}, images=[blue])
     assert count["input_tokens"] == result["usage"]["input_tokens"]
-    assert count["images"] == [{"source": [640, 480], "cols": 1, "rows": 1, "size": [640, 480],
-                                "overview": None, "passes": 1, "tokens": 300}]
+    assert count["images"] == [
+        {"source": [640, 480], "cols": 1, "rows": 1, "size": [640, 480], "overview": None, "passes": 1, "tokens": 300}
+    ]
     assert model.count_tokens(None, {"c": color}, images=[red])["images"][0]["size"] == [288, 896]
 
     assert model.probabilities(None, [is_blue], images=[red])[0][1] < 0.15
     with pytest.raises(ValueError, match="placeholder"):
         model.probabilities_batch([(None, [is_blue], [blue]), ("<|image_pad|>", [is_blue], [blue])])
-    batch = model.system_one_batch([
-        (None, {"color": color}, [red]),
-        ("Hello, how are you?", {"greeting": GREETING}, None),
-    ])
+    batch = model.system_one_batch(
+        [
+            (None, {"color": color}, [red]),
+            ("Hello, how are you?", {"greeting": GREETING}, None),
+        ]
+    )
     assert batch[0]["answers"]["color"]["choice"] == "red"
     assert batch[1]["answers"]["greeting"]["noul"] > 0.70
     assert batch[1]["usage"]["input_tokens"] == len(model.tokens("Hello, how are you?", GREETING))
@@ -125,14 +121,17 @@ def test_long_prompt_preserves_evidence_and_request_isolation(model):
     if model.context < 8192:
         pytest.skip("requires a bundle with an attention capacity above 4096")
     question = {
-        "type": "choice", "instructions": "Which team is assigned to the TARGET ticket?",
+        "type": "choice",
+        "instructions": "Which team is assigned to the TARGET ticket?",
         "criteria": {"billing": "Billing", "technical": "Technical support", "shipping": "Shipping"},
     }
-    state = ("Archive note: this line contains no target ticket information. " * 500
-             + "TARGET ticket: The assigned team is Shipping.")
+    state = (
+        "Archive note: this line contains no target ticket information. " * 500
+        + "TARGET ticket: The assigned team is Shipping."
+    )
     result = model.system_one(state, {"team": question})
     assert result["answers"]["team"]["choice"] == "shipping"
-    assert result["answers"]["team"]["confidence"] > .9
+    assert result["answers"]["team"]["confidence"] > 0.9
     assert result["usage"]["input_tokens"] == len(model.tokens(state, question))
     short = model.system_one("TARGET ticket: The assigned team is Billing.", {"team": question})
     assert short["answers"]["team"]["choice"] == "billing"

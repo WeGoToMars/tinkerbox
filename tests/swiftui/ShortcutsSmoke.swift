@@ -18,8 +18,9 @@ func require(_ condition: Bool, _ message: String) throws {
 
 func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throws {
     try require(values.map(\.label) == labels, "Probability labels or ordering changed")
-    try require(values.allSatisfy { $0.probability.isFinite && (0...1).contains($0.probability) },
-                "Probabilities must be finite and between zero and one")
+    try require(
+        values.allSatisfy { $0.probability.isFinite && (0...1).contains($0.probability) },
+        "Probabilities must be finite and between zero and one")
     try require(abs(values.reduce(0) { $0 + $1.probability } - 1) < 0.00001, "Probabilities must sum to one")
 }
 
@@ -46,9 +47,9 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         invalid.options = ["Same", "Same"]
         do {
             _ = try await invalid.perform()
-            throw DecisionError.invalid("Duplicate choices were accepted")
-        } catch DecisionError.invalid(let message) {
-            try require(message.contains("unique"), "Expected a useful duplicate-options error")
+            try require(false, "Duplicate choices were accepted")
+        } catch let error as TinkerboxError {
+            try require(error.errorDescription!.contains("unique"), "Expected a useful duplicate-options error")
         }
         let invalidScore = ScoreTextIntent()
         invalidScore.text = score.text
@@ -56,18 +57,18 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         invalidScore.levels = Array(repeating: "Level", count: 11)
         do {
             _ = try await invalidScore.perform()
-            throw DecisionError.invalid("Too many levels were accepted")
-        } catch DecisionError.invalid(let message) {
-            try require(message.contains("2–10"), "Expected a useful score-level error")
+            try require(false, "Too many levels were accepted")
+        } catch let error as TinkerboxError {
+            try require(error.errorDescription!.contains("2–10"), "Expected a useful score-level error")
         }
         let blank = YesNoDecisionIntent()
         blank.text = " \n "
         blank.question = yes.question
         do {
             _ = try await blank.perform()
-            throw DecisionError.invalid("Blank text was accepted")
-        } catch DecisionError.invalid(let message) {
-            try require(message.contains("empty"), "Expected a useful empty-text error")
+            try require(false, "Blank text was accepted")
+        } catch let error as TinkerboxError {
+            try require(error.errorDescription!.contains("empty"), "Expected a useful empty-text error")
         }
 
         // Cold startup, multiple Shortcuts, and the UI's runtime entry point overlap.
@@ -85,7 +86,7 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         let negative = noReply.value!
         let chosen = choiceReply.value!
         let scored = scoreReply.value!
-        try require(setupReply.ready == true, "Concurrent UI setup did not finish")
+        try require(setupReply.modelId == Runtime.selectedModel(for: .decision), "Concurrent UI setup did not finish")
         try require(affirmative.answer && affirmative.yesProbability > 0.9, "Expected a greeting")
         try require(!negative.answer && negative.yesProbability < 0.5, "Expected a non-greeting")
         try require(chosen.chosenOption == "Greeting", "Expected Greeting option")
@@ -94,13 +95,20 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         try checkProbabilities(affirmative.probabilities, labels: ["Yes", "No"])
         try checkProbabilities(chosen.probabilities, labels: choice.options)
         try checkProbabilities(scored.probabilities, labels: ["0 · Unfriendly", "1 · Neutral", "2 · Friendly"])
-        try require([affirmative.inputTokens, negative.inputTokens, chosen.inputTokens, scored.inputTokens].allSatisfy { $0 > 0 },
-                    "Missing input-token usage")
-        try require([affirmative.inferenceTime, negative.inferenceTime, chosen.inferenceTime, scored.inferenceTime]
-            .allSatisfy { $0.isFinite && $0 >= 0 }, "Missing inference timing")
-        try require(abs(uiReply.results[0].answers[0].noul! - affirmative.yesProbability) < 0.01, "UI and Shortcut answers differ")
-        try require(String(localized: affirmative.displayRepresentation.title).hasPrefix("Yes ("),
-                    "The text form should state the answer and its probability")
+        try require(
+            [affirmative.inputTokens, negative.inputTokens, chosen.inputTokens, scored.inputTokens].allSatisfy {
+                $0 > 0
+            },
+            "Missing input-token usage")
+        try require(
+            [affirmative.inferenceTime, negative.inferenceTime, chosen.inferenceTime, scored.inferenceTime]
+                .allSatisfy { $0.isFinite && $0 >= 0 }, "Missing inference timing")
+        try require(
+            abs(uiReply.results[0].answers[0].noul! - affirmative.yesProbability) < 0.01,
+            "UI and Shortcut answers differ")
+        try require(
+            String(localized: affirmative.displayRepresentation.title).hasPrefix("Yes ("),
+            "The text form should state the answer and its probability")
 
         // Image-only decisions: Shortcuts file data reaches the vision tower and changes the answer.
         let blue = YesNoDecisionIntent()
@@ -141,13 +149,14 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         oversized.question = yes.question
         do {
             _ = try await oversized.perform()
-            throw DecisionError.invalid("Oversized input was accepted")
+            try require(false, "Oversized input was accepted")
         } catch {
             try require(error.localizedDescription.contains("context limit"), "Expected a context-limit error")
         }
         let repeated = try await yes.perform().value!
-        try require(repeated.answer && abs(repeated.yesProbability - affirmative.yesProbability) < 0.01,
-                    "A failed request affected the next decision")
+        try require(
+            repeated.answer && abs(repeated.yesProbability - affirmative.yesProbability) < 0.01,
+            "A failed request affected the next decision")
         // Unloading preserves the selection, and the next App Intent reloads it automatically.
         let selected = Runtime.selectedModel(for: .decision)
         let settings = Runtime.settings(for: selected)
@@ -155,14 +164,16 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         try require(await !Runtime.shared.isConnected, "Manual unload kept the model loaded")
         try require(Runtime.selectedModel(for: .decision) == selected, "Unload changed the selected model")
         let afterUnload = try await yes.perform().value!
-        try require(afterUnload.answer && abs(afterUnload.yesProbability - affirmative.yesProbability) < 0.01,
-                    "The App Intent did not recover after unloading")
+        try require(
+            afterUnload.answer && abs(afterUnload.yesProbability - affirmative.yesProbability) < 0.01,
+            "The App Intent did not recover after unloading")
         try require(Runtime.settings(for: selected) == settings, "Reload changed the saved settings")
         await Runtime.shared.unload()
 
         // A short idle policy exercises the same lifecycle without waiting five minutes.
         let idle = Runtime(idleTimeout: .seconds(2))
-        let request = Request(items: [Item(state: yes.text!)], questions: [Question(type: .noul, instructions: yes.question)])
+        let request = Request(
+            items: [Item(state: yes.text!)], questions: [Question(type: .noul, instructions: yes.question)])
         _ = try await idle.decide(request)
         try await Task.sleep(for: .milliseconds(1200))
         _ = try await idle.decide(request)
@@ -172,8 +183,7 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         var expired = false
         while ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(200))
-            do { _ = try await idle.count(request) }
-            catch DecisionError.invalid { expired = true; break }
+            do { _ = try await idle.count(request) } catch is TinkerboxError { expired = true; break }
         }
         let disconnected = await !idle.isConnected
         try require(expired && disconnected, "Token previews kept an idle model loaded")
@@ -181,13 +191,16 @@ func checkProbabilities(_ values: [DecisionProbability], labels: [String]) throw
         try require(reloaded.results[0].answers[0].noul! > 0.9, "Inference did not reload the idle model")
 
         // Unload waits for an active request rather than cancelling it.
-        let long = Request(items: [Item(state: String(repeating: "Hello, friend! ", count: 1200))], questions: request.questions)
+        let long = Request(
+            items: [Item(state: String(repeating: "Hello, friend! ", count: 1200))], questions: request.questions)
         async let active = idle.decide(long)
         try await Task.sleep(for: .milliseconds(100))
         await idle.unload()
         let completed = try await active
         try require(completed.results[0].answers.count == 1, "Unload interrupted inference")
         try require(await !idle.isConnected, "Queued unload did not release the model")
-        print("PASS: typed answers, probabilities, usage, images, several questions, list filter and sort, cold startup, concurrent UI/Shortcuts calls, validation, error recovery, manual/idle unload, preview inactivity, automatic reload and queued unload")
+        print(
+            "PASS: typed answers, probabilities, usage, images, several questions, list filter and sort, cold startup, concurrent UI/Shortcuts calls, validation, error recovery, manual/idle unload, preview inactivity, automatic reload and queued unload"
+        )
     }
 }

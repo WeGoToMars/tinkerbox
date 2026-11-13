@@ -9,7 +9,7 @@ Text to Speech; model files download automatically. Python users need Python
 3.12 or 3.13 and the speech extra:
 
 ```sh
-python -m pip install "tinkerbox-ane[speech]==2.2.0"
+python -m pip install "tinkerbox-ane[speech]"
 ```
 
 | Model ID | Download | Measured peak wired memory |
@@ -83,4 +83,4 @@ First use can take several minutes; subsequent requests reuse the model cache.
 
 Model weights and upstream code use [Apache-2.0](../../LICENSES/VoxCPM-Apache-2.0.txt).
 [Full speech API](../speech.md) · [Speech Shortcuts](../../app/README.md#shortcuts) ·
-[Developer commands](../model-publishing.md#model-builds).
+[Developer commands](../model-publishing.md#export-and-compile).

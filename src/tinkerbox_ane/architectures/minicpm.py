@@ -22,12 +22,18 @@ class Config:
 
     @classmethod
     def from_dict(cls, data):
-        if data.get('use_mup', False):
-            raise ValueError('MiniCPM muP scaling is not implemented')
-        return cls(data['hidden_size'], data['intermediate_size'], data['num_attention_heads'],
-                   data['num_key_value_heads'], data.get('kv_channels') or
-                   data['hidden_size'] // data['num_attention_heads'], data['num_hidden_layers'],
-                   data['rms_norm_eps'], not data.get('no_rope', False))
+        if data.get("use_mup", False):
+            raise ValueError("MiniCPM muP scaling is not implemented")
+        return cls(
+            data["hidden_size"],
+            data["intermediate_size"],
+            data["num_attention_heads"],
+            data["num_key_value_heads"],
+            data.get("kv_channels") or data["hidden_size"] // data["num_attention_heads"],
+            data["num_hidden_layers"],
+            data["rms_norm_eps"],
+            not data.get("no_rope", False),
+        )
 
 
 class Block(nn.Module):
@@ -51,9 +57,11 @@ class Block(nn.Module):
         k = self.k(h).reshape(b, cfg.kv_heads, cfg.head_dim, n)
         v = self.v(h).reshape(b, cfg.kv_heads, cfg.head_dim, n)
         if cfg.rope:
+
             def rotate(t):
                 a, b = t.chunk(2, dim=2)
                 return t * cos + torch.cat((-b, a), dim=2) * sin
+
             q, k = rotate(q), rotate(k)
         new = (k.reshape(b, -1, 1, n), v.reshape(b, -1, 1, n))
         if past is not None:
@@ -62,8 +70,11 @@ class Block(nn.Module):
             v = torch.cat((pv.reshape(b, cfg.kv_heads, cfg.head_dim, -1), v), dim=-1)
         group = cfg.heads // cfg.kv_heads
         attention = F.scaled_dot_product_attention(
-            q.transpose(2, 3), k.transpose(2, 3).repeat_interleave(group, dim=1),
-            v.transpose(2, 3).repeat_interleave(group, dim=1), attn_mask=mask)
+            q.transpose(2, 3),
+            k.transpose(2, 3).repeat_interleave(group, dim=1),
+            v.transpose(2, 3).repeat_interleave(group, dim=1),
+            attn_mask=mask,
+        )
         x = x + self.o(attention.transpose(2, 3).reshape(b, -1, 1, n) / self.value_scale)
         return x + self.mlp(self.post_norm(x)), new
 
@@ -84,7 +95,7 @@ class Transformer(nn.Module):
         keys = cache.split(width, dim=1) if cache is not None else None
         present = []
         for i, layer in enumerate(self.layers):
-            past = (keys[2*i], keys[2*i+1]) if keys is not None else None
+            past = (keys[2 * i], keys[2 * i + 1]) if keys is not None else None
             hidden, new = layer(hidden, cos, sin, mask, past)
             present.extend(new)
         hidden = self.norm(hidden)
@@ -94,17 +105,21 @@ class Transformer(nn.Module):
         def copy(target, name, scale=1):
             value = tensors.get_tensor(prefix + name).float() * scale
             target.data.copy_(value.reshape(target.shape))
+
         for i, layer in enumerate(self.layers, self.start):
-            root = f'layers.{i}.'
-            copy(layer.input_norm.weight, root + 'input_layernorm.weight')
-            copy(layer.post_norm.weight, root + 'post_attention_layernorm.weight')
-            for name in ('q', 'k', 'v', 'o'):
-                copy(getattr(layer, name).weight, root + f'self_attn.{name}_proj.weight',
-                     layer.value_scale if name == 'v' else 1)
-            for name, upstream in (('w1', 'gate_proj'), ('w3', 'up_proj'), ('w2', 'down_proj')):
-                weight = tensors.get_tensor(prefix + root + f'mlp.{upstream}.weight')
-                chunks = weight.chunk(layer.mlp.splits, dim=1 if name == 'w2' else 0)
+            root = f"layers.{i}."
+            copy(layer.input_norm.weight, root + "input_layernorm.weight")
+            copy(layer.post_norm.weight, root + "post_attention_layernorm.weight")
+            for name in ("q", "k", "v", "o"):
+                copy(
+                    getattr(layer, name).weight,
+                    root + f"self_attn.{name}_proj.weight",
+                    layer.value_scale if name == "v" else 1,
+                )
+            for name, upstream in (("w1", "gate_proj"), ("w3", "up_proj"), ("w2", "down_proj")):
+                weight = tensors.get_tensor(prefix + root + f"mlp.{upstream}.weight")
+                chunks = weight.chunk(layer.mlp.splits, dim=1 if name == "w2" else 0)
                 for target, chunk in zip(getattr(layer.mlp, name), chunks):
                     target.weight.data.copy_(chunk.reshape(target.weight.shape))
         if not isinstance(self.norm, nn.Identity):
-            copy(self.norm.weight, 'norm.weight')
+            copy(self.norm.weight, "norm.weight")

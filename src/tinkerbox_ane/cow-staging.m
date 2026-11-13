@@ -2,7 +2,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
-#include <copyfile.h>
+#include <sys/clonefile.h>
 #include <dlfcn.h>
 #include <stdbool.h>
 #include <unistd.h>
@@ -52,17 +52,11 @@ static BOOL compileWithClones(id self, SEL command, id model, id options, unsign
         if (!target) {
             target = [destination stringByAppendingPathComponent:
                 [NSString stringWithFormat:@"resources-%@.bin", NSUUID.UUID.UUIDString]];
-            copyfile_state_t state = copyfile_state_alloc();
-            if (!state) fail("cannot allocate clone state");
-            if (copyfile(source.fileSystemRepresentation, target.fileSystemRepresentation,
-                         state, COPYFILE_DATA | COPYFILE_NOFOLLOW | COPYFILE_CLONE_FORCE)) {
+            // clonefile never falls back to copying the weights.
+            if (clonefile(source.fileSystemRepresentation, target.fileSystemRepresentation, CLONE_NOFOLLOW)) {
                 perror("clone");
                 _exit(2);
             }
-            bool cloned = false;
-            copyfile_state_get(state, COPYFILE_STATE_WAS_CLONED, &cloned);
-            copyfile_state_free(state);
-            if (!cloned) fail("weight resource was not cloned");
             paths[source] = target;
         }
         NSMutableDictionary *replacement = [entry mutableCopy];

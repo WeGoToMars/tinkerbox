@@ -42,3 +42,15 @@ Copyright 2026 OpenBMB. Code and weights are Apache-2.0 licensed;
 see LICENSES/VoxCPM-Apache-2.0.txt. The AudioVAE V2 codec and causal streaming decoder
 are retained from upstream. MiniCPM transformers are independently converted
 for ANE; task conditioning and sampling follow the pinned upstream contract.
+
+GPT-2 text-completion integration:
+Upstream: https://github.com/openai/gpt-2
+Checkpoints: https://huggingface.co/openai-community/gpt2 and the
+gpt2-medium, gpt2-large and gpt2-xl repositories in the same organization.
+Software Copyright (c) 2019 OpenAI. See LICENSES/GPT-2-MIT.txt for the
+original Modified MIT License. Checkpoint revisions are pinned in
+src/tinkerbox_ane/gpt2/__init__.py and recorded in exported manifests.
+The shared decoder runs with FP16 activations and optional INT8 or LUT8 projection
+weights in Core AI functions on ANE. Tokenization, learned position and token
+embeddings, tied vocabulary readout and sampling
+run on the CPU. The models have not been retrained.
