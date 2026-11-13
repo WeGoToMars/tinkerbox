@@ -461,7 +461,7 @@ actor Runtime {
         Self.configure(process, python: ["-u", Bundle.main.url(forResource: "worker", withExtension: "py")!.path])
         process.environment!["TINKERBOX_MODEL"] = model
         process.environment!["TINKERBOX_CATALOG_UPDATES"] = Catalog.updatesEnvironment()
-        if process.environment!["TINKERBOX_ASSET"] == nil, let asset = Catalog.localAsset(for: model) {
+        if process.environment!["TINKERBOX_ASSET"] == nil, let asset = Catalog.readableLocalAsset(for: model) {
             process.environment!["TINKERBOX_ASSET"] = asset
         }
         try FileManager.default.createDirectory(

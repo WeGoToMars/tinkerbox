@@ -149,9 +149,14 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
             .appending(path: "macos27").appending(path: deviceArchitecture)
     }
 
+    // The chosen bundle while it is readable, so a deleted or unmounted one falls back to the download.
+    nonisolated static func readableLocalAsset(for id: String) -> String? {
+        localAsset(for: id).flatMap { bundleIssue(at: URL(fileURLWithPath: $0)) == nil ? $0 : nil }
+    }
+
     nonisolated static func localBundle(for model: CatalogModel) -> URL? {
-        let candidate = localAsset(for: model.id).map { URL(fileURLWithPath: $0) } ?? cachedBundle(for: model)
-        return bundleIssue(at: candidate) == nil ? candidate : nil
+        [readableLocalAsset(for: model.id).map { URL(fileURLWithPath: $0) }, cachedBundle(for: model)]
+            .compactMap { $0 }.first { bundleIssue(at: $0) == nil }
     }
 
     // A development bundle that the worker loads for whichever model it runs.
@@ -165,10 +170,15 @@ struct CatalogModel: Decodable, Identifiable, Hashable, Sendable {
                 "This Mac's Neural Engine is not supported by this version of Tinkerbox. Update Tinkerbox to use this Mac."
         }
         if let asset { return bundleIssue(at: asset) }
+        if localBundle(for: model) != nil { return nil }
+        // Never download over a chosen bundle: it may be on a drive that is not connected.
         if let selected = localAsset(for: model.id) {
+            guard FileManager.default.fileExists(atPath: selected) else {
+                return
+                    "The bundle chosen for \(model.name) is missing. Reconnect it, or delete it in Models to download it."
+            }
             return bundleIssue(at: URL(fileURLWithPath: selected))
         }
-        if localBundle(for: model) != nil { return nil }
         if let supported = model.architectures, !supported.contains(deviceArchitecture) {
             return "No \(model.name) bundle is available for this Mac. Choose another model or a matching local bundle."
         }
