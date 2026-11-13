@@ -500,7 +500,7 @@ struct SpeechView: View {
             "\(result.duration.formatted(.number.precision(.fractionLength(2)))) s audio",
             "generated in \(seconds(reply.audioMs)) (\(speed)× real time)",
             reply.firstAudioMs.map { "first audio after \(seconds($0))" },
-            playground.usesReference && reply.cloneMs > 0 ? "voice prepared in \(seconds(reply.cloneMs))" : nil,
+            reply.cloneMs > 0 ? "voice prepared in \(seconds(reply.cloneMs))" : nil,
             "seed \(reply.seed)",
         ].compactMap { $0 }.joined(separator: " · ")
     }

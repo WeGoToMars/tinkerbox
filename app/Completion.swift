@@ -203,6 +203,7 @@ struct CompletionView: View {
                     Button(playground.results.isEmpty ? "Generate" : "Continue", systemImage: "text.append") {
                         Task { await playground.run() }
                     }
+                    .buttonStyle(.borderedProminent)
                     .disabled(!playground.canRun)
                     .help(playground.results.isEmpty ? "" : "Generate more from the full text of each prompt.")
                     if demo.busy {

@@ -285,11 +285,15 @@ struct ModelToolbar: ToolbarContent {
                     .help("Unloads after 5 minutes without inference.")
             } else if let issue = demo.compatibilityIssue {
                 Label("Model unavailable", systemImage: "exclamationmark.circle")
+                    .labelStyle(.titleAndIcon)
                     .foregroundStyle(.secondary)
+                    .fixedSize()
                     .help(issue)
             } else {
                 Label("Model unloaded", systemImage: "moon")
+                    .labelStyle(.titleAndIcon)
                     .foregroundStyle(.secondary)
+                    .fixedSize()
                     .help("Loads automatically on the next run. Unloads after 5 minutes without inference.")
             }
         }

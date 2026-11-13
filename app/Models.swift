@@ -104,7 +104,9 @@ struct ModelsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 }
             }
-        }.padding(.vertical, 8)
+        }
+        .padding(.vertical, 8)
+        .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }  // not the trailing "Selected" label
     }
 
     var body: some View {

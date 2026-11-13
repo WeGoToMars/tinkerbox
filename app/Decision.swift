@@ -731,6 +731,7 @@ struct ProbabilityChart: View {
                 }
         }
         .chartXScale(domain: 0...1)
+        .chartPlotStyle { $0.padding(.trailing, 56) }  // room for a full bar's percentage
         .chartXAxis(.hidden)
         .chartYAxis {
             AxisMarks(preset: .aligned, position: .leading) { value in
