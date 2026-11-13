@@ -19,6 +19,19 @@ static void fail(const char *message) {
     _exit(2);
 }
 
+// macOS 27.2 added useClone: to the helper; macOS 27.0 has the three-argument form.
+static id preflight(id model, NSString *directory) {
+    Class helper = NSClassFromString(@"_ANECloneHelper");
+    SEL current = NSSelectorFromString(@"cloneIfWritable:isEncryptedModel:cloneDirectory:useClone:");
+    SEL original = NSSelectorFromString(@"cloneIfWritable:isEncryptedModel:cloneDirectory:");
+    if ([helper respondsToSelector:current])
+        return ((id (*)(id, SEL, id, BOOL, id, BOOL))objc_msgSend)(helper, current, model, NO, directory, YES);
+    if ([helper respondsToSelector:original])
+        return ((id (*)(id, SEL, id, BOOL, id))objc_msgSend)(helper, original, model, NO, directory);
+    fail("ANE clone helper unavailable");
+    return nil;
+}
+
 static BOOL compileWithClones(id self, SEL command, id model, id options, unsigned qos, void *error) {
     NSDictionary *external = constants(model);
     NSDictionary *files = external[@"FileConstants"];
@@ -67,9 +80,7 @@ static BOOL compileWithClones(id self, SEL command, id model, id options, unsign
     NSMutableDictionary *replacement = [external mutableCopy];
     replacement[@"FileConstants"] = rewritten;
     ((void (*)(id, SEL, id))objc_msgSend)(model, NSSelectorFromString(@"setExternConstants:"), replacement);
-    id result = ((id (*)(id, SEL, id, BOOL, id))objc_msgSend)(NSClassFromString(@"_ANECloneHelper"),
-        NSSelectorFromString(@"cloneIfWritable:isEncryptedModel:cloneDirectory:"), model, NO,
-        [destination stringByAppendingPathComponent:@"preflight"]);
+    id result = preflight(model, [destination stringByAppendingPathComponent:@"preflight"]);
     if (!result || ![constants(model)[@"FileConstants"] isEqual:rewritten])
         fail("ANE clone helper changed external paths");
     BOOL ok = originalCompile(self, command, model, options, qos, error);
